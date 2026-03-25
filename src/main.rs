@@ -1,0 +1,135 @@
+#![deny(warnings)]
+
+mod db;
+mod projects;
+mod terminal;
+mod tmux;
+mod tmux_cc;
+mod web;
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use actix_web::{App, HttpServer};
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "agentdispatch", about = "Agent dispatch server")]
+struct Args {
+    /// Port to listen on
+    #[arg(short, long, default_value_t = 8915)]
+    port: u16,
+
+    /// Path to SQLite database file
+    #[arg(long, default_value = "agentdispatch.db")]
+    db: PathBuf,
+
+    /// Disable tmux (use direct shell for terminals)
+    #[arg(long)]
+    no_tmux: bool,
+
+    /// Kill tmux server and delete database before starting
+    #[arg(long)]
+    reset: bool,
+}
+
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    let args = Args::parse();
+
+    let use_tmux = !args.no_tmux;
+
+    if args.reset {
+        eprintln!("Resetting: killing tmux server and deleting database");
+        tmux::kill_server();
+        let _ = std::fs::remove_file(&args.db);
+        // Also remove WAL/SHM files
+        let mut wal = args.db.clone();
+        wal.set_extension("db-wal");
+        let _ = std::fs::remove_file(&wal);
+        let mut shm = args.db.clone();
+        shm.set_extension("db-shm");
+        let _ = std::fs::remove_file(&shm);
+    }
+
+    if use_tmux {
+        if !tmux::check_installed() {
+            eprintln!("Error: tmux is required but not found in PATH (use --no-tmux to disable)");
+            std::process::exit(1);
+        }
+    }
+
+    let conn = db::init_db(&args.db);
+    let db_arc = Arc::new(Mutex::new(conn));
+
+    // Reconcile tmux sessions on startup
+    if use_tmux {
+        let conn = db_arc.lock().unwrap();
+        let workspaces = db::list_workspaces(&conn);
+        let ws_ids: std::collections::HashSet<i64> = workspaces.iter().map(|w| w.id).collect();
+        for session_name in tmux::list_sessions() {
+            if let Some(id_str) = session_name.strip_prefix("ws-") {
+                // Kill stale linked sessions (ws-N--window-M) from previous server runs
+                if id_str.contains("--") {
+                    eprintln!("Killing stale linked session: {session_name}");
+                    tmux::kill_session(&session_name);
+                    continue;
+                }
+                // Kill orphan main sessions not in the DB
+                if let Ok(id) = id_str.parse::<i64>() {
+                    if !ws_ids.contains(&id) {
+                        eprintln!("Killing orphan tmux session: {session_name}");
+                        tmux::kill_session(&session_name);
+                    }
+                }
+            }
+        }
+    }
+
+    let (tx, _) = tokio::sync::broadcast::channel::<web::UpdateBatch>(64);
+
+    let build_hash = web::build_hash();
+    eprintln!("Build hash: {}", build_hash);
+
+    println!("http://localhost:{}", args.port);
+
+    let tx_data = actix_web::web::Data::new(tx);
+    let hash_data = actix_web::web::Data::new(build_hash);
+    let db_data = actix_web::web::Data::new(db_arc);
+    let tmux_data = actix_web::web::Data::new(use_tmux);
+    let output_history = actix_web::web::Data::new(
+        std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::<String, Vec<u8>>::new()
+        ))
+    );
+    HttpServer::new(move || {
+        App::new()
+            .app_data(tx_data.clone())
+            .app_data(hash_data.clone())
+            .app_data(db_data.clone())
+            .app_data(tmux_data.clone())
+            .app_data(output_history.clone())
+            .service(web::icon)
+            .service(web::app_js)
+            .service(web::index)
+            .service(web::events)
+            .service(terminal::ws_terminal)
+            .service(projects::list_projects)
+            .service(projects::create_project)
+            .service(projects::update_project)
+            .service(projects::launch_project)
+            .service(projects::list_branches)
+            .service(projects::delete_project)
+            .service(projects::list_workspaces)
+            .service(projects::rename_workspace)
+            .service(projects::delete_workspace)
+            .service(projects::create_tab)
+            .service(projects::update_tab)
+            .service(projects::delete_tab)
+            .service(projects::list_conda_envs)
+            .service(projects::check_git)
+    })
+    .bind(("127.0.0.1", args.port))?
+    .run()
+    .await
+}

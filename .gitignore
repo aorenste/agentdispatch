@@ -1,0 +1,7 @@
+/target
+Cargo.lock
+.claude/settings.local.json
+agentdispatch.db*
+node_modules/
+test-results/
+playwright-report/
