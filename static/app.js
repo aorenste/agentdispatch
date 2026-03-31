@@ -520,12 +520,12 @@ function renderSelectedWorkspace() {
 
   const tabButtons = ws.tabs.map(t => {
     const tabKey = 'tab-' + t.id;
-    return `<button class="ws-subtab ${_selectedWsSubtab === tabKey ? 'active' : ''}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span></span></button>`;
+    return `<button class="ws-subtab ${_selectedWsSubtab === tabKey ? 'active' : ''}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
   }).join('');
 
   main.innerHTML = `
     <div class="ws-subtabs">
-      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' ? 'active' : ''}" onclick="switchWsSubtab('agent')">${esc(agent)}</button>` : ''}
+      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' ? 'active' : ''}" onclick="switchWsSubtab('agent')">${esc(agent)}<span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span></button>` : ''}
       ${tabButtons}
       <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
     </div>
@@ -550,6 +550,12 @@ function renderSelectedWorkspace() {
     if (tab && tab.tab_type === 'shell') {
       initTerminal(tabId, paneEl, {cwd, workspaceId: ws.id, tabId: 'tab-' + tabId});
     }
+  }
+
+  // Restore altscreen badge state for all tabs
+  for (const [key, entry] of Object.entries(_tabTerminals)) {
+    const badge = document.getElementById('altscreen-' + key);
+    if (badge) badge.style.display = entry.altScreen ? 'inline' : 'none';
   }
 }
 
@@ -596,7 +602,7 @@ function initTerminal(key, paneEl, opts) {
   term.open(container);
   fitAddon.fit();
 
-  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null };
+  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false };
   _tabTerminals[key] = entry;
 
   function connectWs() {
@@ -622,6 +628,15 @@ function initTerminal(key, paneEl, opts) {
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) {
         term.write(new Uint8Array(e.data));
+      } else if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
+        try {
+          const msg = JSON.parse(e.data);
+          entry.altScreen = msg.active;
+          // Update the subtab indicator
+          const indicator = document.getElementById('altscreen-' + key);
+          if (indicator) indicator.style.display = msg.active ? 'inline' : 'none';
+        } catch {}
+        return;
       } else {
         term.write(e.data);
       }
@@ -641,20 +656,22 @@ function initTerminal(key, paneEl, opts) {
   entry.connectWs = connectWs;
   connectWs();
 
-  // Send Cmd+key as Meta+key for Emacs etc, except Cmd+C when text is selected (copy)
+  // In full-screen mode (emacs, vim): intercept Cmd+key and send as Meta+key.
+  // In normal mode (shell, Claude): let all Cmd+key pass through to the browser
+  // for native copy/paste/undo/etc behavior.
   const _shiftMap = {',':'<', '.':'>', '/':'?', ';':':', "'":'"', '[':'{', ']':'}',
     '\\':'|', '`':'~', '1':'!', '2':'@', '3':'#', '4':'$', '5':'%', '6':'^',
     '7':'&', '8':'*', '9':'(', '0':')', '-':'_', '=':'+'};
   term.attachCustomKeyEventHandler((e) => {
     if (e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (!entry.altScreen) return true; // let browser handle it
       let key = e.key;
-      // Chrome/Mac: Cmd+Shift+key reports unshifted e.key, fix it
       if (e.shiftKey && key.length === 1 && _shiftMap[key]) {
         key = _shiftMap[key];
       } else if (e.shiftKey && key.length === 1) {
         key = key.toUpperCase();
       }
-      // Let Cmd+C pass through to browser for copy when there's a selection
+      // Still let Cmd+C copy when there's a selection
       if (key.toLowerCase() === 'c' && term.hasSelection()) return true;
       if (key.length === 1) {
         if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {

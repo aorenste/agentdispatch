@@ -71,12 +71,33 @@ fn parse_output_line(line: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&rest[..space_pos], &rest[space_pos + 1..]))
 }
 
+/// Scan raw terminal data for the final alternate screen state.
+/// Returns true if the last alternate screen sequence in `data` is an enable.
+pub fn scan_alt_screen(data: &[u8]) -> bool {
+    let mut alt = false;
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == 0x1b && i + 4 < data.len() && data[i + 1] == b'[' && data[i + 2] == b'?' {
+            if data[i + 3..].starts_with(b"1049h") { alt = true; i += 8; continue; }
+            if data[i + 3..].starts_with(b"1049l") { alt = false; i += 8; continue; }
+            if data[i + 3..].starts_with(b"1047h") { alt = true; i += 8; continue; }
+            if data[i + 3..].starts_with(b"1047l") { alt = false; i += 8; continue; }
+            if data[i + 3..].starts_with(b"47h") { alt = true; i += 6; continue; }
+            if data[i + 3..].starts_with(b"47l") { alt = false; i += 6; continue; }
+        }
+        i += 1;
+    }
+    alt
+}
+
 // -- CcReader: protocol parser --
 
 /// Events produced by `CcReader` when parsing tmux control mode output.
 pub enum CcEvent {
     /// Decoded terminal output bytes for the target pane.
-    Output(Vec<u8>),
+    /// `alternate_screen` is true when the app inside the pane has switched
+    /// to the alternate screen buffer (emacs, vim, less — but NOT Claude).
+    Output { data: Vec<u8>, alternate_screen: bool },
     /// The tmux control client is exiting.
     Exit,
 }
@@ -91,6 +112,7 @@ pub struct CcReader {
     dcs_stripped: bool,
     pane_id: String,
     saw_exit: bool,
+    alternate_screen: bool,
 }
 
 impl CcReader {
@@ -100,6 +122,31 @@ impl CcReader {
             dcs_stripped: false,
             pane_id,
             saw_exit: false,
+            alternate_screen: false,
+        }
+    }
+
+    /// Whether the app in the pane is currently using the alternate screen buffer.
+    #[allow(dead_code)]
+    pub fn alternate_screen(&self) -> bool {
+        self.alternate_screen
+    }
+
+    /// Scan decoded output for alternate screen enable/disable sequences.
+    /// Processes left-to-right so the last occurrence in the data wins.
+    fn scan_alternate_screen(&mut self, data: &[u8]) {
+        let mut i = 0;
+        while i < data.len() {
+            if data[i] == 0x1b && i + 4 < data.len() && data[i + 1] == b'[' && data[i + 2] == b'?' {
+                // Check for \e[?1049h/l, \e[?1047h/l, \e[?47h/l
+                if data[i + 3..].starts_with(b"1049h") { self.alternate_screen = true; i += 8; continue; }
+                if data[i + 3..].starts_with(b"1049l") { self.alternate_screen = false; i += 8; continue; }
+                if data[i + 3..].starts_with(b"1047h") { self.alternate_screen = true; i += 8; continue; }
+                if data[i + 3..].starts_with(b"1047l") { self.alternate_screen = false; i += 8; continue; }
+                if data[i + 3..].starts_with(b"47h") { self.alternate_screen = true; i += 6; continue; }
+                if data[i + 3..].starts_with(b"47l") { self.alternate_screen = false; i += 6; continue; }
+            }
+            i += 1;
         }
     }
 
@@ -134,7 +181,12 @@ impl CcReader {
                     if pid == self.pane_id.as_bytes() {
                         let decoded = decode_output(value);
                         if !decoded.is_empty() {
-                            return Some(CcEvent::Output(decoded));
+                            // Track alternate screen switches
+                            self.scan_alternate_screen(&decoded);
+                            return Some(CcEvent::Output {
+                                data: decoded,
+                                alternate_screen: self.alternate_screen,
+                            });
                         }
                     }
                 }
@@ -262,7 +314,7 @@ mod tests {
         let mut r = CcReader::new("%0".to_string());
         r.feed(b"%output %0 hello\\015\\012\r\n");
         match r.next_event() {
-            Some(CcEvent::Output(data)) => assert_eq!(data, b"hello\r\n"),
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"hello\r\n"),
             other => panic!("expected Output, got {:?}", other.is_some()),
         }
         assert!(r.next_event().is_none());
@@ -273,7 +325,7 @@ mod tests {
         let mut r = CcReader::new("%0".to_string());
         r.feed(b"%output %1 ignored\r\n%output %0 mine\r\n");
         match r.next_event() {
-            Some(CcEvent::Output(data)) => assert_eq!(data, b"mine"),
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"mine"),
             other => panic!("expected Output for %0, got {:?}", other.is_some()),
         }
         assert!(r.next_event().is_none());
@@ -294,7 +346,7 @@ mod tests {
         assert!(r.next_event().is_none());
         r.feed(b"lo\r\n");
         match r.next_event() {
-            Some(CcEvent::Output(data)) => assert_eq!(data, b"hello"),
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"hello"),
             other => panic!("expected Output, got {:?}", other.is_some()),
         }
     }
@@ -304,7 +356,7 @@ mod tests {
         let mut r = CcReader::new("%0".to_string());
         r.feed(b"%begin 123 0 0\r\n%end 123 0 0\r\n%session-changed $0 foo\r\n%output %0 data\r\n");
         match r.next_event() {
-            Some(CcEvent::Output(data)) => assert_eq!(data, b"data"),
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
             other => panic!("expected Output, got {:?}", other.is_some()),
         }
     }
@@ -314,8 +366,57 @@ mod tests {
         let mut r = CcReader::new("%0".to_string());
         r.feed(b"\x1bP1000p%begin 123 0 0\r\n%end 123 0 0\r\n%output %0 ok\r\n");
         match r.next_event() {
-            Some(CcEvent::Output(data)) => assert_eq!(data, b"ok"),
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"ok"),
             other => panic!("expected Output, got {:?}", other.is_some()),
+        }
+    }
+
+    // -- alternate screen tracking --
+
+    #[test]
+    fn test_reader_alternate_screen_enable() {
+        let mut r = CcReader::new("%0".to_string());
+        assert!(!r.alternate_screen());
+        // \e[?1049h encoded as octal in %output
+        r.feed(b"%output %0 \\033[?1049h\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { alternate_screen, .. }) => assert!(alternate_screen),
+            _ => panic!("expected Output"),
+        }
+        assert!(r.alternate_screen());
+    }
+
+    #[test]
+    fn test_reader_alternate_screen_disable() {
+        let mut r = CcReader::new("%0".to_string());
+        // Enable then disable
+        r.feed(b"%output %0 \\033[?1049h\r\n%output %0 \\033[?1049l\r\n");
+        r.next_event(); // enable
+        match r.next_event() {
+            Some(CcEvent::Output { alternate_screen, .. }) => assert!(!alternate_screen),
+            _ => panic!("expected Output"),
+        }
+        assert!(!r.alternate_screen());
+    }
+
+    #[test]
+    fn test_reader_alternate_screen_not_triggered_by_normal_output() {
+        let mut r = CcReader::new("%0".to_string());
+        r.feed(b"%output %0 hello world\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { alternate_screen, .. }) => assert!(!alternate_screen),
+            _ => panic!("expected Output"),
+        }
+    }
+
+    #[test]
+    fn test_reader_alternate_screen_last_wins() {
+        let mut r = CcReader::new("%0".to_string());
+        // disable then enable in same chunk — enable should win
+        r.feed(b"%output %0 \\033[?1049l\\015\\033[?1049h\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { alternate_screen, .. }) => assert!(alternate_screen),
+            _ => panic!("expected Output"),
         }
     }
 

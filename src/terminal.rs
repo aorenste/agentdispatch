@@ -340,9 +340,18 @@ fn spawn_cc_bridge(
         use std::io::Read;
 
         // Replay accumulated output history (reconnect replay)
+        let mut last_alt_screen = false;
         if let Some(content) = initial_content {
             if !content.is_empty() {
+                // Determine alternate screen state from replayed content
+                last_alt_screen = tmux_cc::scan_alt_screen(&content);
                 if session_clone.binary(content).await.is_err() {
+                    let _ = session_clone.close(None).await;
+                    return;
+                }
+                // Send initial altscreen state to browser
+                let msg = format!("{{\"type\":\"altscreen\",\"active\":{last_alt_screen}}}");
+                if session_clone.text(msg).await.is_err() {
                     let _ = session_clone.close(None).await;
                     return;
                 }
@@ -370,7 +379,7 @@ fn spawn_cc_bridge(
                             reader.feed(&raw_buf[..n]);
                             while let Some(event) = reader.next_event() {
                                 match event {
-                                    CcEvent::Output(decoded) => {
+                                    CcEvent::Output { data: decoded, alternate_screen } => {
                                         if let Ok(mut map) = output_history.lock() {
                                             map.entry(history_key.clone())
                                                 .or_default()
@@ -378,6 +387,14 @@ fn spawn_cc_bridge(
                                         }
                                         if session_clone.binary(decoded).await.is_err() {
                                             break 'outer;
+                                        }
+                                        // Notify browser of alternate screen state changes
+                                        if alternate_screen != last_alt_screen {
+                                            last_alt_screen = alternate_screen;
+                                            let msg = format!("{{\"type\":\"altscreen\",\"active\":{alternate_screen}}}");
+                                            if session_clone.text(msg).await.is_err() {
+                                                break 'outer;
+                                            }
                                         }
                                     }
                                     CcEvent::Exit => break 'outer,
