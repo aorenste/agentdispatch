@@ -9,12 +9,20 @@
 - Node.js 18+ is required for tests. On this machine use:
   `export PATH="/home/aorenste/.conda/envs/rust/bin:$PATH"`
 
+## Bug fixing workflow
+
+**ALWAYS write a failing test FIRST, then fix the bug.** Do not fix the bug
+before you have a test that reproduces it. Verify the test fails without your
+fix and passes with it. This is non-negotiable.
+
 ## Testing
 
 - `CARGO_TARGET_DIR=target/test cargo test` for Rust + JS unit tests
 - Playwright E2E tests use `target/test` automatically (configured in playwright.config.js)
 - The E2E test runner (`test_e2e_playwright`) wraps npx in `timeout 60` because
   Playwright can hang on exit due to tmux child processes
+- E2E tests use a separate tmux socket (`agentdispatch-test` via env var
+  `AGENTDISPATCH_TMUX_SOCKET`) to avoid killing the user's real sessions
 
 ## tmux
 

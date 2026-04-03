@@ -627,29 +627,17 @@ function initTerminal(key, paneEl, opts) {
 
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) {
-        // Check if viewport is at bottom BEFORE writing
-        const buf = term.buffer.active;
-        const wasAtBottom = buf.viewportY >= buf.baseY;
-        term.write(new Uint8Array(e.data), () => {
-          if (wasAtBottom) term.scrollToBottom();
-        });
-        return;
+        term.write(new Uint8Array(e.data));
       } else if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
         try {
           const msg = JSON.parse(e.data);
           entry.altScreen = msg.active;
-          // Update the subtab indicator
           const indicator = document.getElementById('altscreen-' + key);
           if (indicator) indicator.style.display = msg.active ? 'inline' : 'none';
         } catch {}
         return;
       } else {
-        const buf = term.buffer.active;
-        const wasAtBottom = buf.viewportY >= buf.baseY;
-        term.write(e.data, () => {
-          if (wasAtBottom) term.scrollToBottom();
-        });
-        return;
+        term.write(e.data);
       }
     };
 
@@ -716,7 +704,19 @@ function initTerminal(key, paneEl, opts) {
     }
   });
 
-  const resizeObserver = new ResizeObserver(() => fitAddon.fit());
+  let fitTimer = null;
+  const resizeObserver = new ResizeObserver(() => {
+    // Debounce fit to avoid rapid-fire resizes that disrupt the viewport
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(() => {
+      const buf = term.buffer.active;
+      const wasAtBottom = buf.viewportY >= buf.baseY;
+      fitAddon.fit();
+      if (wasAtBottom) {
+        term.scrollToBottom();
+      }
+    }, 100);
+  });
   resizeObserver.observe(container);
   entry.resizeObserver = resizeObserver;
 
