@@ -90,6 +90,29 @@ pub fn scan_alt_screen(data: &[u8]) -> bool {
     alt
 }
 
+/// Strip mouse tracking enable/disable sequences from terminal data.
+/// Removes \e[?1000h/l, \e[?1002h/l, \e[?1003h/l, \e[?1006h/l.
+fn strip_mouse_tracking(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == 0x1b && i + 4 < data.len() && data[i + 1] == b'[' && data[i + 2] == b'?' {
+            let rest = &data[i + 3..];
+            if rest.starts_with(b"1000h") || rest.starts_with(b"1000l")
+                || rest.starts_with(b"1002h") || rest.starts_with(b"1002l")
+                || rest.starts_with(b"1003h") || rest.starts_with(b"1003l")
+                || rest.starts_with(b"1006h") || rest.starts_with(b"1006l")
+            {
+                i += 8; // \e[?NNNNx = 8 bytes
+                continue;
+            }
+        }
+        result.push(data[i]);
+        i += 1;
+    }
+    result
+}
+
 // -- CcReader: protocol parser --
 
 /// Events produced by `CcReader` when parsing tmux control mode output.
@@ -188,10 +211,16 @@ impl CcReader {
                         if !decoded.is_empty() {
                             // Track alternate screen switches
                             self.scan_alternate_screen(&decoded);
-                            return Some(CcEvent::Output {
-                                data: decoded,
-                                alternate_screen: self.alternate_screen,
-                            });
+                            // Strip mouse tracking sequences so xterm.js never
+                            // enters mouse mode (prevents mouse events from
+                            // being forwarded to apps via the PTY).
+                            let cleaned = strip_mouse_tracking(&decoded);
+                            if !cleaned.is_empty() {
+                                return Some(CcEvent::Output {
+                                    data: cleaned,
+                                    alternate_screen: self.alternate_screen,
+                                });
+                            }
                         }
                     }
                 }
@@ -423,6 +452,56 @@ mod tests {
             Some(CcEvent::Output { alternate_screen, .. }) => assert!(alternate_screen),
             _ => panic!("expected Output"),
         }
+    }
+
+    // -- mouse tracking stripped from output --
+
+    #[test]
+    fn test_reader_strips_mouse_tracking_from_output() {
+        let mut r = CcReader::new("%0".to_string());
+        // Feed %output containing mouse tracking enable sequences
+        // (as tmux would send when emacs enables mouse)
+        r.feed(b"%output %0 \\033[?1000h\\033[?1002h\\033[?1006hHello\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { data, .. }) => {
+                // The output should NOT contain mouse tracking sequences
+                assert!(!data.windows(8).any(|w| w == b"\x1b[?1000h"),
+                    "output should not contain \\e[?1000h: {:?}", String::from_utf8_lossy(&data));
+                assert!(!data.windows(8).any(|w| w == b"\x1b[?1002h"),
+                    "output should not contain \\e[?1002h");
+                assert!(!data.windows(8).any(|w| w == b"\x1b[?1006h"),
+                    "output should not contain \\e[?1006h");
+                // But the actual content should still be there
+                assert!(data.windows(5).any(|w| w == b"Hello"),
+                    "output should still contain Hello");
+            }
+            _ => panic!("expected Output"),
+        }
+    }
+
+    // -- strip_mouse_tracking --
+
+    #[test]
+    fn test_strip_mouse_tracking() {
+        assert_eq!(strip_mouse_tracking(b"\x1b[?1000h"), b"");
+        assert_eq!(strip_mouse_tracking(b"\x1b[?1002h"), b"");
+        assert_eq!(strip_mouse_tracking(b"\x1b[?1003h"), b"");
+        assert_eq!(strip_mouse_tracking(b"\x1b[?1006h"), b"");
+        assert_eq!(strip_mouse_tracking(b"\x1b[?1000l"), b"");
+    }
+
+    #[test]
+    fn test_strip_mouse_preserves_other() {
+        assert_eq!(strip_mouse_tracking(b"hello"), b"hello");
+        assert_eq!(strip_mouse_tracking(b"\x1b[31m"), b"\x1b[31m"); // color
+        assert_eq!(strip_mouse_tracking(b"\x1b[?1049h"), b"\x1b[?1049h"); // alt screen kept
+    }
+
+    #[test]
+    fn test_strip_mouse_mixed() {
+        let input = b"\x1b[?1049h\x1b[?1000h\x1b[?1002hHello\x1b[?1006h";
+        let expected = b"\x1b[?1049hHello";
+        assert_eq!(strip_mouse_tracking(input), expected);
     }
 
     // -- CcWriter --

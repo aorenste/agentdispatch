@@ -225,3 +225,135 @@ test('Cmd+key is intercepted as Meta+key in full-screen mode', async ({ page }) 
   // Quit less
   await page.keyboard.press('q');
 });
+
+test('mouse events do not reach the app in full-screen mode', async ({ page }) => {
+  test.setTimeout(15000);
+  await connectToTerminal(page);
+
+  // Run a script that logs any input it receives
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type("cat > /tmp/mouse_test_input &\nCATPID=$!\nless /etc/passwd\n", { delay: 10 });
+  await page.waitForTimeout(1000);
+
+  // Verify we're in full-screen mode
+  const state = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    return e ? e.altScreen : null;
+  }, tabId);
+  expect(state).toBe(true);
+
+  // Click in the terminal area
+  const screen = page.locator('.xterm-screen');
+  const box = await screen.boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(200);
+
+  // Scroll the mouse wheel
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  for (let i = 0; i < 5; i++) {
+    await page.mouse.wheel(0, -100);
+  }
+  await page.waitForTimeout(500);
+
+  // Record the buffer content BEFORE the mouse events would take effect.
+  // In less, mouse clicks move the cursor and wheel scrolls. If mouse
+  // events are leaking through, the display would change.
+  // Check: the first visible line should still be the first line of /etc/passwd
+  const firstLine = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return '';
+    const buf = e.term.buffer.active;
+    // less shows the file from the top — first line should be "root:"
+    const line = buf.getLine(0);
+    return line ? line.translateToString().trim() : '';
+  }, tabId);
+
+  // If mouse wheel events leaked to less, it would have scrolled and
+  // the first line would no longer be the start of the file
+  expect(firstLine).toContain('root');
+
+  // Quit less and clean up
+  await page.keyboard.press('q');
+  await page.waitForTimeout(200);
+  await page.keyboard.type('kill $CATPID 2>/dev/null; rm -f /tmp/mouse_test_input\n', { delay: 5 });
+});
+
+test('mouse tracking sequences from apps do not enable xterm.js mouse mode', async ({ page }) => {
+  test.setTimeout(15000);
+  await connectToTerminal(page);
+
+  // Run a script that enables mouse tracking (like emacs does) then waits
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type(
+    "cat > /tmp/mouse_track.sh << 'SCRIPT'\n#!/bin/bash\nprintf '\\e[?1049h\\e[?1000h\\e[?1002h\\e[?1006h'\nprintf '\\e[HMOUSE_TRACK_TEST\\n'\nread -r line\nprintf '\\e[?1006l\\e[?1002l\\e[?1000l\\e[?1049l'\nSCRIPT\nbash /tmp/mouse_track.sh\n",
+    { delay: 5 }
+  );
+  await page.waitForTimeout(1000);
+
+  // Check: did xterm.js enter mouse tracking mode?
+  const mouseMode = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return null;
+    // xterm.js internal: check if mouse tracking is enabled
+    try {
+      const modes = e.term._core._inputHandler._coreService.decPrivateModes;
+      return {
+        mouseTrackingMode: modes.mouseTrackingMode,
+        sendFocus: modes.sendFocus,
+      };
+    } catch (err) {
+      return { error: err.message };
+    }
+  }, tabId);
+  console.log('Mouse tracking mode:', JSON.stringify(mouseMode));
+
+  // Mouse tracking sequences should be stripped so xterm.js never enters
+  // mouse mode. This prevents mouse events from being forwarded to apps.
+
+  // First verify the script is running
+  const hasMarker = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line && line.translateToString().includes('MOUSE_TRACK_TEST')) return true;
+    }
+    return false;
+  }, tabId);
+  expect(hasMarker).toBeTruthy();
+
+  // Click in the terminal — if mouse tracking is active in xterm.js,
+  // this would send escape sequences to the PTY, which the script's
+  // `read` would consume, causing it to exit and print the disable sequences.
+  const screen = page.locator('.xterm-screen');
+  const box = await screen.boundingBox();
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(500);
+
+  // Also wheel
+  await page.mouse.wheel(0, -200);
+  await page.waitForTimeout(500);
+
+  // The script should still be running (read hasn't received input).
+  // If mouse events leaked, the read would have consumed them and the
+  // script would have exited, removing MOUSE_TRACK_TEST from screen.
+  const stillHasMarker = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line && line.translateToString().includes('MOUSE_TRACK_TEST')) return true;
+    }
+    return false;
+  }, tabId);
+  expect(stillHasMarker).toBeTruthy();
+
+  // Clean up: send Enter to exit the read, then clean up
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  await page.keyboard.type('rm -f /tmp/mouse_track.sh\n', { delay: 5 });
+});
