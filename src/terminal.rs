@@ -82,19 +82,18 @@ pub async fn ws_terminal(
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = tid.clone();
         history_key = format!("{tmux_session}:{tmux_window}");
-        let cwd_str = cwd.as_deref().unwrap_or("/tmp");
 
-        // Ensure tmux session+window exist
+        // Sessions/windows are created by launch_project and create_tab.
+        // The terminal handler only attaches to existing ones.
         if !tmux::has_session(&tmux_session) {
-            tmux::new_session(&tmux_session, &tmux_window, cwd_str, cmd.as_deref())
-                .map_err(|e| actix_web::error::ErrorInternalServerError(
-                    format!("Failed to create tmux session: {e}"),
-                ))?;
-        } else if !tmux::has_window(&tmux_session, &tmux_window) {
-            tmux::new_window(&tmux_session, &tmux_window, cwd_str, cmd.as_deref())
-                .map_err(|e| actix_web::error::ErrorInternalServerError(
-                    format!("Failed to create tmux window: {e}"),
-                ))?;
+            return Err(actix_web::error::ErrorNotFound(
+                format!("tmux session {tmux_session} not found — workspace may need to be relaunched"),
+            ));
+        }
+        if !tmux::has_window(&tmux_session, &tmux_window) {
+            return Err(actix_web::error::ErrorNotFound(
+                format!("tmux window {tmux_window} not found in {tmux_session}"),
+            ));
         }
 
         let (c, a, pane_id, link_name) = tmux::attach_args(&tmux_session, &tmux_window)

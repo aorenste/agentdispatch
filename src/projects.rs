@@ -6,6 +6,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 
 use crate::db;
+use crate::terminal::UseTmux;
 use crate::tmux;
 
 pub type Db = web::Data<Arc<Mutex<Connection>>>;
@@ -122,6 +123,7 @@ pub async fn launch_project(
     db: Db,
     path: web::Path<String>,
     body: web::Json<LaunchRequest>,
+    use_tmux: UseTmux,
 ) -> HttpResponse {
     let project_name = path.into_inner();
 
@@ -154,6 +156,9 @@ pub async fn launch_project(
     // Spawn worktree creation in background
     if needs_worktree {
         let root_dir = project.root_dir.clone();
+        let agent_str = project.agent.clone();
+        let project_clone = project.clone();
+        let use_tmux_val = **use_tmux;
         let wt_name = generate_worktree_name();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let base = std::path::PathBuf::from(&home).join("local/worktrees");
@@ -192,6 +197,18 @@ pub async fn launch_project(
             match result {
                 Ok(Ok(path)) => {
                     db::update_workspace_status(&conn, ws_id, "ready", Some(&path));
+                    // Create tmux session in the worktree directory
+                    if use_tmux_val {
+                        let tmux_session = format!("ws-{ws_id}");
+                        let agent = normalize_agent(&agent_str).unwrap_or("Claude");
+                        let agent_cmd = build_agent_command(agent, &project_clone);
+                        if let Err(e) = tmux::new_session(
+                            &tmux_session, "agent", &path,
+                            if agent != "None" { Some(&agent_cmd) } else { None },
+                        ) {
+                            eprintln!("Failed to create tmux session for workspace {ws_id}: {e}");
+                        }
+                    }
                 }
                 Ok(Err(e)) => {
                     eprintln!("Worktree creation failed for workspace {ws_id}: {e}");
@@ -204,6 +221,22 @@ pub async fn launch_project(
             }
         });
     }
+
+    // Create tmux session with agent window (if tmux is enabled and agent is not None)
+    if **use_tmux && !needs_worktree {
+        let tmux_session = format!("ws-{}", ws.id);
+        let cwd = &project.root_dir;
+        let agent = normalize_agent(&project.agent).unwrap_or("Claude");
+        let agent_cmd = build_agent_command(agent, &project);
+
+        if let Err(e) = tmux::new_session(
+            &tmux_session, "agent", cwd,
+            if agent != "None" { Some(&agent_cmd) } else { None },
+        ) {
+            eprintln!("Failed to create tmux session for workspace {}: {e}", ws.id);
+        }
+    }
+    // For git worktree projects, tmux session is created after worktree setup (below)
 
     HttpResponse::Ok().json(ws)
 }
@@ -340,6 +373,20 @@ pub struct CreateTabRequest {
     tab_type: String,
 }
 
+fn build_agent_command(agent: &str, project: &db::Project) -> String {
+    let mut cmd = if agent == "Codex" { "codex".to_string() } else { "claude".to_string() };
+    if (agent == "Claude" || agent == "Codex") && project.claude_internet {
+        cmd.push_str(" --dangerously-enable-internet-mode");
+    }
+    if agent == "Claude" && project.claude_skip_permissions {
+        cmd.push_str(" --dangerously-skip-permissions");
+    }
+    if !project.conda_env.is_empty() {
+        cmd = format!("conda activate {} && {}", project.conda_env, cmd);
+    }
+    cmd
+}
+
 fn default_shell() -> String { "shell".to_string() }
 
 #[post("/api/workspaces/{id}/tabs")]
@@ -347,10 +394,33 @@ pub async fn create_tab(
     db: Db,
     path: web::Path<i64>,
     body: web::Json<CreateTabRequest>,
+    use_tmux: UseTmux,
 ) -> HttpResponse {
     let ws_id = path.into_inner();
     let conn = db.lock().unwrap();
     let tab = db::add_workspace_tab(&conn, ws_id, &body.name, &body.tab_type);
+
+    // Create tmux window for the new tab
+    if **use_tmux {
+        let tmux_session = format!("ws-{ws_id}");
+        let tmux_window = format!("tab-{}", tab.id);
+        if tmux::has_session(&tmux_session) {
+            // Get the workspace's cwd
+            let cwd = db::get_workspace(&conn, ws_id)
+                .and_then(|ws| {
+                    ws.worktree_dir.or_else(|| {
+                        db::list_projects(&conn).into_iter()
+                            .find(|p| p.name == ws.project)
+                            .map(|p| p.root_dir)
+                    })
+                })
+                .unwrap_or_else(|| "/tmp".to_string());
+            if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &cwd, None) {
+                eprintln!("Failed to create tmux window tab-{}: {e}", tab.id);
+            }
+        }
+    }
+
     HttpResponse::Ok().json(tab)
 }
 
@@ -529,6 +599,10 @@ mod tests {
     fn test_app_data() -> actix_web::web::Data<Arc<Mutex<rusqlite::Connection>>> {
         let conn = crate::db::init_db(std::path::Path::new(":memory:"));
         actix_web::web::Data::new(Arc::new(Mutex::new(conn)))
+    }
+
+    fn test_tmux_data() -> actix_web::web::Data<bool> {
+        actix_web::web::Data::new(false) // tmux disabled in tests
     }
 
     #[actix_web::test]
@@ -761,6 +835,7 @@ mod tests {
         let app = actix_web::test::init_service(
             App::new()
                 .app_data(db.clone())
+                .app_data(test_tmux_data())
                 .service(create_tab)
                 .service(update_tab)
                 .service(delete_tab)
@@ -811,7 +886,7 @@ mod tests {
     async fn test_launch_project_not_found() {
         let db = test_app_data();
         let app = actix_web::test::init_service(
-            App::new().app_data(db).service(launch_project),
+            App::new().app_data(db).app_data(test_tmux_data()).service(launch_project),
         )
         .await;
 
@@ -829,6 +904,7 @@ mod tests {
         let app = actix_web::test::init_service(
             App::new()
                 .app_data(db.clone())
+                .app_data(test_tmux_data())
                 .service(launch_project)
                 .service(list_workspaces),
         )
@@ -859,7 +935,7 @@ mod tests {
     async fn test_launch_project_custom_name() {
         let db = test_app_data();
         let app = actix_web::test::init_service(
-            App::new().app_data(db.clone()).service(launch_project),
+            App::new().app_data(db.clone()).app_data(test_tmux_data()).service(launch_project),
         )
         .await;
 

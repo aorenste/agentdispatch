@@ -555,6 +555,7 @@ function renderSelectedWorkspace() {
   // Restore altscreen badge state for all tabs
   for (const [key, entry] of Object.entries(_tabTerminals)) {
     const badge = document.getElementById('altscreen-' + key);
+    if (entry.altScreen) console.log('restore badge:', key, 'altScreen:', entry.altScreen, 'badge:', !!badge);
     if (badge) badge.style.display = entry.altScreen ? 'inline' : 'none';
   }
 }
@@ -624,10 +625,15 @@ function initTerminal(key, paneEl, opts) {
       term.focus();
     };
 
-    let initialScroll = true;
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) {
-        term.write(new Uint8Array(e.data));
+        // Check if viewport is at bottom BEFORE writing
+        const buf = term.buffer.active;
+        const wasAtBottom = buf.viewportY >= buf.baseY;
+        term.write(new Uint8Array(e.data), () => {
+          if (wasAtBottom) term.scrollToBottom();
+        });
+        return;
       } else if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
         try {
           const msg = JSON.parse(e.data);
@@ -638,13 +644,21 @@ function initTerminal(key, paneEl, opts) {
         } catch {}
         return;
       } else {
-        term.write(e.data);
+        const buf = term.buffer.active;
+        const wasAtBottom = buf.viewportY >= buf.baseY;
+        term.write(e.data, () => {
+          if (wasAtBottom) term.scrollToBottom();
+        });
+        return;
       }
-      // Scroll to bottom once after the initial reconnect redraw data
-      if (initialScroll) {
-        initialScroll = false;
-        setTimeout(() => term.scrollToBottom(), 100);
-      }
+    };
+
+    ws.onerror = () => {
+      const overlay = document.createElement('div');
+      overlay.className = 'pane-error-overlay';
+      overlay.textContent = 'Connection failed — session may no longer exist.';
+      container.style.position = 'relative';
+      container.appendChild(overlay);
     };
 
     ws.onclose = () => {

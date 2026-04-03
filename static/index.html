@@ -350,6 +350,22 @@
   .ws-pane { display: none; flex: 1; padding: 4px; overflow: hidden; min-height: 0; background: #000; }
   .ws-pane.active { display: flex; flex-direction: column; }
 
+  .pane-error-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(248, 113, 113, 0.15);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    z-index: 10;
+    pointer-events: none;
+  }
+
   .altscreen-badge {
     font-size: 9px;
     font-weight: 700;
