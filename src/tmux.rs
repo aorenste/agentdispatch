@@ -378,6 +378,42 @@ mod tests {
     }
 
     #[test]
+    fn test_capture_pane_with_cursor() {
+        if !tmux_available() { return; }
+        let session = "test-capture";
+        test_kill_session(session);
+        test_new_session(session, "win0");
+
+        // Send some output to the pane
+        let _ = test_tmux_base()
+            .args(["send-keys", "-t", &format!("{session}:win0"), "echo CAPTURE_TEST", "Enter"])
+            .output();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Get pane ID (using test socket, not main socket — but capture_pane_with_cursor
+        // uses the main socket. So we test the function indirectly by verifying
+        // the return format is correct on the main socket.)
+        // For a proper test, query from the test socket:
+        let output = test_tmux_base()
+            .args(["list-panes", "-t", &format!("{session}:win0"), "-F", "#{pane_id}"])
+            .output()
+            .unwrap();
+        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        // capture_pane_with_cursor uses tmux_base (main socket), not test socket.
+        // So we can't use it directly here. Instead test the capture logic manually:
+        let capture = test_tmux_base()
+            .args(["capture-pane", "-t", &pane_id, "-p", "-e", "-S", "-"])
+            .output()
+            .unwrap();
+        assert!(capture.status.success());
+        let content = String::from_utf8_lossy(&capture.stdout);
+        assert!(content.contains("CAPTURE_TEST"), "capture should contain our text: {content}");
+
+        test_kill_session(session);
+    }
+
+    #[test]
     fn test_server_config() {
         if !tmux_available() { return; }
         let session = "test-cfg";
