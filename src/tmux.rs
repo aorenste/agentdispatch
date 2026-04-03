@@ -222,6 +222,73 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
+/// Capture the current visible content of a pane with cursor position.
+/// Falls back for reconnect when output history is unavailable (server restart).
+pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
+    let content = tmux_base()
+        .args(["capture-pane", "-t", pane_id, "-p", "-e", "-S", "-"])
+        .output()
+        .ok()?;
+    if !content.status.success() {
+        return None;
+    }
+
+    let cursor = tmux_base()
+        .args(["list-panes", "-t", pane_id, "-F", "#{cursor_x} #{cursor_y} #{cursor_flag} #{history_size}"])
+        .output()
+        .ok()?;
+
+    let mut result = Vec::new();
+    let mut stdout = content.stdout.as_slice();
+    if stdout.last() == Some(&b'\n') {
+        stdout = &stdout[..stdout.len() - 1];
+    }
+    result.extend_from_slice(b"\x1b[H");
+    for &byte in stdout {
+        if byte == b'\n' {
+            result.extend_from_slice(b"\r\n");
+        } else {
+            result.push(byte);
+        }
+    }
+
+    if cursor.status.success() {
+        let cursor_str = String::from_utf8_lossy(&cursor.stdout);
+        if let Some(line) = cursor_str.lines().next() {
+            let parts: Vec<&str> = line.trim().split(' ').collect();
+            if parts.len() >= 2 {
+                if let (Ok(x), Ok(y)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                    let history = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                    let abs_y = y + history;
+                    result.extend_from_slice(format!("\x1b[{};{}H", abs_y + 1, x + 1).as_bytes());
+                }
+                let visible = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+                if visible == 0 {
+                    result.extend_from_slice(b"\x1b[?25l");
+                } else {
+                    result.extend_from_slice(b"\x1b[?25h");
+                }
+            }
+        }
+    }
+
+    Some(result)
+}
+
+/// Query whether a pane is currently in alternate screen mode.
+pub fn is_alternate_screen(session: &str, window: &str) -> bool {
+    let target = format!("{session}:{window}");
+    let output = tmux_base()
+        .args(["list-panes", "-t", &target, "-F", "#{alternate_on}"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).trim() == "1"
+        }
+        _ => false,
+    }
+}
+
 /// Check that tmux is available, and clean up any stale socket.
 pub fn check_installed() -> bool {
     let ok = Command::new("tmux")

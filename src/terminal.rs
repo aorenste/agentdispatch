@@ -55,7 +55,7 @@ enum SessionMode {
     /// Direct shell — raw PTY passthrough
     Direct,
     /// tmux control mode — parse %output, send-keys -H
-    TmuxControl { pane_id: String, link_name: String },
+    TmuxControl { pane_id: String, link_name: String, initial_alt_screen: bool },
 }
 
 #[get("/api/terminal")]
@@ -100,7 +100,8 @@ pub async fn ws_terminal(
             .map_err(|e| actix_web::error::ErrorInternalServerError(
                 format!("Failed to attach to tmux: {e}"),
             ))?;
-        (c, a, SessionMode::TmuxControl { pane_id, link_name })
+        let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
+        (c, a, SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen })
     } else {
         // Direct shell (no tmux)
         let shell = user_shell();
@@ -198,18 +199,19 @@ pub async fn ws_terminal(
         SessionMode::Direct => {
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
-        SessionMode::TmuxControl { pane_id, link_name } => {
-            // Replay accumulated output history for this pane (reconnect replay)
+        SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen } => {
+            // Replay content on reconnect. Prefer output history (survives within
+            // a server session) but fall back to capture-pane (survives server restart).
             let initial_content = {
                 let map = output_history.lock().unwrap();
                 map.get(&history_key).cloned()
-            };
+            }.or_else(|| tmux::capture_pane_with_cursor(&pane_id));
 
             // Send initial resize
             let resize_cmd = tmux_cc::encode_resize(init_cols, init_rows);
             std_file_write(&tokio_fd, &resize_cmd);
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, init_cols, init_rows, output_history.as_ref().clone(), history_key);
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, init_cols, init_rows, output_history.as_ref().clone(), history_key, initial_alt_screen);
         }
     }
 
@@ -328,6 +330,7 @@ fn spawn_cc_bridge(
     _init_rows: u16,
     output_history: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     history_key: String,
+    initial_alt_screen: bool,
 ) {
     let child_pid = child.id();
 
@@ -339,21 +342,23 @@ fn spawn_cc_bridge(
         use std::io::Read;
 
         // Replay accumulated output history (reconnect replay)
-        let mut last_alt_screen = false;
+        let mut last_alt_screen = initial_alt_screen;
         if let Some(content) = initial_content {
             if !content.is_empty() {
-                // Determine alternate screen state from replayed content
+                // Output history may refine the alt screen state
                 last_alt_screen = tmux_cc::scan_alt_screen(&content);
                 if session_clone.binary(content).await.is_err() {
                     let _ = session_clone.close(None).await;
                     return;
                 }
-                // Send initial altscreen state to browser
-                let msg = format!("{{\"type\":\"altscreen\",\"active\":{last_alt_screen}}}");
-                if session_clone.text(msg).await.is_err() {
-                    let _ = session_clone.close(None).await;
-                    return;
-                }
+            }
+        }
+        // Send initial altscreen state to browser (from tmux query or history)
+        if last_alt_screen {
+            let msg = format!("{{\"type\":\"altscreen\",\"active\":{last_alt_screen}}}");
+            if session_clone.text(msg).await.is_err() {
+                let _ = session_clone.close(None).await;
+                return;
             }
         }
 
