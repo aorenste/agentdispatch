@@ -357,3 +357,136 @@ test('mouse tracking sequences from apps do not enable xterm.js mouse mode', asy
   await page.waitForTimeout(200);
   await page.keyboard.type('rm -f /tmp/mouse_track.sh\n', { delay: 5 });
 });
+
+test('Cmd+Backspace and Option+key handlers work in full-screen mode', async ({ page }) => {
+  test.setTimeout(15000);
+  await connectToTerminal(page);
+
+  // Fake full-screen mode
+  await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (e) e.altScreen = true;
+  }, tabId);
+
+  // Test Cmd+Backspace: dispatch synthetic keydown and check what was sent
+  const cmdBackspaceResult = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e || !e.ws) return null;
+    // Capture what gets sent over the WebSocket
+    const sent = [];
+    const origSend = e.ws.send.bind(e.ws);
+    e.ws.send = (data) => { sent.push(data); origSend(data); };
+
+    // Dispatch Cmd+Backspace
+    const event = new KeyboardEvent('keydown', {
+      key: 'Backspace', metaKey: true, bubbles: true, cancelable: true
+    });
+    document.querySelector('.xterm-helper-textarea').dispatchEvent(event);
+
+    e.ws.send = origSend; // restore
+    return { sent, prevented: event.defaultPrevented };
+  }, tabId);
+
+  expect(cmdBackspaceResult).not.toBeNull();
+  // Should have sent ESC+DEL (\x1b\x7f)
+  expect(cmdBackspaceResult.sent).toContain('\x1b\x7f');
+
+  // Test Option+f: should send ESC+f
+  const optionFResult = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e || !e.ws) return null;
+    const sent = [];
+    const origSend = e.ws.send.bind(e.ws);
+    e.ws.send = (data) => { sent.push(data); origSend(data); };
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'f', altKey: true, bubbles: true, cancelable: true
+    });
+    document.querySelector('.xterm-helper-textarea').dispatchEvent(event);
+
+    e.ws.send = origSend;
+    return { sent, prevented: event.defaultPrevented };
+  }, tabId);
+
+  expect(optionFResult).not.toBeNull();
+  expect(optionFResult.sent).toContain('\x1bf');
+
+  // Test Option+V: should NOT send ESC+v (should paste instead)
+  const optionVResult = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e || !e.ws) return null;
+    const sent = [];
+    const origSend = e.ws.send.bind(e.ws);
+    e.ws.send = (data) => { sent.push(data); origSend(data); };
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'v', altKey: true, bubbles: true, cancelable: true
+    });
+    document.querySelector('.xterm-helper-textarea').dispatchEvent(event);
+
+    e.ws.send = origSend;
+    return { sent };
+  }, tabId);
+
+  expect(optionVResult).not.toBeNull();
+  // Should NOT have sent ESC+v — paste handler reads clipboard async instead
+  expect(optionVResult.sent.includes('\x1bv')).toBeFalsy();
+
+  // Clean up
+  await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (e) e.altScreen = false;
+  }, tabId);
+});
+
+test('Option+V pastes from clipboard in full-screen mode', async ({ page }) => {
+  test.setTimeout(15000);
+  await connectToTerminal(page);
+
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type('cat > /tmp/paste_test\n', { delay: 10 });
+  await page.waitForTimeout(500);
+
+  // Fake full-screen mode
+  await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (e) e.altScreen = true;
+  }, tabId);
+
+  // Write to clipboard
+  await page.evaluate(() => navigator.clipboard.writeText('OPTION_V_PASTED'));
+
+  // Send Option+V — should paste clipboard content, NOT send ESC+v
+  await page.keyboard.press('Alt+v');
+  await page.waitForTimeout(500);
+
+  // End cat
+  await page.keyboard.press('Control+d');
+  await page.waitForTimeout(200);
+
+  // Check the file contains the pasted text
+  await page.keyboard.type('cat /tmp/paste_test\n', { delay: 10 });
+  await page.waitForTimeout(500);
+
+  const output = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return '';
+    const buf = e.term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line) lines.push(line.translateToString());
+    }
+    return lines.join('\n');
+  }, tabId);
+
+  expect(output).toContain('OPTION_V_PASTED');
+
+  // Clean up
+  await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (e) e.altScreen = false;
+  }, tabId);
+  await page.keyboard.type('rm -f /tmp/paste_test\n', { delay: 5 });
+});

@@ -314,7 +314,7 @@ test('output from other tabs does not leak', async ({ page, request }) => {
   );
 
   // Send Enter to get a prompt in tab 2
-  const textarea = page.locator('.xterm-helper-textarea');
+  const textarea = page.locator('#ws-active-pane .xterm-helper-textarea');
   await textarea.focus();
   await page.keyboard.press('Enter');
   await page.waitForFunction(

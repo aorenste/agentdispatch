@@ -189,6 +189,34 @@ pub async fn launch_project(
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(std::io::Error::new(std::io::ErrorKind::Other, stderr.to_string()));
                 }
+                // Init submodules if the project uses them (best-effort).
+                // If any submodule fails (e.g. inaccessible URL), clean up broken
+                // .git references so they don't poison the whole worktree.
+                if std::path::Path::new(&wt_path_str).join(".gitmodules").exists() {
+                    let sub = std::process::Command::new("git")
+                        .args(["submodule", "update", "--init", "--recursive"])
+                        .current_dir(&wt_path_str)
+                        .output();
+                    if let Ok(o) = sub {
+                        if !o.status.success() {
+                            eprintln!("Warning: submodule init failed in {wt_path_str}: {}",
+                                String::from_utf8_lossy(&o.stderr).trim());
+                            // Clean up broken submodule .git files that point to
+                            // incomplete gitdirs (missing HEAD, refs, etc.)
+                            let _ = std::process::Command::new("bash")
+                                .args(["-c", &format!(
+                                    "cd '{}' && find . -name .git -type f | while read f; do \
+                                        dir=$(cat \"$f\" | sed 's/gitdir: //'); \
+                                        if [ ! -f \"$(dirname \"$f\")/$dir/HEAD\" ]; then \
+                                            echo \"Removing broken submodule ref: $f\"; \
+                                            rm -f \"$f\"; \
+                                        fi; \
+                                    done", wt_path_str
+                                )])
+                                .output();
+                        }
+                    }
+                }
                 Ok(wt_path_str)
             })
             .await;

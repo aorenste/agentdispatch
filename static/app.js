@@ -512,6 +512,21 @@ function renderSelectedWorkspace() {
   }
   stopSetupPoll();
 
+  // Stash terminal containers in a hidden div before rebuilding innerHTML.
+  // This keeps them in the DOM so xterm.js viewport scroll state is preserved.
+  let stash = document.getElementById('terminal-stash');
+  if (!stash) {
+    stash = document.createElement('div');
+    stash.id = 'terminal-stash';
+    stash.style.cssText = 'position:fixed;left:-9999px;top:0;width:100vw;height:100vh;overflow:hidden;pointer-events:none';
+    document.body.appendChild(stash);
+  }
+  for (const [, entry] of Object.entries(_tabTerminals)) {
+    if (entry.container.parentElement) {
+      stash.appendChild(entry.container);
+    }
+  }
+
   const proj = _projects.find(p => p.name === ws.project);
   const agent = getProjectAgent(proj);
   const agentEnabled = agent !== 'None';
@@ -581,12 +596,26 @@ function reconnectAllTerminals() {
 }
 
 function initTerminal(key, paneEl, opts) {
-  // Reuse existing terminal
+  // Reuse existing terminal — never detach from DOM to preserve scroll state.
+  // Instead, move container into the pane if needed and ensure it's visible.
   if (_tabTerminals[key]) {
-    paneEl.innerHTML = '';
-    paneEl.appendChild(_tabTerminals[key].container);
-    _tabTerminals[key].fitAddon.fit();
-    _tabTerminals[key].term.focus();
+    const t = _tabTerminals[key];
+    if (t.container.parentElement !== paneEl) {
+      paneEl.appendChild(t.container);
+    }
+    // Skip the next ResizeObserver fit — reattach triggers a resize observation
+    // but fit() resets the viewport. Just restore scroll position instead.
+    t.skipNextFit = true;
+    t.term.scrollToBottom();
+    // After reattach, DOM scrollTop resets to 0 even though xterm.js viewportY
+    // is correct. Sync the DOM after layout to fix mouse wheel scrolling.
+    requestAnimationFrame(() => {
+      const vp = t.container.querySelector('.xterm-viewport');
+      if (vp) {
+        vp.scrollTop = vp.scrollHeight - vp.clientHeight;
+      }
+    });
+    t.term.focus();
     return;
   }
 
@@ -665,8 +694,14 @@ function initTerminal(key, paneEl, opts) {
     '\\':'|', '`':'~', '1':'!', '2':'@', '3':'#', '4':'$', '5':'%', '6':'^',
     '7':'&', '8':'*', '9':'(', '0':')', '-':'_', '=':'+'};
   term.attachCustomKeyEventHandler((e) => {
+    if (!entry.altScreen) {
+      // Normal mode: let browser handle all Cmd+key and Option+key
+      return true;
+    }
+
+    // Full-screen mode (emacs, vim):
+    // Cmd+key → Meta+key (ESC prefix)
     if (e.metaKey && !e.ctrlKey && !e.altKey) {
-      if (!entry.altScreen) return true; // let browser handle it
       let key = e.key;
       if (e.shiftKey && key.length === 1 && _shiftMap[key]) {
         key = _shiftMap[key];
@@ -682,7 +717,41 @@ function initTerminal(key, paneEl, opts) {
         e.preventDefault();
         return false;
       }
+      // Cmd+Backspace/Delete → send as Meta+Backspace (ESC + DEL)
+      if (key === 'Backspace') {
+        if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+          entry.ws.send('\x1b\x7f');
+        }
+        e.preventDefault();
+        return false;
+      }
     }
+
+    // Option+key → Meta+key (for emacs M-v, M-f, M-b, etc.)
+    // Exception: Option+V → browser paste
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
+      let key = e.key;
+      if (key.toLowerCase() === 'v' || key === '√') {
+        // Option+V → paste from clipboard into terminal
+        if (e.type === 'keydown') {
+          navigator.clipboard.readText().then(text => {
+            if (text && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+              entry.ws.send(text);
+            }
+          }).catch(() => {});
+        }
+        e.preventDefault();
+        return false;
+      }
+      if (key.length === 1) {
+        if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+          entry.ws.send('\x1b' + key);
+        }
+        e.preventDefault();
+        return false;
+      }
+    }
+
     return true;
   });
 
@@ -706,9 +775,13 @@ function initTerminal(key, paneEl, opts) {
 
   let fitTimer = null;
   const resizeObserver = new ResizeObserver(() => {
-    // Debounce fit to avoid rapid-fire resizes that disrupt the viewport
     clearTimeout(fitTimer);
     fitTimer = setTimeout(() => {
+      if (entry.skipNextFit) {
+        entry.skipNextFit = false;
+        term.scrollToBottom();
+        return;
+      }
       const buf = term.buffer.active;
       const wasAtBottom = buf.viewportY >= buf.baseY;
       fitAddon.fit();
