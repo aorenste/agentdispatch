@@ -135,9 +135,22 @@ test('altScreen state survives reconnect', async ({ page }) => {
   const badge = page.locator(`#altscreen-${tabId}`);
   await expect(badge).toBeVisible();
 
-  // Clean up: quit less
+  // Type a key — altScreen must stay true (not reset by CcReader)
   const textarea2 = page.locator('.xterm-helper-textarea');
   await textarea2.focus();
+  await page.keyboard.press('g'); // scroll to top in less
+  await page.waitForTimeout(500);
+
+  state = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    return e ? e.altScreen : null;
+  }, tabId);
+  expect(state).toBe(true);
+
+  // FS badge should still be visible after keystroke
+  await expect(badge).toBeVisible();
+
+  // Clean up: quit less
   await page.keyboard.press('q');
 });
 

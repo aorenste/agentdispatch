@@ -1,7 +1,9 @@
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SOCKET: &str = "agentdispatch";
+fn socket_name() -> String {
+    std::env::var("AGENTDISPATCH_TMUX_SOCKET").unwrap_or_else(|_| "agentdispatch".to_string())
+}
 static ATTACH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Remove stale tmux socket if the server is dead.
@@ -18,7 +20,7 @@ fn clean_stale_socket() {
                 // Socket is stale — remove it
                 let uid = unsafe { nix::libc::getuid() };
                 {
-                    let socket_path = format!("/tmp/tmux-{uid}/{SOCKET}");
+                    let socket_path = format!("/tmp/tmux-{uid}/{}", socket_name());
                     let _ = std::fs::remove_file(&socket_path);
                     eprintln!("Removed stale tmux socket: {socket_path}");
                 }
@@ -31,7 +33,8 @@ fn clean_stale_socket() {
 
 fn tmux_base() -> Command {
     let mut cmd = Command::new("tmux");
-    cmd.args(["-L", SOCKET, "-f", "/dev/null"]);
+    let sock = socket_name();
+    cmd.args(["-L", &sock, "-f", "/dev/null"]);
     // Clean environment for tmux server processes
     cmd.env_remove("TMUX");
     cmd.env_remove("TMUX_PANE");
@@ -194,7 +197,7 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
     Ok((
         "tmux".to_string(),
         vec![
-            "-L".to_string(), SOCKET.to_string(),
+            "-L".to_string(), socket_name(),
             "-f".to_string(), "/dev/null".to_string(),
             "-C".to_string(),
             "attach".to_string(),

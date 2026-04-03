@@ -202,16 +202,19 @@ pub async fn ws_terminal(
         SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen } => {
             // Replay content on reconnect. Prefer output history (survives within
             // a server session) but fall back to capture-pane (survives server restart).
-            let initial_content = {
+            let (initial_content, content_is_history) = {
                 let map = output_history.lock().unwrap();
-                map.get(&history_key).cloned()
-            }.or_else(|| tmux::capture_pane_with_cursor(&pane_id));
+                match map.get(&history_key).cloned() {
+                    Some(h) => (Some(h), true),
+                    None => (tmux::capture_pane_with_cursor(&pane_id), false),
+                }
+            };
 
             // Send initial resize
             let resize_cmd = tmux_cc::encode_resize(init_cols, init_rows);
             std_file_write(&tokio_fd, &resize_cmd);
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, init_cols, init_rows, output_history.as_ref().clone(), history_key, initial_alt_screen);
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, content_is_history, init_cols, init_rows, output_history.as_ref().clone(), history_key, initial_alt_screen);
         }
     }
 
@@ -326,6 +329,7 @@ fn spawn_cc_bridge(
     pane_id: String,
     link_name: String,
     initial_content: Option<Vec<u8>>,
+    content_is_history: bool,
     _init_cols: u16,
     _init_rows: u16,
     output_history: Arc<Mutex<HashMap<String, Vec<u8>>>>,
@@ -345,8 +349,11 @@ fn spawn_cc_bridge(
         let mut last_alt_screen = initial_alt_screen;
         if let Some(content) = initial_content {
             if !content.is_empty() {
-                // Output history may refine the alt screen state
-                last_alt_screen = tmux_cc::scan_alt_screen(&content);
+                // Only scan output history for alt screen sequences — capture-pane
+                // content doesn't contain them (it's rendered text, not raw escapes).
+                if content_is_history {
+                    last_alt_screen = tmux_cc::scan_alt_screen(&content);
+                }
                 if session_clone.binary(content).await.is_err() {
                     let _ = session_clone.close(None).await;
                     return;
@@ -363,6 +370,7 @@ fn spawn_cc_bridge(
         }
 
         let mut reader = CcReader::new(read_pane_id);
+        reader.set_alternate_screen(last_alt_screen);
         let mut raw_buf = [0u8; 4096];
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
         ping_interval.tick().await;

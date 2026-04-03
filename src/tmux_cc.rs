@@ -126,6 +126,11 @@ impl CcReader {
         }
     }
 
+    /// Set the initial alternate screen state (e.g. from a tmux query).
+    pub fn set_alternate_screen(&mut self, alt: bool) {
+        self.alternate_screen = alt;
+    }
+
     /// Whether the app in the pane is currently using the alternate screen buffer.
     #[allow(dead_code)]
     pub fn alternate_screen(&self) -> bool {

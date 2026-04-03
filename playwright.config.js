@@ -17,7 +17,7 @@ module.exports = defineConfig({
     } },
   ],
   webServer: {
-    command: 'CARGO_TARGET_DIR=target/test cargo build && exec ./target/test/debug/agentdispatch --db /tmp/agentdispatch-e2e.db --port 8916',
+    command: 'CARGO_TARGET_DIR=target/test cargo build && exec env AGENTDISPATCH_TMUX_SOCKET=agentdispatch-test ./target/test/debug/agentdispatch --db /tmp/agentdispatch-e2e.db --port 8916',
     port: 8916,
     timeout: 120000,
     reuseExistingServer: false,
