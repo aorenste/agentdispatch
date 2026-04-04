@@ -523,7 +523,6 @@ function renderSelectedWorkspace() {
   }
   for (const [, entry] of Object.entries(_tabTerminals)) {
     if (entry.container.parentElement) {
-      entry.stashed = true;
       stash.appendChild(entry.container);
     }
   }
@@ -601,12 +600,21 @@ function initTerminal(key, paneEl, opts) {
   // Instead, move container into the pane if needed and ensure it's visible.
   if (_tabTerminals[key]) {
     const t = _tabTerminals[key];
-    t.stashed = false;
-    // Flag so ResizeObserver restores scroll position after fit()
-    t.restoreScrollAfterFit = true;
     if (t.container.parentElement !== paneEl) {
       paneEl.appendChild(t.container);
     }
+    // Skip the next ResizeObserver fit — reattach triggers a resize observation
+    // but fit() resets the viewport. Just restore scroll position instead.
+    t.skipNextFit = true;
+    t.term.scrollToBottom();
+    // After reattach, DOM scrollTop resets to 0 even though xterm.js viewportY
+    // is correct. Sync the DOM after layout to fix mouse wheel scrolling.
+    requestAnimationFrame(() => {
+      const vp = t.container.querySelector('.xterm-viewport');
+      if (vp) {
+        vp.scrollTop = vp.scrollHeight - vp.clientHeight;
+      }
+    });
     t.term.focus();
     return;
   }
@@ -760,7 +768,6 @@ function initTerminal(key, paneEl, opts) {
   });
 
   term.onResize(({ cols, rows }) => {
-    if (entry.stashed) return; // don't send resize while offscreen in stash
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
       entry.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
     }
@@ -770,17 +777,16 @@ function initTerminal(key, paneEl, opts) {
   const resizeObserver = new ResizeObserver(() => {
     clearTimeout(fitTimer);
     fitTimer = setTimeout(() => {
-      if (entry.stashed) return; // don't resize while offscreen
+      if (entry.skipNextFit) {
+        entry.skipNextFit = false;
+        term.scrollToBottom();
+        return;
+      }
       const buf = term.buffer.active;
       const wasAtBottom = buf.viewportY >= buf.baseY;
       fitAddon.fit();
-      if (wasAtBottom || entry.restoreScrollAfterFit) {
-        entry.restoreScrollAfterFit = false;
+      if (wasAtBottom) {
         term.scrollToBottom();
-        requestAnimationFrame(() => {
-          const vp = entry.container.querySelector('.xterm-viewport');
-          if (vp) vp.scrollTop = vp.scrollHeight - vp.clientHeight;
-        });
       }
     }, 100);
   });
