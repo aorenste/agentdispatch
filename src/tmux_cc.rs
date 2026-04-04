@@ -96,15 +96,26 @@ fn strip_mouse_tracking(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut i = 0;
     while i < data.len() {
-        if data[i] == 0x1b && i + 4 < data.len() && data[i + 1] == b'[' && data[i + 2] == b'?' {
-            let rest = &data[i + 3..];
-            if rest.starts_with(b"1000h") || rest.starts_with(b"1000l")
-                || rest.starts_with(b"1002h") || rest.starts_with(b"1002l")
-                || rest.starts_with(b"1003h") || rest.starts_with(b"1003l")
-                || rest.starts_with(b"1006h") || rest.starts_with(b"1006l")
-            {
-                i += 8; // \e[?NNNNx = 8 bytes
+        if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'[' {
+            // \e[3J — clear scrollback buffer: strip to protect user's scroll history.
+            // Applications (Claude/Ink, `clear` command) send this to wipe scrollback,
+            // but in the web UI we want to preserve it for the user to scroll through.
+            if i + 3 < data.len() && data[i + 2] == b'3' && data[i + 3] == b'J' {
+                i += 4; // \e[3J = 4 bytes
                 continue;
+            }
+            // \e[?NNNNh/l — mouse tracking modes: strip so xterm.js never enters
+            // mouse mode (prevents mouse events from being forwarded to apps).
+            if i + 4 < data.len() && data[i + 2] == b'?' {
+                let rest = &data[i + 3..];
+                if rest.starts_with(b"1000h") || rest.starts_with(b"1000l")
+                    || rest.starts_with(b"1002h") || rest.starts_with(b"1002l")
+                    || rest.starts_with(b"1003h") || rest.starts_with(b"1003l")
+                    || rest.starts_with(b"1006h") || rest.starts_with(b"1006l")
+                {
+                    i += 8; // \e[?NNNNx = 8 bytes
+                    continue;
+                }
             }
         }
         result.push(data[i]);
@@ -479,6 +490,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_reader_strips_clear_scrollback_from_output() {
+        let mut r = CcReader::new("%0".to_string());
+        // Feed %output containing \e[3J (clear scrollback) mixed with content.
+        // In tmux octal encoding: \033 = ESC, [3J is literal.
+        r.feed(b"%output %0 \\033[3JHello\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { data, .. }) => {
+                assert!(!data.windows(4).any(|w| w == b"\x1b[3J"),
+                    "output should not contain \\e[3J: {:?}", String::from_utf8_lossy(&data));
+                assert!(data.windows(5).any(|w| w == b"Hello"),
+                    "output should still contain Hello");
+            }
+            _ => panic!("expected Output"),
+        }
+    }
+
     // -- strip_mouse_tracking --
 
     #[test]
@@ -501,6 +529,35 @@ mod tests {
     fn test_strip_mouse_mixed() {
         let input = b"\x1b[?1049h\x1b[?1000h\x1b[?1002hHello\x1b[?1006h";
         let expected = b"\x1b[?1049hHello";
+        assert_eq!(strip_mouse_tracking(input), expected);
+    }
+
+    // -- clear scrollback (\e[3J) stripped from output --
+
+    #[test]
+    fn test_strip_clear_scrollback() {
+        // \e[3J (clear scrollback buffer) should be stripped to protect
+        // the user's scroll history in xterm.js.
+        assert_eq!(strip_mouse_tracking(b"\x1b[3J"), b"");
+    }
+
+    #[test]
+    fn test_strip_clear_scrollback_with_content() {
+        // \e[3J embedded in normal content should be stripped, keeping the rest
+        assert_eq!(strip_mouse_tracking(b"hello\x1b[3Jworld"), b"helloworld");
+    }
+
+    #[test]
+    fn test_strip_clear_scrollback_preserves_erase_display() {
+        // \e[2J (erase visible display) should NOT be stripped — only \e[3J
+        assert_eq!(strip_mouse_tracking(b"\x1b[2J"), b"\x1b[2J");
+    }
+
+    #[test]
+    fn test_strip_clear_scrollback_full_clear_combo() {
+        // `clear` command typically sends \e[H\e[2J\e[3J — only \e[3J stripped
+        let input = b"\x1b[H\x1b[2J\x1b[3J";
+        let expected = b"\x1b[H\x1b[2J";
         assert_eq!(strip_mouse_tracking(input), expected);
     }
 
