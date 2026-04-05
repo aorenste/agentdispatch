@@ -214,21 +214,40 @@ async function showAddProject() {
       return 'Root directory is required.';
     }
     const conda = values['proj-conda'] === 'none' ? '' : values['proj-conda'];
+    const projectBody = {
+      name, root_dir: dir,
+      git: values['proj-git'],
+      agent: values['proj-agent'],
+      conda_env: conda,
+      claude_internet: values['proj-claude-internet'],
+      claude_skip_permissions: values['proj-claude-skip-perms'],
+    };
     try {
       const res = await fetch('/api/projects', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          name, root_dir: dir,
-          git: values['proj-git'],
-          agent: values['proj-agent'],
-          conda_env: conda,
-          claude_internet: values['proj-claude-internet'],
-          claude_skip_permissions: values['proj-claude-skip-perms'],
-        }),
+        body: JSON.stringify(projectBody),
       });
       if (!res.ok) {
-        return await readApiError(res, `Failed to add project. "${dir}" must be an existing directory.`);
+        const data = await res.json().catch(() => null);
+        if (data && data.dir_not_found) {
+          closeDialog();
+          openDialog(`Directory "${dir}" does not exist. Create it?`, [], async () => {
+            const res2 = await fetch('/api/projects', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({...projectBody, create_dir: true, git: true}),
+            });
+            if (!res2.ok) {
+              const err = await readApiError(res2, 'Failed to create project.');
+              setDialogError(err);
+              return false;
+            }
+            fetchProjects();
+          }, {okText: 'Create'});
+          return false;
+        }
+        return (data && data.error) || `Failed to add project. "${dir}" must be an existing directory.`;
       }
       fetchProjects();
     } catch {
@@ -1045,11 +1064,10 @@ function openDialog(msg, fields, callback, opts) {
   const okBtn = document.getElementById('dialog-ok');
   if (opts && opts.destructive) {
     okBtn.className = 'btn-danger';
-    okBtn.textContent = opts.okText || 'OK';
   } else {
     okBtn.className = 'btn-primary';
-    okBtn.textContent = 'OK';
   }
+  okBtn.textContent = (opts && opts.okText) || 'OK';
 
   document.getElementById('dialog-overlay').classList.add('open');
   const first = container.querySelector('input[type="text"]');

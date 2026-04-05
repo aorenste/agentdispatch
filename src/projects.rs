@@ -31,6 +31,8 @@ pub struct CreateProjectRequest {
     claude_skip_permissions: bool,
     #[serde(default)]
     conda_env: String,
+    #[serde(default)]
+    create_dir: bool,
 }
 
 fn default_true() -> bool { true }
@@ -62,8 +64,31 @@ pub async fn create_project(
     let root_dir = expand_tilde(&body.root_dir);
     let path = std::path::Path::new(&root_dir);
     if !path.is_dir() {
-        return HttpResponse::BadRequest()
-            .json(serde_json::json!({"error": format!("{root_dir} is not a directory")}));
+        if body.create_dir {
+            if let Err(e) = std::fs::create_dir_all(&root_dir) {
+                return HttpResponse::BadRequest()
+                    .json(serde_json::json!({"error": format!("Failed to create directory: {e}")}));
+            }
+            let output = std::process::Command::new("git")
+                .args(["init"])
+                .current_dir(&root_dir)
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    return HttpResponse::BadRequest()
+                        .json(serde_json::json!({"error": format!("git init failed: {}", stderr.trim())}));
+                }
+                Err(e) => {
+                    return HttpResponse::BadRequest()
+                        .json(serde_json::json!({"error": format!("git init failed: {e}")}));
+                }
+            }
+        } else {
+            return HttpResponse::BadRequest()
+                .json(serde_json::json!({"error": format!("{root_dir} is not a directory"), "dir_not_found": true}));
+        }
     }
     let agent = match normalize_agent(&body.agent) {
         Some(agent) => agent,
@@ -712,6 +737,65 @@ mod tests {
             .to_request();
         let resp = actix_web::test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    #[actix_web::test]
+    async fn test_create_project_bad_dir_returns_dir_not_found() {
+        let db = test_app_data();
+        let app = actix_web::test::init_service(
+            App::new().app_data(db).service(create_project),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/projects")
+            .set_json(serde_json::json!({
+                "name": "test",
+                "root_dir": "/nonexistent/path/xyz"
+            }))
+            .to_request();
+        let resp: serde_json::Value = actix_web::test::call_and_read_body_json(&app, req).await;
+        assert_eq!(resp["dir_not_found"], true);
+    }
+
+    #[actix_web::test]
+    async fn test_create_project_creates_dir() {
+        let db = test_app_data();
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(db)
+                .service(create_project)
+                .service(list_projects),
+        )
+        .await;
+
+        let dir = format!("/tmp/agentdispatch-test-create-dir-{}", std::process::id());
+        // Ensure clean state
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/projects")
+            .set_json(serde_json::json!({
+                "name": "test-create",
+                "root_dir": &dir,
+                "create_dir": true
+            }))
+            .to_request();
+        let resp = actix_web::test::call_service(&app, req).await;
+        assert!(resp.status().is_success(), "create with create_dir should succeed");
+
+        // Directory should exist with .git
+        assert!(std::path::Path::new(&dir).is_dir(), "directory should be created");
+        assert!(std::path::Path::new(&dir).join(".git").exists(), "git init should have run");
+
+        // Project should be in the list
+        let req = actix_web::test::TestRequest::get().uri("/api/projects").to_request();
+        let resp: Vec<serde_json::Value> = actix_web::test::call_and_read_body_json(&app, req).await;
+        assert_eq!(resp.len(), 1);
+        assert_eq!(resp[0]["name"], "test-create");
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[actix_web::test]
