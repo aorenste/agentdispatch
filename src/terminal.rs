@@ -377,11 +377,17 @@ fn spawn_cc_bridge(
         ping_interval.tick().await;
 
         // Debug: log all output sent to the browser for replay/analysis.
-        let dump_path = format!("/tmp/agentdispatch-output-{}.bin", history_key.replace(':', "-"));
-        let mut dump_file = std::fs::File::create(&dump_path).ok();
-        if dump_file.is_some() {
-            eprintln!("[debug] logging terminal output to {dump_path}");
-        }
+        // Enable with AGENTDISPATCH_DUMP_OUTPUT=1.
+        let mut dump_file = if std::env::var("AGENTDISPATCH_DUMP_OUTPUT").is_ok() {
+            let dump_path = format!("/tmp/agentdispatch-output-{}.bin", history_key.replace(':', "-"));
+            let f = std::fs::File::create(&dump_path).ok();
+            if f.is_some() {
+                eprintln!("[debug] logging terminal output to {dump_path}");
+            }
+            f
+        } else {
+            None
+        };
 
         'outer: loop {
             tokio::select! {
@@ -407,9 +413,10 @@ fn spawn_cc_bridge(
                                             let _ = f.write_all(&decoded);
                                         }
                                         if let Ok(mut map) = output_history.lock() {
+                                            let history_data = tmux_cc::strip_for_history(&decoded);
                                             map.entry(history_key.clone())
                                                 .or_default()
-                                                .extend_from_slice(&decoded);
+                                                .extend_from_slice(&history_data);
                                         }
                                         if session_clone.binary(decoded).await.is_err() {
                                             break 'outer;

@@ -112,7 +112,7 @@ test('viewport at bottom after full-screen redraw', async ({ page }) => {
   // Then sleep so the shell prompt doesn't appear and auto-scroll us.
   // Use a background subshell to emit the content and keep the shell busy.
   await page.keyboard.type(
-    "python3 -c \"import sys,time; sys.stdout.buffer.write(b'\\x1b[?2026h\\x1b[2J\\x1b[3J\\x1b[H' + b''.join(b'LINE-%03d\\r\\n' % i for i in range(60)) + b'\\x1b[?2026l'); sys.stdout.flush(); time.sleep(5)\"\n",
+    "python3 -c \"import sys,time; sys.stdout.buffer.write(b'\\x1b[?2026h\\x1b[2J\\x1b[3J\\x1b[H' + b''.join(b'LINE-%03d\\r\\n' % i for i in range(60)) + b'\\x1b[?2026l'); sys.stdout.flush(); time.sleep(2)\"\n",
     { delay: 10 }
   );
   // Check quickly — before the python sleep ends and the prompt returns.

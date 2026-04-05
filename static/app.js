@@ -622,18 +622,24 @@ function initTerminal(key, paneEl, opts) {
     if (t.container.parentElement !== paneEl) {
       paneEl.appendChild(t.container);
     }
-    // Skip the next ResizeObserver fit — reattach triggers a resize observation
-    // but fit() resets the viewport. Just restore scroll position instead.
+    // Reattach triggers a ResizeObserver notification. Skip that one (it fires
+    // before layout is stable), but fit in rAF so the terminal adapts to the
+    // actual pane width (stash uses 100vw which may differ).
+    // Skip the ResizeObserver's fit (fires before layout is stable).
+    // Use double-rAF to ensure layout has settled before fitting — single rAF
+    // can fire before the browser applies the pane's dimensions, causing fit()
+    // to pick up the stash's 100vw width and send a spurious resize.
     t.skipNextFit = true;
     t.term.scrollToBottom();
-    // After reattach, DOM scrollTop resets to 0 even though xterm.js viewportY
-    // is correct. Sync the DOM after layout to fix mouse wheel scrolling.
-    requestAnimationFrame(() => {
+    requestAnimationFrame(() => { requestAnimationFrame(() => {
+      t.fitAddon.fit();
+      // DOM scrollTop resets to 0 on reattach even though xterm.js viewportY
+      // is correct. Sync the DOM so mouse wheel scrolling works.
       const vp = t.container.querySelector('.xterm-viewport');
       if (vp) {
         vp.scrollTop = vp.scrollHeight - vp.clientHeight;
       }
-    });
+    }); });
     t.term.focus();
     return;
   }

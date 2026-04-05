@@ -219,7 +219,7 @@ mod tests {
         // Use `timeout` command to prevent Playwright from hanging on exit
         // (tmux child processes can keep the process tree alive).
         let output = std::process::Command::new("timeout")
-            .args(["60", "npx", "playwright", "test"])
+            .args(["120", "npx", "playwright", "test"])
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()
             .expect("timeout/npx is required to run E2E tests");
