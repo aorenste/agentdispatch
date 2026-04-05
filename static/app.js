@@ -684,17 +684,17 @@ function initTerminal(key, paneEl, opts) {
         return;
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
-      // Preserve scroll position when the user has scrolled up to read
-      // history. Without this, Claude Code's frequent \e[2J + \e[H repaint
-      // cycle causes xterm.js to yank the viewport back to the active area.
+      // After a sync block with \e[3J (clear scrollback), xterm.js can leave
+      // viewportY at 0 even though baseY grew from the redrawn content. Force
+      // scroll-to-bottom when the user was already at the bottom before the
+      // write. If they had scrolled up, don't touch the viewport.
       const buf = term.buffer.active;
-      const userScrolledUp = buf.viewportY < buf.baseY;
-      if (userScrolledUp) {
-        const savedY = buf.viewportY;
-        term.write(data, () => { term.scrollToLine(savedY); });
-      } else {
-        term.write(data);
-      }
+      const wasAtBottom = buf.viewportY >= buf.baseY;
+      term.write(data, () => {
+        if (wasAtBottom) {
+          term.scrollToBottom();
+        }
+      });
     };
 
     ws.onerror = () => {
