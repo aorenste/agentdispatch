@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write as IoWrite;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -375,6 +376,13 @@ fn spawn_cc_bridge(
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
         ping_interval.tick().await;
 
+        // Debug: log all output sent to the browser for replay/analysis.
+        let dump_path = format!("/tmp/agentdispatch-output-{}.bin", history_key.replace(':', "-"));
+        let mut dump_file = std::fs::File::create(&dump_path).ok();
+        if dump_file.is_some() {
+            eprintln!("[debug] logging terminal output to {dump_path}");
+        }
+
         'outer: loop {
             tokio::select! {
                 ready_result = tokio_fd_read.readable() => {
@@ -392,6 +400,12 @@ fn spawn_cc_bridge(
                             while let Some(event) = reader.next_event() {
                                 match event {
                                     CcEvent::Output { data: decoded, alternate_screen } => {
+                                        if let Some(ref mut f) = dump_file {
+                                            // Frame format: 4-byte big-endian length + payload
+                                            let len = (decoded.len() as u32).to_be_bytes();
+                                            let _ = f.write_all(&len);
+                                            let _ = f.write_all(&decoded);
+                                        }
                                         if let Ok(mut map) = output_history.lock() {
                                             map.entry(history_key.clone())
                                                 .or_default()

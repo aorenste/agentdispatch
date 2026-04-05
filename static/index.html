@@ -298,6 +298,26 @@
   }
   .ws-popover-item:hover { background: rgba(99, 102, 241, 0.08); }
   .ws-popover-item.danger { color: var(--red); }
+  .term-context-menu {
+    display: none;
+    position: fixed;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    z-index: 100;
+    min-width: 120px;
+    overflow: hidden;
+  }
+  .term-context-menu.open { display: block; }
+  .term-context-menu-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+    color: var(--text);
+  }
+  .term-context-menu-item:hover { background: rgba(99, 102, 241, 0.08); }
   .ws-main {
     flex: 1;
     border: 1px solid var(--border);

@@ -96,30 +96,36 @@ pub fn scan_alt_screen(data: &[u8]) -> bool {
 /// - \e[?1000h/l, \e[?1002h/l, \e[?1003h/l, \e[?1006h/l — mouse tracking
 /// - \e[3J — clear scrollback buffer (protects user's scroll history)
 ///
-/// Replaced:
-/// - \e[2J → \e[H\e[J — in xterm.js v5, \e[2J (erase display) pushes the
-///   current viewport into scrollback before clearing. Since we strip \e[3J,
-///   each Claude repaint would push another copy of its UI into scrollback,
-///   filling it with hundreds of duplicate frames. \e[H\e[J (cursor home +
-///   erase from cursor to end) achieves the same visual clear without the
-///   scrollback push.
 fn filter_escapes(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut i = 0;
+    let mut saw_erase_display = false;
     while i < data.len() {
         if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'[' {
-            // \e[3J — clear scrollback buffer: strip entirely.
-            if i + 3 < data.len() && data[i + 2] == b'3' && data[i + 3] == b'J' {
-                i += 4;
-                continue;
-            }
-            // \e[2J — erase display: replace with \e[H\e[J to avoid
-            // pushing the viewport into scrollback.
+            // \e[2J — erase display: pass through and flag it so the
+            // immediately following \e[3J is also let through.
             if i + 3 < data.len() && data[i + 2] == b'2' && data[i + 3] == b'J' {
-                result.extend_from_slice(b"\x1b[H\x1b[J");
+                saw_erase_display = true;
+                result.extend_from_slice(&data[i..i + 4]);
                 i += 4;
                 continue;
             }
+            // \e[3J — clear scrollback buffer: strip UNLESS it immediately
+            // follows \e[2J. Claude writes 100+ lines per full redraw,
+            // overflowing the viewport into scrollback. The paired \e[3J
+            // cleans up this overflow; without it, duplicate frames accumulate.
+            if i + 3 < data.len() && data[i + 2] == b'3' && data[i + 3] == b'J' {
+                if saw_erase_display {
+                    saw_erase_display = false;
+                    result.extend_from_slice(&data[i..i + 4]);
+                    i += 4;
+                    continue;
+                }
+                i += 4;
+                continue;
+            }
+            // Any other ESC[ sequence clears the \e[2J flag
+            saw_erase_display = false;
             // \e[?NNNNh/l — mouse tracking modes: strip so xterm.js never enters
             // mouse mode (prevents mouse events from being forwarded to apps).
             if i + 4 < data.len() && data[i + 2] == b'?' {
@@ -133,6 +139,8 @@ fn filter_escapes(data: &[u8]) -> Vec<u8> {
                     continue;
                 }
             }
+        } else {
+            saw_erase_display = false;
         }
         result.push(data[i]);
         i += 1;
@@ -558,43 +566,53 @@ mod tests {
     }
 
     #[test]
-    fn test_erase_display_replaced() {
-        // \e[2J replaced with \e[H\e[J to avoid pushing viewport to scrollback
-        assert_eq!(filter_escapes(b"\x1b[2J"), b"\x1b[H\x1b[J");
+    fn test_erase_display_passes_through() {
+        // \e[2J (erase display) must pass through — it's needed for repaint.
+        // The scrollback pollution comes from Claude writing 100+ lines that
+        // overflow the viewport, not from this sequence.
+        assert_eq!(filter_escapes(b"\x1b[2J"), b"\x1b[2J");
     }
 
     #[test]
     fn test_erase_display_with_content() {
-        assert_eq!(filter_escapes(b"hello\x1b[2Jworld"), b"hello\x1b[H\x1b[Jworld");
+        assert_eq!(filter_escapes(b"hello\x1b[2Jworld"), b"hello\x1b[2Jworld");
     }
 
     #[test]
     fn test_full_clear_combo() {
-        // `clear` sends \e[H\e[2J\e[3J — \e[2J replaced, \e[3J stripped
+        // `clear` sends \e[H\e[2J\e[3J — \e[3J passes through because
+        // it immediately follows \e[2J (full-redraw cleanup pattern)
         let input = b"\x1b[H\x1b[2J\x1b[3J";
-        let expected = b"\x1b[H\x1b[H\x1b[J";
+        let expected = b"\x1b[H\x1b[2J\x1b[3J";
         assert_eq!(filter_escapes(input), expected);
     }
 
     #[test]
-    fn test_claude_repaint_combo() {
-        // Claude sends \e[2J\e[3J\e[H — \e[2J replaced, \e[3J stripped, \e[H kept
+    fn test_claude_repaint_lets_3j_through() {
+        // Claude sends \e[2J\e[3J\e[H — the \e[3J must pass through when
+        // paired with \e[2J so scrollback gets cleaned up after each full
+        // redraw. Without this, Claude's 100+ line redraws overflow the
+        // viewport and accumulate duplicate frames in scrollback.
         let input = b"\x1b[2J\x1b[3J\x1b[H";
-        let expected = b"\x1b[H\x1b[J\x1b[H";
+        let expected = b"\x1b[2J\x1b[3J\x1b[H";
         assert_eq!(filter_escapes(input), expected);
     }
 
     #[test]
-    fn test_erase_below_not_affected() {
-        // \e[J and \e[0J (erase below) should pass through unchanged
-        assert_eq!(filter_escapes(b"\x1b[J"), b"\x1b[J");
-        assert_eq!(filter_escapes(b"\x1b[0J"), b"\x1b[0J");
+    fn test_standalone_3j_still_stripped() {
+        // \e[3J without preceding \e[2J should still be stripped
+        // (e.g., from `clear` command or incremental sync blocks)
+        assert_eq!(filter_escapes(b"\x1b[3J"), b"");
+        assert_eq!(filter_escapes(b"hello\x1b[3Jworld"), b"helloworld");
     }
 
     #[test]
-    fn test_erase_above_not_affected() {
-        // \e[1J (erase above) should pass through unchanged
-        assert_eq!(filter_escapes(b"\x1b[1J"), b"\x1b[1J");
+    fn test_3j_after_gap_still_stripped() {
+        // \e[3J separated from \e[2J by other content should be stripped
+        assert_eq!(
+            filter_escapes(b"\x1b[2Jhello\x1b[3J"),
+            b"\x1b[2Jhello"
+        );
     }
 
     // -- CcWriter --

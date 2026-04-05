@@ -794,6 +794,28 @@ function initTerminal(key, paneEl, opts) {
     }
   });
 
+  // Right-click context menu
+  container.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    closeTermContextMenu();
+    const menu = document.createElement('div');
+    menu.className = 'term-context-menu open';
+    menu.innerHTML = '<div class="term-context-menu-item" data-action="clear">Clear</div>';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+    menu.addEventListener('click', (ev) => {
+      const action = ev.target.dataset.action;
+      if (action === 'clear') {
+        term.clear();
+      }
+      closeTermContextMenu();
+      term.focus();
+    });
+    document.body.appendChild(menu);
+    // Close on next click anywhere
+    setTimeout(() => document.addEventListener('click', closeTermContextMenu, { once: true }), 0);
+  });
+
   term.onResize(({ cols, rows }) => {
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
       entry.ws.send(JSON.stringify({ type: 'resize', cols, rows }));
@@ -846,6 +868,10 @@ function toggleWsMenu(id) {
 
 function closeAllWsMenus() {
   document.querySelectorAll('.ws-popover.open').forEach(el => el.classList.remove('open'));
+}
+
+function closeTermContextMenu() {
+  document.querySelectorAll('.term-context-menu').forEach(el => el.remove());
 }
 
 async function destroyWorkspace(id) {
