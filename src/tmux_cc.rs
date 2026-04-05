@@ -90,18 +90,34 @@ pub fn scan_alt_screen(data: &[u8]) -> bool {
     alt
 }
 
-/// Strip mouse tracking enable/disable sequences from terminal data.
-/// Removes \e[?1000h/l, \e[?1002h/l, \e[?1003h/l, \e[?1006h/l.
-fn strip_mouse_tracking(data: &[u8]) -> Vec<u8> {
+/// Filter escape sequences from terminal output.
+///
+/// Stripped:
+/// - \e[?1000h/l, \e[?1002h/l, \e[?1003h/l, \e[?1006h/l — mouse tracking
+/// - \e[3J — clear scrollback buffer (protects user's scroll history)
+///
+/// Replaced:
+/// - \e[2J → \e[H\e[J — in xterm.js v5, \e[2J (erase display) pushes the
+///   current viewport into scrollback before clearing. Since we strip \e[3J,
+///   each Claude repaint would push another copy of its UI into scrollback,
+///   filling it with hundreds of duplicate frames. \e[H\e[J (cursor home +
+///   erase from cursor to end) achieves the same visual clear without the
+///   scrollback push.
+fn filter_escapes(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut i = 0;
     while i < data.len() {
         if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'[' {
-            // \e[3J — clear scrollback buffer: strip to protect user's scroll history.
-            // Applications (Claude/Ink, `clear` command) send this to wipe scrollback,
-            // but in the web UI we want to preserve it for the user to scroll through.
+            // \e[3J — clear scrollback buffer: strip entirely.
             if i + 3 < data.len() && data[i + 2] == b'3' && data[i + 3] == b'J' {
-                i += 4; // \e[3J = 4 bytes
+                i += 4;
+                continue;
+            }
+            // \e[2J — erase display: replace with \e[H\e[J to avoid
+            // pushing the viewport into scrollback.
+            if i + 3 < data.len() && data[i + 2] == b'2' && data[i + 3] == b'J' {
+                result.extend_from_slice(b"\x1b[H\x1b[J");
+                i += 4;
                 continue;
             }
             // \e[?NNNNh/l — mouse tracking modes: strip so xterm.js never enters
@@ -222,10 +238,7 @@ impl CcReader {
                         if !decoded.is_empty() {
                             // Track alternate screen switches
                             self.scan_alternate_screen(&decoded);
-                            // Strip mouse tracking sequences so xterm.js never
-                            // enters mouse mode (prevents mouse events from
-                            // being forwarded to apps via the PTY).
-                            let cleaned = strip_mouse_tracking(&decoded);
+                            let cleaned = filter_escapes(&decoded);
                             if !cleaned.is_empty() {
                                 return Some(CcEvent::Output {
                                     data: cleaned,
@@ -507,58 +520,81 @@ mod tests {
         }
     }
 
-    // -- strip_mouse_tracking --
+    // -- filter_escapes --
 
     #[test]
     fn test_strip_mouse_tracking() {
-        assert_eq!(strip_mouse_tracking(b"\x1b[?1000h"), b"");
-        assert_eq!(strip_mouse_tracking(b"\x1b[?1002h"), b"");
-        assert_eq!(strip_mouse_tracking(b"\x1b[?1003h"), b"");
-        assert_eq!(strip_mouse_tracking(b"\x1b[?1006h"), b"");
-        assert_eq!(strip_mouse_tracking(b"\x1b[?1000l"), b"");
+        assert_eq!(filter_escapes(b"\x1b[?1000h"), b"");
+        assert_eq!(filter_escapes(b"\x1b[?1002h"), b"");
+        assert_eq!(filter_escapes(b"\x1b[?1003h"), b"");
+        assert_eq!(filter_escapes(b"\x1b[?1006h"), b"");
+        assert_eq!(filter_escapes(b"\x1b[?1000l"), b"");
     }
 
     #[test]
     fn test_strip_mouse_preserves_other() {
-        assert_eq!(strip_mouse_tracking(b"hello"), b"hello");
-        assert_eq!(strip_mouse_tracking(b"\x1b[31m"), b"\x1b[31m"); // color
-        assert_eq!(strip_mouse_tracking(b"\x1b[?1049h"), b"\x1b[?1049h"); // alt screen kept
+        assert_eq!(filter_escapes(b"hello"), b"hello");
+        assert_eq!(filter_escapes(b"\x1b[31m"), b"\x1b[31m"); // color
+        assert_eq!(filter_escapes(b"\x1b[?1049h"), b"\x1b[?1049h"); // alt screen kept
     }
 
     #[test]
     fn test_strip_mouse_mixed() {
         let input = b"\x1b[?1049h\x1b[?1000h\x1b[?1002hHello\x1b[?1006h";
         let expected = b"\x1b[?1049hHello";
-        assert_eq!(strip_mouse_tracking(input), expected);
+        assert_eq!(filter_escapes(input), expected);
     }
 
     // -- clear scrollback (\e[3J) stripped from output --
 
     #[test]
     fn test_strip_clear_scrollback() {
-        // \e[3J (clear scrollback buffer) should be stripped to protect
-        // the user's scroll history in xterm.js.
-        assert_eq!(strip_mouse_tracking(b"\x1b[3J"), b"");
+        assert_eq!(filter_escapes(b"\x1b[3J"), b"");
     }
 
     #[test]
     fn test_strip_clear_scrollback_with_content() {
-        // \e[3J embedded in normal content should be stripped, keeping the rest
-        assert_eq!(strip_mouse_tracking(b"hello\x1b[3Jworld"), b"helloworld");
+        assert_eq!(filter_escapes(b"hello\x1b[3Jworld"), b"helloworld");
     }
 
     #[test]
-    fn test_strip_clear_scrollback_preserves_erase_display() {
-        // \e[2J (erase visible display) should NOT be stripped — only \e[3J
-        assert_eq!(strip_mouse_tracking(b"\x1b[2J"), b"\x1b[2J");
+    fn test_erase_display_replaced() {
+        // \e[2J replaced with \e[H\e[J to avoid pushing viewport to scrollback
+        assert_eq!(filter_escapes(b"\x1b[2J"), b"\x1b[H\x1b[J");
     }
 
     #[test]
-    fn test_strip_clear_scrollback_full_clear_combo() {
-        // `clear` command typically sends \e[H\e[2J\e[3J — only \e[3J stripped
+    fn test_erase_display_with_content() {
+        assert_eq!(filter_escapes(b"hello\x1b[2Jworld"), b"hello\x1b[H\x1b[Jworld");
+    }
+
+    #[test]
+    fn test_full_clear_combo() {
+        // `clear` sends \e[H\e[2J\e[3J — \e[2J replaced, \e[3J stripped
         let input = b"\x1b[H\x1b[2J\x1b[3J";
-        let expected = b"\x1b[H\x1b[2J";
-        assert_eq!(strip_mouse_tracking(input), expected);
+        let expected = b"\x1b[H\x1b[H\x1b[J";
+        assert_eq!(filter_escapes(input), expected);
+    }
+
+    #[test]
+    fn test_claude_repaint_combo() {
+        // Claude sends \e[2J\e[3J\e[H — \e[2J replaced, \e[3J stripped, \e[H kept
+        let input = b"\x1b[2J\x1b[3J\x1b[H";
+        let expected = b"\x1b[H\x1b[J\x1b[H";
+        assert_eq!(filter_escapes(input), expected);
+    }
+
+    #[test]
+    fn test_erase_below_not_affected() {
+        // \e[J and \e[0J (erase below) should pass through unchanged
+        assert_eq!(filter_escapes(b"\x1b[J"), b"\x1b[J");
+        assert_eq!(filter_escapes(b"\x1b[0J"), b"\x1b[0J");
+    }
+
+    #[test]
+    fn test_erase_above_not_affected() {
+        // \e[1J (erase above) should pass through unchanged
+        assert_eq!(filter_escapes(b"\x1b[1J"), b"\x1b[1J");
     }
 
     // -- CcWriter --

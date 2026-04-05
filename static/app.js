@@ -674,9 +674,7 @@ function initTerminal(key, paneEl, opts) {
     };
 
     ws.onmessage = (e) => {
-      if (e.data instanceof ArrayBuffer) {
-        term.write(new Uint8Array(e.data));
-      } else if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
+      if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
         try {
           const msg = JSON.parse(e.data);
           entry.altScreen = msg.active;
@@ -684,8 +682,18 @@ function initTerminal(key, paneEl, opts) {
           if (indicator) indicator.style.display = msg.active ? 'inline' : 'none';
         } catch {}
         return;
+      }
+      const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+      // Preserve scroll position when the user has scrolled up to read
+      // history. Without this, Claude Code's frequent \e[2J + \e[H repaint
+      // cycle causes xterm.js to yank the viewport back to the active area.
+      const buf = term.buffer.active;
+      const userScrolledUp = buf.viewportY < buf.baseY;
+      if (userScrolledUp) {
+        const savedY = buf.viewportY;
+        term.write(data, () => { term.scrollToLine(savedY); });
       } else {
-        term.write(e.data);
+        term.write(data);
       }
     };
 
