@@ -657,7 +657,7 @@ function initTerminal(key, paneEl, opts) {
   term.open(container);
   fitAddon.fit();
 
-  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false };
+  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true };
   _tabTerminals[key] = entry;
 
   function connectWs() {
@@ -690,14 +690,12 @@ function initTerminal(key, paneEl, opts) {
         return;
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
-      // After a sync block with \e[3J (clear scrollback), xterm.js can leave
-      // viewportY at 0 even though baseY grew from the redrawn content. Force
-      // scroll-to-bottom when the user was already at the bottom before the
-      // write. If they had scrolled up, don't touch the viewport.
-      const buf = term.buffer.active;
-      const wasAtBottom = buf.viewportY >= buf.baseY;
+      // Auto-scroll: use _autoScroll flag instead of checking viewportY vs
+      // baseY on each write. The flag is only cleared by explicit user
+      // wheel-scroll-up, not by transient viewport desyncs that can occur
+      // during xterm.js sync mode rendering or resize reflows.
       term.write(data, () => {
-        if (wasAtBottom) {
+        if (entry._autoScroll) {
           term.scrollToBottom();
         }
       });
@@ -719,6 +717,24 @@ function initTerminal(key, paneEl, opts) {
 
   entry.connectWs = connectWs;
   connectWs();
+
+  // Auto-scroll: disabled when the user scrolls up via mouse wheel, re-enabled
+  // when they scroll back to the bottom. This avoids the feedback loop where a
+  // transient viewportY desync permanently disables auto-scroll.
+  container.addEventListener('wheel', (e) => {
+    if (e.deltaY < 0) {
+      // Scrolling up — disable auto-scroll
+      entry._autoScroll = false;
+    } else if (e.deltaY > 0) {
+      // Scrolling down — re-enable if we've reached the bottom
+      requestAnimationFrame(() => {
+        const buf = term.buffer.active;
+        if (buf.viewportY >= buf.baseY) {
+          entry._autoScroll = true;
+        }
+      });
+    }
+  }, { passive: true });
 
   // In full-screen mode (emacs, vim): intercept Cmd+key and send as Meta+key.
   // In normal mode (shell, Claude): let all Cmd+key pass through to the browser
@@ -837,10 +853,8 @@ function initTerminal(key, paneEl, opts) {
         term.scrollToBottom();
         return;
       }
-      const buf = term.buffer.active;
-      const wasAtBottom = buf.viewportY >= buf.baseY;
       fitAddon.fit();
-      if (wasAtBottom) {
+      if (entry._autoScroll) {
         term.scrollToBottom();
       }
     }, 100);
