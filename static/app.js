@@ -281,7 +281,13 @@ async function showAddProject() {
         return;
       }
       const isGit = await checkIsGitDir(path);
-      gitCb.checked = isGit;
+      // Only auto-check when transitioning from disabled to enabled
+      // (first detection). Don't override if the user already unchecked it.
+      if (isGit && gitCb.disabled) {
+        gitCb.checked = true;
+      } else if (!isGit) {
+        gitCb.checked = false;
+      }
       gitCb.disabled = !isGit;
     };
     dirInput.addEventListener('blur', updateGit);
