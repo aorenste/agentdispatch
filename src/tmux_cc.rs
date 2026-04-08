@@ -43,13 +43,24 @@ fn parse_octal(digits: &[u8]) -> Option<u8> {
 }
 
 /// Encode user input as a tmux `send-keys -H` command.
+/// Encode user input as one or more tmux `send-keys -H` commands.
+/// Large inputs are chunked to avoid overwhelming tmux with a single
+/// massive command line (e.g. a 12KB paste would be a 36KB command).
 pub fn encode_input(pane_id: &str, data: &[u8]) -> Vec<u8> {
-    let mut cmd = format!("send-keys -H -t {pane_id}");
-    for byte in data {
-        cmd.push_str(&format!(" {:02x}", byte));
+    const CHUNK_SIZE: usize = 512;
+    if data.is_empty() {
+        return format!("send-keys -H -t {pane_id}\n").into_bytes();
     }
-    cmd.push('\n');
-    cmd.into_bytes()
+    let mut result = Vec::with_capacity(data.len() * 4);
+    for chunk in data.chunks(CHUNK_SIZE) {
+        let mut cmd = format!("send-keys -H -t {pane_id}");
+        for byte in chunk {
+            cmd.push_str(&format!(" {:02x}", byte));
+        }
+        cmd.push('\n');
+        result.extend_from_slice(cmd.as_bytes());
+    }
+    result
 }
 
 /// Encode a resize command for tmux control mode.
@@ -383,6 +394,35 @@ mod tests {
     #[test]
     fn test_encode_empty() {
         assert_eq!(encode_input("%0", b""), b"send-keys -H -t %0\n");
+    }
+
+    #[test]
+    fn test_encode_large_input_is_chunked() {
+        // A 1200-byte paste should be split into multiple send-keys commands
+        // so tmux doesn't choke on a single massive command line.
+        let data = vec![0x41u8; 1200]; // 1200 bytes of 'A'
+        let encoded = encode_input("%0", &data);
+        let commands: Vec<&[u8]> = encoded.split(|&b| b == b'\n')
+            .filter(|c| !c.is_empty())
+            .collect();
+        assert!(commands.len() > 1,
+            "1200-byte input should produce multiple commands, got {}",
+            commands.len());
+        // Each command should be a valid send-keys -H
+        for cmd in &commands {
+            assert!(cmd.starts_with(b"send-keys -H -t %0"),
+                "each chunk should be a send-keys command");
+        }
+        // Total hex bytes across all commands should equal input length
+        let total_hex: usize = commands.iter()
+            .map(|cmd| {
+                let s = std::str::from_utf8(cmd).unwrap();
+                s.trim_start_matches("send-keys -H -t %0")
+                    .split_whitespace()
+                    .count()
+            })
+            .sum();
+        assert_eq!(total_hex, 1200, "all bytes should be accounted for");
     }
 
     // -- encode_resize --
