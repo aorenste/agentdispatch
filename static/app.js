@@ -757,6 +757,8 @@ function initTerminal(key, paneEl, opts) {
           entry.altScreen = msg.active;
           const indicator = document.getElementById('altscreen-' + key);
           if (indicator) indicator.style.display = msg.active ? 'inline' : 'none';
+          const vp = entry.container.querySelector('.xterm-viewport');
+          if (vp) vp.style.overflowY = msg.active ? 'hidden' : 'auto';
         } catch {}
         return;
       }

@@ -99,6 +99,48 @@ test('altScreen becomes true when full-screen app starts', async ({ page }) => {
   await expect(badge).not.toBeVisible();
 });
 
+test('scrollbar hidden in alternate screen mode', async ({ page }) => {
+  test.setTimeout(15000);
+  await connectToTerminal(page);
+
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+
+  // Generate some scrollback so there's something to scroll
+  await page.keyboard.type('seq 1 50\n', { delay: 10 });
+  await page.waitForTimeout(500);
+
+  // Scrollbar should be visible (normal mode with scrollback)
+  const overflowBefore = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? getComputedStyle(vp).overflowY : null;
+  }, tabId);
+  // xterm.js default is not 'hidden'
+  expect(overflowBefore).not.toBe('hidden');
+
+  // Enter alternate screen
+  await page.keyboard.type('less /etc/passwd\n', { delay: 10 });
+  await page.waitForTimeout(1000);
+
+  // Scrollbar should be hidden — no scrolling in full-screen apps
+  const overflowDuring = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? vp.style.overflowY : null;
+  }, tabId);
+  expect(overflowDuring).toBe('hidden');
+
+  // Exit alternate screen
+  await page.keyboard.press('q');
+  await page.waitForTimeout(500);
+
+  // Scrollbar should be restored
+  const overflowAfter = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? vp.style.overflowY : null;
+  }, tabId);
+  expect(overflowAfter).not.toBe('hidden');
+});
+
 test('altScreen state survives reconnect', async ({ page }) => {
   test.setTimeout(20000);
   await connectToTerminal(page);
