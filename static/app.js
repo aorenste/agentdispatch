@@ -8,6 +8,7 @@ let _selectedWsId = null;
 let _selectedWsSubtab = 'agent';
 let _wsSubtabs = {}; // workspace id -> last selected subtab
 let _tabTerminals = {}; // keyed by tab id -> {term, ws, fitAddon, container}
+let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, container}
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -32,6 +33,10 @@ function normalizeWsSubtab(ws, subtab) {
   if (!ws) return '';
   if (subtab === 'claude') subtab = 'agent';
   if (subtab === 'agent') return getDefaultWsSubtab(ws);
+  if (subtab === 'history') {
+    const proj = ws ? _projects.find(p => p.name === ws.project) : null;
+    return getProjectAgent(proj) !== 'None' ? 'history' : getDefaultWsSubtab(ws);
+  }
   if (subtab && subtab.startsWith('tab-')) {
     return ws.tabs.some(t => 'tab-' + t.id === subtab) ? subtab : getDefaultWsSubtab(ws);
   }
@@ -63,6 +68,16 @@ function buildAgentCommand(agent, proj) {
     cmd = 'conda activate ' + proj.conda_env + ' && ' + cmd;
   }
   return cmd;
+}
+
+function containsEraseDisplay(data) {
+  // \e[2J = bytes 0x1b 0x5b 0x32 0x4a
+  for (let i = 0; i <= data.length - 4; i++) {
+    if (data[i] === 0x1b && data[i+1] === 0x5b && data[i+2] === 0x32 && data[i+3] === 0x4a) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /* -- DOM-dependent functions -- */
@@ -545,6 +560,11 @@ function renderSelectedWorkspace() {
       stash.appendChild(entry.container);
     }
   }
+  for (const [, entry] of Object.entries(_historyTerminals)) {
+    if (entry.container.parentElement) {
+      stash.appendChild(entry.container);
+    }
+  }
 
   const proj = _projects.find(p => p.name === ws.project);
   const agent = getProjectAgent(proj);
@@ -559,7 +579,7 @@ function renderSelectedWorkspace() {
 
   main.innerHTML = `
     <div class="ws-subtabs">
-      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' ? 'active' : ''}" onclick="switchWsSubtab('agent')">${esc(agent)}<span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span></button>` : ''}
+      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
       ${tabButtons}
       <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
     </div>
@@ -575,6 +595,10 @@ function renderSelectedWorkspace() {
       disposeTerminal('agent-' + ws.id);
     }
     initTerminal('agent-' + ws.id, paneEl, {cwd, cmd: agentCmd, workspaceId: ws.id, tabId: 'agent'});
+  } else if (_selectedWsSubtab === 'history') {
+    const histEntry = getOrCreateHistoryTerminal(ws.id);
+    paneEl.appendChild(histEntry.container);
+    requestAnimationFrame(() => { histEntry.fitAddon.fit(); });
   } else if (!_selectedWsSubtab) {
     disposeTerminal('agent-' + ws.id);
     paneEl.innerHTML = '<div class="ws-empty" style="padding:16px">No panes open</div>';
@@ -612,6 +636,47 @@ function reconnectAllTerminals() {
       entry.connectWs();
     }
   }
+}
+
+function getOrCreateHistoryTerminal(wsId) {
+  if (_historyTerminals[wsId]) return _historyTerminals[wsId];
+
+  const container = document.createElement('div');
+  container.style.flex = '1';
+  container.style.minHeight = '0';
+
+  const term = new Terminal({
+    ...getTerminalConfig(),
+    disableStdin: true,
+    scrollback: 20000,
+    cursorBlink: false,
+  });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+
+  const resizeObserver = new ResizeObserver(() => { fitAddon.fit(); });
+  resizeObserver.observe(container);
+
+  const entry = { term, fitAddon, container, resizeObserver };
+  _historyTerminals[wsId] = entry;
+  return entry;
+}
+
+function captureAndAppendSnapshot(wsId, agentTerm) {
+  if (typeof SerializeAddon === 'undefined') return;
+  const histEntry = getOrCreateHistoryTerminal(wsId);
+  const addon = new SerializeAddon.SerializeAddon();
+  agentTerm.loadAddon(addon);
+  const serialized = addon.serialize({ scrollback: 0 });
+  addon.dispose();
+
+  if (!serialized || serialized.trim() === '') return;
+
+  const sep = '\r\n\x1b[38;5;240m' + '\u2500'.repeat(60) + '\x1b[0m\r\n';
+  histEntry.term.write(sep);
+  histEntry.term.write(serialized);
 }
 
 function initTerminal(key, paneEl, opts) {
@@ -690,6 +755,10 @@ function initTerminal(key, paneEl, opts) {
         return;
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+      // Capture agent terminal screen before erase-display clears it
+      if (typeof key === 'string' && key.startsWith('agent-') && data instanceof Uint8Array && containsEraseDisplay(data)) {
+        captureAndAppendSnapshot(opts.workspaceId, term);
+      }
       // Auto-scroll: use _autoScroll flag instead of checking viewportY vs
       // baseY on each write. The flag is only cleared by explicit user
       // wheel-scroll-up, not by transient viewport desyncs that can occur
@@ -704,7 +773,8 @@ function initTerminal(key, paneEl, opts) {
     ws.onerror = () => {
       const overlay = document.createElement('div');
       overlay.className = 'pane-error-overlay';
-      overlay.textContent = 'Connection failed — session may no longer exist.';
+      overlay.innerHTML = 'Connection failed \u2014 session may no longer exist.'
+        + (opts.workspaceId != null ? '<br><button class="btn-danger" style="margin-top:8px" onclick="this.disabled=true;this.textContent=\'Destroying\u2026\';destroyWorkspace(' + opts.workspaceId + ')">Destroy Workspace</button>' : '');
       container.style.position = 'relative';
       container.appendChild(overlay);
     };
@@ -900,6 +970,11 @@ async function destroyWorkspace(id) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
   }
   disposeTerminal('agent-' + id);
+  if (_historyTerminals[id]) {
+    _historyTerminals[id].resizeObserver.disconnect();
+    _historyTerminals[id].term.dispose();
+    delete _historyTerminals[id];
+  }
   await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
   if (_selectedWsId === id) _selectedWsId = null;
   fetchWorkspaces();
@@ -1208,6 +1283,7 @@ if (typeof module !== 'undefined' && module.exports) {
     getTerminalConfig,
     buildAgentCommand,
     escAttr,
+    containsEraseDisplay,
     _setProjects: (p) => { _projects = p; },
   };
 }

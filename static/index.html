@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-serialize@0.13.0/lib/addon-serialize.min.js"></script>
 <style>
   :root {
     --bg-body: #0f172a;
@@ -383,8 +384,22 @@
     font-size: 14px;
     font-weight: 500;
     z-index: 10;
-    pointer-events: none;
+    text-align: center;
   }
+
+  .agent-view-select {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    font-size: 10px;
+    padding: 1px 2px;
+    margin-left: 6px;
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  .agent-view-select:hover { color: var(--text); border-color: var(--text-muted); }
+  .agent-view-select option { background: var(--bg-card); color: var(--text); }
 
   .altscreen-badge {
     font-size: 9px;

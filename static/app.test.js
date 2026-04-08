@@ -216,4 +216,42 @@ describe('normalizeWsSubtab', () => {
     // agent is None, so default is first tab
     assert.equal(app.normalizeWsSubtab(ws, 'agent'), 'tab-1');
   });
+
+  test('history subtab valid when agent enabled', () => {
+    app._setProjects([{name: 'p', agent: 'Claude'}]);
+    const ws = {project: 'p', tabs: []};
+    assert.equal(app.normalizeWsSubtab(ws, 'history'), 'history');
+  });
+
+  test('history subtab falls back when agent is None', () => {
+    app._setProjects([{name: 'p', agent: 'None'}]);
+    const ws = {project: 'p', tabs: [{id: 1}]};
+    assert.equal(app.normalizeWsSubtab(ws, 'history'), 'tab-1');
+  });
+});
+
+describe('containsEraseDisplay', () => {
+  test('detects \\e[2J', () => {
+    assert.equal(app.containsEraseDisplay(new Uint8Array([0x1b, 0x5b, 0x32, 0x4a])), true);
+  });
+
+  test('detects \\e[2J in middle of data', () => {
+    assert.equal(app.containsEraseDisplay(new Uint8Array([0x41, 0x1b, 0x5b, 0x32, 0x4a, 0x42])), true);
+  });
+
+  test('returns false for empty data', () => {
+    assert.equal(app.containsEraseDisplay(new Uint8Array([])), false);
+  });
+
+  test('returns false for too-short data', () => {
+    assert.equal(app.containsEraseDisplay(new Uint8Array([0x1b, 0x5b, 0x32])), false);
+  });
+
+  test('returns false for \\e[3J', () => {
+    assert.equal(app.containsEraseDisplay(new Uint8Array([0x1b, 0x5b, 0x33, 0x4a])), false);
+  });
+
+  test('returns false for plain text', () => {
+    assert.equal(app.containsEraseDisplay(new Uint8Array([0x68, 0x65, 0x6c, 0x6c, 0x6f])), false);
+  });
 });
