@@ -24,10 +24,20 @@ this I WILL FUCKING KILL YOU.
   Playwright can hang on exit due to tmux child processes
 - E2E tests use a separate tmux socket (`agentdispatch-test` via env var
   `AGENTDISPATCH_TMUX_SOCKET`) to avoid killing the user's real sessions
+- E2E tests run in parallel (4 workers). Each test file MUST use a unique project
+  name and MUST only clean up its own workspaces (filter by project name). Never
+  delete all workspaces — that nukes other tests running in parallel.
+- Use `e2e/helpers.js` (`setupWorkspace`, `teardownWorkspace`, `makeHelpers`) for
+  new test files to avoid boilerplate and ensure correct cleanup.
+- Prefer `waitForFunction` polling over `waitForTimeout` sleeps. Sleeps are flaky
+  under load and waste time. Poll for the actual condition you're waiting for.
+- Don't use real Claude in tests. Simulate alt-screen apps with `less`, `vi`, or
+  a `python3 -c` script that writes escape sequences and sleeps.
 
 ## tmux
 
 - tmux sessions are created in `launch_project` (agent window) and `create_tab` (shell windows)
 - The terminal WebSocket handler only attaches to existing sessions, never creates them
-- Output history is in-memory; on server restart, falls back to `capture_pane_with_cursor`
-- Alternate screen state is queried from tmux (`#{alternate_on}`) on connect
+- On reconnect, pane content is restored via `capture_pane_with_cursor` (visible area only)
+- Alternate screen state is queried from tmux (`#{alternate_on}`) on connect; if active,
+  `\x1b[?1049h` is sent to xterm.js before the capture-pane content so the buffers match
