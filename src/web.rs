@@ -228,6 +228,7 @@ mod tests {
     e2e_file_test!(test_e2e_claude_scroll_jump, "claude-scroll-jump");
     e2e_file_test!(test_e2e_git_checkbox, "git-checkbox");
     e2e_file_test!(test_e2e_launch, "launch");
+    e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_resize, "pane-resize");
     e2e_file_test!(test_e2e_scroll, "scroll");
     e2e_file_test!(test_e2e_scroll_isolation, "scroll-isolation");

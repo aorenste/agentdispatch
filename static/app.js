@@ -752,6 +752,13 @@ function initTerminal(key, paneEl, opts) {
     };
 
     ws.onmessage = (e) => {
+      if (typeof e.data === 'string' && e.data.startsWith('{"type":"pane_exit"')) {
+        // Auto-close shell tabs when their pane exits
+        if (typeof key === 'number') {
+          closeTab(key);
+        }
+        return;
+      }
       if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
         try {
           const msg = JSON.parse(e.data);

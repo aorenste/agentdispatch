@@ -135,26 +135,30 @@ pub fn kill_window(session: &str, window: &str) {
         .output();
 }
 
-/// Query the pane ID for a given session:window.
-fn get_pane_id(session: &str, window: &str) -> Result<String, String> {
+/// Query the pane ID and window ID for a given session:window.
+fn get_pane_and_window_id(session: &str, window: &str) -> Result<(String, String), String> {
     let target = format!("{session}:{window}");
     let output = tmux_base()
-        .args(["list-panes", "-t", &target, "-F", "#{pane_id}"])
+        .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{window_id}"])
         .output()
         .map_err(|e| format!("Failed to query pane id: {e}"))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().next()
-        .map(|s| s.trim().to_string())
-        .ok_or_else(|| "No pane found".to_string())
+    let line = stdout.lines().next()
+        .ok_or_else(|| "No pane found".to_string())?;
+    let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        return Err("Failed to parse pane and window ID".to_string());
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
 }
 
 /// Set up a linked session for control-mode attach.
 /// Creates the linked session via tmux subprocesses, queries the pane ID,
-/// and returns (command, args, pane_id, link_session_name).
-pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, String, String), String> {
+/// and returns (command, args, pane_id, link_session_name, window_id).
+pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, String, String, String), String> {
     let id = ATTACH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let link_name = format!("{session}--{window}-{id}");
 
@@ -185,8 +189,8 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
         .args(["select-window", "-t", &target_window])
         .output();
 
-    // Query pane ID from the main session (linked session shares its windows)
-    let pane_id = get_pane_id(session, window)?;
+    // Query pane ID and window ID from the main session (linked session shares its windows)
+    let (pane_id, window_id) = get_pane_and_window_id(session, window)?;
 
     // Note: we don't set destroy-unattached here because the linked session
     // has no clients yet and would be destroyed immediately. Instead, the
@@ -205,6 +209,7 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
         ],
         pane_id,
         link,
+        window_id,
     ))
 }
 

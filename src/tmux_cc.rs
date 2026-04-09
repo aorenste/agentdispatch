@@ -162,6 +162,7 @@ pub struct CcReader {
     line_buf: Vec<u8>,
     dcs_stripped: bool,
     pane_id: String,
+    window_id: Option<String>,
     saw_exit: bool,
     alternate_screen: bool,
 }
@@ -172,9 +173,17 @@ impl CcReader {
             line_buf: Vec::with_capacity(8192),
             dcs_stripped: false,
             pane_id,
+            window_id: None,
             saw_exit: false,
             alternate_screen: false,
         }
+    }
+
+    /// Set the window ID to monitor for `%window-close` notifications.
+    /// When the window containing our pane closes (e.g. shell exits),
+    /// the reader will emit `CcEvent::Exit`.
+    pub fn set_window_id(&mut self, id: String) {
+        self.window_id = Some(id);
     }
 
     /// Set the initial alternate screen state (e.g. from a tmux query).
@@ -256,6 +265,28 @@ impl CcReader {
             if line.starts_with(b"%exit") {
                 self.saw_exit = true;
                 return Some(CcEvent::Exit);
+            }
+
+            // Detect window close — when the pane's window is destroyed
+            // (e.g. shell exits), the linked session still has other windows
+            // so %exit won't fire. Detect it via %unlinked-window-close
+            // (grouped sessions) or %window-close (standalone sessions).
+            let wclose_prefix = if line.starts_with(b"%unlinked-window-close ") {
+                Some(b"%unlinked-window-close ".len())
+            } else if line.starts_with(b"%window-close ") {
+                Some(b"%window-close ".len())
+            } else {
+                None
+            };
+            if let Some(prefix_len) = wclose_prefix {
+                if let Some(ref wid) = self.window_id {
+                    let rest = &line[prefix_len..];
+                    if rest == wid.as_bytes() {
+                        self.saw_exit = true;
+                        return Some(CcEvent::Exit);
+                    }
+                }
+                continue;
             }
 
             // All other % lines (notifications, %begin/%end, etc.) — skip
@@ -425,6 +456,46 @@ mod tests {
         r.feed(b"%exit\r\n");
         assert!(matches!(r.next_event(), Some(CcEvent::Exit)));
         assert!(r.next_event().is_none());
+    }
+
+    #[test]
+    fn test_reader_unlinked_window_close() {
+        let mut r = CcReader::new("%0".to_string());
+        r.set_window_id("@1".to_string());
+        r.feed(b"%unlinked-window-close @1\r\n");
+        assert!(matches!(r.next_event(), Some(CcEvent::Exit)));
+        assert!(r.next_event().is_none());
+    }
+
+    #[test]
+    fn test_reader_window_close() {
+        let mut r = CcReader::new("%0".to_string());
+        r.set_window_id("@3".to_string());
+        r.feed(b"%window-close @3\r\n");
+        assert!(matches!(r.next_event(), Some(CcEvent::Exit)));
+        assert!(r.next_event().is_none());
+    }
+
+    #[test]
+    fn test_reader_window_close_wrong_id_ignored() {
+        let mut r = CcReader::new("%0".to_string());
+        r.set_window_id("@1".to_string());
+        r.feed(b"%unlinked-window-close @2\r\n%output %0 data\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
+            other => panic!("expected Output, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_reader_window_close_no_window_id_set() {
+        let mut r = CcReader::new("%0".to_string());
+        // No set_window_id call — window close should be ignored
+        r.feed(b"%unlinked-window-close @1\r\n%output %0 data\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
+            other => panic!("expected Output, got {:?}", other.is_some()),
+        }
     }
 
     #[test]

@@ -50,7 +50,7 @@ enum SessionMode {
     /// Direct shell — raw PTY passthrough
     Direct,
     /// tmux control mode — parse %output, send-keys -H
-    TmuxControl { pane_id: String, link_name: String, initial_alt_screen: bool },
+    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool },
 }
 
 #[get("/api/terminal")]
@@ -82,15 +82,15 @@ pub async fn ws_terminal(
             if !tmux::has_window(&tmux_session, &tmux_window) {
                 return Err(format!("tmux window {tmux_window} not found in {tmux_session}"));
             }
-            let (c, a, pane_id, link_name) = tmux::attach_args(&tmux_session, &tmux_window)?;
+            let (c, a, pane_id, link_name, window_id) = tmux::attach_args(&tmux_session, &tmux_window)?;
             let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
-            eprintln!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} alt_screen={initial_alt_screen}");
-            Ok((c, a, pane_id, link_name, initial_alt_screen))
+            eprintln!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen}");
+            Ok((c, a, pane_id, link_name, window_id, initial_alt_screen))
         }).await.map_err(|e| actix_web::error::ErrorInternalServerError(format!("{e}")))?
           .map_err(|e| actix_web::error::ErrorNotFound(e))?;
 
-        let (c, a, pane_id, link_name, initial_alt_screen) = result;
-        (c, a, SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen })
+        let (c, a, pane_id, link_name, window_id, initial_alt_screen) = result;
+        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen })
     } else {
         let shell = user_shell();
         let args = if let Some(ref run_cmd) = cmd {
@@ -189,14 +189,14 @@ pub async fn ws_terminal(
         SessionMode::Direct => {
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
-        SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen } => {
+        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen } => {
             let initial_content = tmux::capture_pane_with_cursor(&pane_id);
 
             // Send initial resize
             let resize_cmd = tmux_cc::encode_resize(init_cols, init_rows);
             std_file_write(&tokio_fd, &resize_cmd);
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, init_cols, init_rows, initial_alt_screen);
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen);
         }
     }
 
@@ -310,6 +310,7 @@ fn spawn_cc_bridge(
     mut child: std::process::Child,
     pane_id: String,
     link_name: String,
+    window_id: String,
     initial_content: Option<Vec<u8>>,
     _init_cols: u16,
     _init_rows: u16,
@@ -371,6 +372,7 @@ fn spawn_cc_bridge(
         };
 
         let mut reader = CcReader::new(read_pane_id);
+        reader.set_window_id(window_id);
         reader.set_alternate_screen(last_alt_screen);
         let mut raw_buf = [0u8; 4096];
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -411,7 +413,10 @@ fn spawn_cc_bridge(
                                             }
                                         }
                                     }
-                                    CcEvent::Exit => break 'outer,
+                                    CcEvent::Exit => {
+                                        let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
+                                        break 'outer;
+                                    }
                                 }
                             }
                         }
