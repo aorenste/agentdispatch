@@ -10,20 +10,20 @@ test.beforeAll(async ({ request }) => {
   // Clean up any leftover state from previous scroll test runs
   const wsRes = await request.get(`${BASE}/api/workspaces`);
   for (const ws of await wsRes.json()) {
-    if (ws.project === 'e2e-scroll') {
+    if (ws.project === 'e2e-scrolltest') {
       await request.delete(`${BASE}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-scroll`);
+  await request.delete(`${BASE}/api/projects/e2e-scrolltest`);
 
   // Create project (no git, no agent — just a shell)
   const projRes = await request.post(`${BASE}/api/projects`, {
-    data: { name: 'e2e-scroll', root_dir: '/tmp', git: false, agent: 'None' },
+    data: { name: 'e2e-scrolltest', root_dir: '/tmp', git: false, agent: 'None' },
   });
   expect(projRes.ok()).toBeTruthy();
 
   // Launch workspace
-  const launchRes = await request.post(`${BASE}/api/projects/e2e-scroll/launch`, {
+  const launchRes = await request.post(`${BASE}/api/projects/e2e-scrolltest/launch`, {
     data: {},
   });
   expect(launchRes.ok()).toBeTruthy();
@@ -43,7 +43,7 @@ test.afterAll(async ({ request }) => {
   if (wsId != null) {
     await request.delete(`${BASE}/api/workspaces/${wsId}`);
   }
-  await request.delete(`${BASE}/api/projects/e2e-scroll`);
+  await request.delete(`${BASE}/api/projects/e2e-scrolltest`);
 });
 
 /** Read the visible terminal lines via xterm.js buffer API */
@@ -70,7 +70,7 @@ test('mouse scroll works', async ({ page }) => {
 
   // Wait for our workspace to appear and select it
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
-  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scroll' }).click();
+  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).click();
 
   // Wait for terminal to render
   await page.waitForSelector('.xterm-screen', { timeout: 15000 });
@@ -188,7 +188,7 @@ test('text selection persists (not cleared by tmux)', async ({ page }) => {
   await page.goto('/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
-  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scroll' }).first().click();
+  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).first().click();
   await page.waitForSelector('.xterm-screen', { timeout: 15000 });
 
   // Wait for WebSocket connection
@@ -298,7 +298,7 @@ test('output from other tabs does not leak', async ({ page, request }) => {
   await page.goto('/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
-  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scroll' }).first().click();
+  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).first().click();
   await page.waitForSelector('.ws-subtab', { timeout: 10000 });
 
   // Click on tab 2 subtab
@@ -422,7 +422,7 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
   test.setTimeout(30000);
 
   // Use a fresh workspace to avoid interference from prior tests
-  const launchRes = await request.post(`${BASE}/api/projects/e2e-scroll/launch`, { data: {} });
+  const launchRes = await request.post(`${BASE}/api/projects/e2e-scrolltest/launch`, { data: {} });
   expect(launchRes.ok()).toBeTruthy();
   const ws2 = await launchRes.json();
   const tabRes = await request.post(`${BASE}/api/workspaces/${ws2.id}/tabs`, {
@@ -436,7 +436,7 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   // Click the second workspace (most recent)
-  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scroll' }).last().click();
+  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).last().click();
   await page.waitForSelector('.xterm-screen', { timeout: 15000 });
   await page.waitForFunction(
     (key) => {
@@ -462,7 +462,7 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
   await page.goto('/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
-  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scroll' }).last().click();
+  await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).last().click();
   await page.waitForSelector('.xterm-screen', { timeout: 15000 });
   await page.waitForFunction(
     (key) => {

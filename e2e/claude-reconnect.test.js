@@ -48,7 +48,17 @@ test('Claude screen is identical after reconnect', async ({ page }) => {
   console.log('2: accepting trust');
   await page.locator('.xterm-helper-textarea').focus();
   await page.keyboard.press('Enter');
-  await page.waitForTimeout(5000);
+  // Wait for Claude to render real content after trust prompt
+  await page.waitForFunction(() => {
+    const e = Object.values(_tabTerminals)[0];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    let n = 0;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf.getLine(i)?.translateToString().trim().length > 5) n++;
+    }
+    return n >= 10;
+  }, null, { timeout: 10000 });
 
   // Screenshot before
   console.log('3: screenshot before');
@@ -59,7 +69,6 @@ test('Claude screen is identical after reconnect', async ({ page }) => {
   // Disconnect
   console.log('4: disconnect');
   await page.goto('about:blank');
-  await page.waitForTimeout(500);
 
   // Reconnect
   console.log('5: reconnect');
@@ -88,8 +97,17 @@ test('Claude screen is identical after reconnect', async ({ page }) => {
     return n >= 5;
   }, null, { timeout: 10000 });
 
-  // Wait for redraw to settle
-  await page.waitForTimeout(3000);
+  // Wait for redraw to settle — content should match pre-disconnect
+  await page.waitForFunction(() => {
+    const e = Object.values(_tabTerminals)[0];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    let n = 0;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf.getLine(i)?.translateToString().trim().length > 5) n++;
+    }
+    return n >= 10;
+  }, null, { timeout: 10000 });
 
   // Screenshot after
   console.log('8: screenshot after');

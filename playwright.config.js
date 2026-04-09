@@ -2,10 +2,9 @@ const { defineConfig } = require('@playwright/test');
 
 module.exports = defineConfig({
   testDir: './e2e',
-  timeout: 60000,
-  retries: 0,
-  workers: 1,
-  fullyParallel: false,
+  timeout: 10000,
+  retries: 1,
+  workers: 4,
   use: {
     baseURL: 'http://localhost:8916',
     headless: true,
