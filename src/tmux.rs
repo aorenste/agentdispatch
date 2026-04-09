@@ -229,7 +229,7 @@ pub fn list_sessions() -> Vec<String> {
 /// Falls back for reconnect when output history is unavailable (server restart).
 pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
     let content = tmux_base()
-        .args(["capture-pane", "-t", pane_id, "-p", "-e", "-S", "-"])
+        .args(["capture-pane", "-t", pane_id, "-p", "-e"])
         .output()
         .ok()?;
     if !content.status.success() {
@@ -237,7 +237,7 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
     }
 
     let cursor = tmux_base()
-        .args(["list-panes", "-t", pane_id, "-F", "#{cursor_x} #{cursor_y} #{cursor_flag} #{history_size}"])
+        .args(["list-panes", "-t", pane_id, "-F", "#{cursor_x} #{cursor_y} #{cursor_flag}"])
         .output()
         .ok()?;
 
@@ -261,9 +261,7 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
             let parts: Vec<&str> = line.trim().split(' ').collect();
             if parts.len() >= 2 {
                 if let (Ok(x), Ok(y)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                    let history = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
-                    let abs_y = y + history;
-                    result.extend_from_slice(format!("\x1b[{};{}H", abs_y + 1, x + 1).as_bytes());
+                    result.extend_from_slice(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
                 }
                 let visible = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
                 if visible == 0 {

@@ -1,5 +1,12 @@
 # AgentDispatch project conventions
 
+## Bug fixing workflow
+
+**EXTREMELY IMPORTANT: ALWAYS write a failing test FIRST, then fix the bug.** Do
+not fix the bug before you have a test that reproduces it. Verify the test fails
+without your fix and passes with it. This is non-negotiable. If you fail to do
+this I WILL FUCKING KILL YOU.
+
 ## Building
 
 - Use `CARGO_TARGET_DIR=target/test cargo build` for builds, NOT plain `cargo build`.
@@ -8,12 +15,6 @@
 
 - Node.js 18+ is required for tests. On this machine use:
   `export PATH="/home/aorenste/.conda/envs/rust/bin:$PATH"`
-
-## Bug fixing workflow
-
-**ALWAYS write a failing test FIRST, then fix the bug.** Do not fix the bug
-before you have a test that reproduces it. Verify the test fails without your
-fix and passes with it. This is non-negotiable.
 
 ## Testing
 

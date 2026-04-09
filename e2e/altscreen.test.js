@@ -203,6 +203,44 @@ test('altScreen state survives reconnect', async ({ page }) => {
   await page.keyboard.press('q');
 });
 
+test('no stale scrollback after reconnect to altscreen pane', async ({ page }) => {
+  test.setTimeout(20000);
+  await connectToTerminal(page);
+
+  // Generate scrollback, then enter alternate screen
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type('seq 1 50\n', { delay: 10 });
+  await page.waitForTimeout(500);
+  await page.keyboard.type('less /etc/passwd\n', { delay: 10 });
+  await page.waitForTimeout(1000);
+
+  // Verify altScreen
+  let state = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    return e ? e.altScreen : null;
+  }, tabId);
+  expect(state).toBe(true);
+
+  // Disconnect and reconnect
+  await page.goto('about:blank');
+  await page.waitForTimeout(500);
+  await connectToTerminal(page);
+  await page.waitForTimeout(1000);
+
+  // After reconnect, there should be no scrollback — baseY should be 0
+  const baseY = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    return e ? e.term.buffer.active.baseY : null;
+  }, tabId);
+  expect(baseY).toBe(0);
+
+  // Clean up: quit less
+  const ta = page.locator('.xterm-helper-textarea');
+  await ta.focus();
+  await page.keyboard.press('q');
+});
+
 test('altScreen and scrollbar survive full page reload', async ({ page }) => {
   test.setTimeout(20000);
   await connectToTerminal(page);

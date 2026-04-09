@@ -326,7 +326,7 @@ fn spawn_cc_bridge(
     let pty_to_ws = actix_web::rt::spawn(async move {
         use std::io::Read;
 
-        // Replay accumulated output history (reconnect replay)
+        // Replay pane content on reconnect.
         let mut last_alt_screen = initial_alt_screen;
         if let Some(content) = initial_content {
             if !content.is_empty() {
@@ -336,11 +336,11 @@ fn spawn_cc_bridge(
                 }
             }
         }
-        // Send initial altscreen state to browser (from tmux query).
-        // We always trust tmux's #{alternate_on} as the source of truth
-        // rather than scanning history, which may be stale.
+        // Tell the browser about alt screen state. The browser will set the
+        // badge/CSS and clear scrollback (capture-pane content would otherwise
+        // linger as stale scrollback in a full-screen app's pane).
         if last_alt_screen {
-            let msg = format!("{{\"type\":\"altscreen\",\"active\":{last_alt_screen}}}");
+            let msg = format!("{{\"type\":\"altscreen\",\"active\":true,\"reconnect\":true}}");
             if session_clone.text(msg).await.is_err() {
                 let _ = session_clone.close(None).await;
                 return;
