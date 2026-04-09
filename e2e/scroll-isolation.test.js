@@ -1,27 +1,31 @@
 // @ts-check
 // Tests for output isolation between tabs and reconnect content persistence
 const { test, expect } = require('@playwright/test');
-const { BASE, setupWorkspace, teardownWorkspace } = require('./helpers');
+const { startServer, stopServer, setupWorkspace, teardownWorkspace } = require('./helpers');
 
-let wsId, tabId;
+let server, wsId, tabId;
 const proj = 'e2e-scrolliso';
 
 test.beforeAll(async ({ request }) => {
-  ({ wsId, tabId } = await setupWorkspace(request, proj));
+  server = await startServer();
+  ({ wsId, tabId } = await setupWorkspace(request, server.base, proj));
 });
-test.afterAll(async ({ request }) => { await teardownWorkspace(request, proj, wsId); });
+test.afterAll(async ({ request }) => {
+  await teardownWorkspace(request, server.base, proj, wsId);
+  stopServer(server);
+});
 
 test('output from other tabs does not leak', async ({ page, request }) => {
   test.setTimeout(15000);
 
-  const tab2Res = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  const tab2Res = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell 2', tab_type: 'shell' },
   });
   expect(tab2Res.ok()).toBeTruthy();
   const tab2 = await tab2Res.json();
   const tab2Id = tab2.id;
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
@@ -52,7 +56,7 @@ test('output from other tabs does not leak', async ({ page, request }) => {
   );
 
   const page2 = await page.context().newPage();
-  await page2.goto('/');
+  await page2.goto(server.base + '/');
   await page2.click('text=Workspaces');
   await page2.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page2.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
@@ -100,22 +104,22 @@ test('output from other tabs does not leak', async ({ page, request }) => {
   }, tab2Id);
 
   expect(afterContent).not.toContain('LEAK_TEST_MARKER');
-  await request.delete(`${BASE}/api/tabs/${tab2Id}`);
+  await request.delete(`${server.base}/api/tabs/${tab2Id}`);
 });
 
 test('prior output is visible after reconnect', async ({ page, request }) => {
   test.setTimeout(15000);
 
-  const launchRes = await request.post(`${BASE}/api/projects/${proj}/launch`, { data: {} });
+  const launchRes = await request.post(`${server.base}/api/projects/${proj}/launch`, { data: {} });
   expect(launchRes.ok()).toBeTruthy();
   const ws2 = await launchRes.json();
-  const tabRes = await request.post(`${BASE}/api/workspaces/${ws2.id}/tabs`, {
+  const tabRes = await request.post(`${server.base}/api/workspaces/${ws2.id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   expect(tabRes.ok()).toBeTruthy();
   const reconnTab = await tabRes.json();
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).last().click();
@@ -133,7 +137,7 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
 
   await page.goto('about:blank');
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).last().click();
@@ -162,5 +166,5 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
     reconnTab.id, { timeout: 10000 }
   );
 
-  await request.delete(`${BASE}/api/workspaces/${ws2.id}`);
+  await request.delete(`${server.base}/api/workspaces/${ws2.id}`);
 });

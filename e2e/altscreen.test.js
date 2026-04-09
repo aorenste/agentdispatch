@@ -1,16 +1,19 @@
 // @ts-check
-// Basic altscreen tests: badge, scrollbar, state transitions
 const { test, expect } = require('@playwright/test');
-const { BASE, setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
+const { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
 
-let wsId, tabId;
+let server, wsId, tabId;
 const proj = 'e2e-altscreen';
-const h = makeHelpers(() => tabId, proj);
+const h = makeHelpers(() => tabId, () => server.base, proj);
 
 test.beforeAll(async ({ request }) => {
-  ({ wsId, tabId } = await setupWorkspace(request, proj));
+  server = await startServer();
+  ({ wsId, tabId } = await setupWorkspace(request, server.base, proj));
 });
-test.afterAll(async ({ request }) => { await teardownWorkspace(request, proj, wsId); });
+test.afterAll(async ({ request }) => {
+  await teardownWorkspace(request, server.base, proj, wsId);
+  stopServer(server);
+});
 
 test('altScreen is false by default in shell', async ({ page }) => {
   await h.connectToTerminal(page);
@@ -57,7 +60,7 @@ test('scrollbar hidden in alternate screen mode', async ({ page }) => {
 
 test('scrollbar stays hidden after switching away and back to altscreen tab', async ({ page, request }) => {
   test.setTimeout(20000);
-  const tabRes = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell2', tab_type: 'shell' },
   });
   const tab2 = await tabRes.json();
@@ -86,5 +89,5 @@ test('scrollbar stays hidden after switching away and back to altscreen tab', as
 
   await page.locator('.xterm-helper-textarea').first().focus();
   await page.keyboard.press('q');
-  await request.delete(`${BASE}/api/tabs/${tab2.id}`);
+  await request.delete(`${server.base}/api/tabs/${tab2.id}`);
 });

@@ -1,19 +1,24 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
+test.beforeAll(async () => {
+  server = await startServer();
+});
 test.afterAll(async ({ request }) => {
-  await request.delete(`${BASE}/api/projects/e2e-git-cb`);
+  await request.delete(`${server.base}/api/projects/e2e-git-cb`);
+  stopServer(server);
 });
 
 test('unchecking git worktree checkbox is respected on submit', async ({ page, request }) => {
   test.setTimeout(15000);
 
   // Clean up
-  await request.delete(`${BASE}/api/projects/e2e-git-cb`);
+  await request.delete(`${server.base}/api/projects/e2e-git-cb`);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.waitForSelector('.project-row,.empty-msg', { timeout: 10000 });
 
   // Click "Add" button to open the Add Project dialog
@@ -51,7 +56,7 @@ test('unchecking git worktree checkbox is respected on submit', async ({ page, r
   await page.waitForTimeout(1000);
 
   // Verify the project was created with git=false
-  const res = await request.get(`${BASE}/api/projects`);
+  const res = await request.get(`${server.base}/api/projects`);
   const projects = await res.json();
   const proj = projects.find(p => p.name === 'e2e-git-cb');
   expect(proj).toBeTruthy();

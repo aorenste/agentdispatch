@@ -1,23 +1,105 @@
 // Shared test helpers for E2E tests
-const BASE = 'http://localhost:8916';
+const { spawn } = require('child_process');
+const path = require('path');
+const net = require('net');
+
+const BINARY = path.join(__dirname, '..', 'target', 'test', 'debug', 'agentdispatch');
+
+let nextPort = 9100;
+
+/** Find a free port by binding and releasing */
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+    srv.on('error', reject);
+  });
+}
+
+/** Wait for a port to accept connections */
+function waitForPort(port, timeout = 10000) {
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    function tryConnect() {
+      const sock = net.connect(port, '127.0.0.1');
+      sock.on('connect', () => { sock.destroy(); resolve(); });
+      sock.on('error', () => {
+        if (Date.now() - start > timeout) {
+          reject(new Error(`Server did not start on port ${port} within ${timeout}ms`));
+        } else {
+          setTimeout(tryConnect, 50);
+        }
+      });
+    }
+    tryConnect();
+  });
+}
+
+/**
+ * Start a server instance with a unique port, tmux socket, and DB.
+ * Returns { base, proc, port, socket } — call stopServer() to clean up.
+ */
+async function startServer() {
+  const port = await getFreePort();
+  const socket = `agentdispatch-e2e-${port}`;
+  const db = `/tmp/agentdispatch-e2e-${port}.db`;
+
+  // Clean stale DB
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { require('fs').unlinkSync(db + suffix); } catch {}
+  }
+
+  const proc = spawn(BINARY, ['--db', db, '--port', String(port)], {
+    env: { ...process.env, AGENTDISPATCH_TMUX_SOCKET: socket },
+    stdio: 'pipe',
+  });
+
+  // Log server stderr for debugging
+  proc.stderr.on('data', (data) => {
+    const s = data.toString().trim();
+    if (s) process.stderr.write(`[server:${port}] ${s}\n`);
+  });
+
+  await waitForPort(port);
+  return { base: `http://localhost:${port}`, proc, port, socket, db };
+}
+
+function stopServer(server) {
+  if (!server) return;
+  server.proc.kill('SIGTERM');
+  // Clean up tmux sessions
+  try {
+    require('child_process').execSync(
+      `tmux -L ${server.socket} kill-server 2>/dev/null || true`,
+      { stdio: 'ignore' }
+    );
+  } catch {}
+  // Clean up DB files
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { require('fs').unlinkSync(server.db + suffix); } catch {}
+  }
+}
 
 /** Create a project + workspace + shell tab, return { wsId, tabId } */
-async function setupWorkspace(request, projectName) {
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+async function setupWorkspace(request, base, projectName) {
+  const wsRes = await request.get(`${base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === projectName) {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/${projectName}`);
+  await request.delete(`${base}/api/projects/${projectName}`);
 
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${base}/api/projects`, {
     data: { name: projectName, root_dir: '/tmp', git: false, agent: 'None' },
   });
-  const launchRes = await request.post(`${BASE}/api/projects/${projectName}/launch`, { data: {} });
+  const launchRes = await request.post(`${base}/api/projects/${projectName}/launch`, { data: {} });
   if (!launchRes.ok()) throw new Error(`Failed to launch ${projectName}: ${launchRes.status()}`);
   const ws = await launchRes.json();
-  const tabRes = await request.post(`${BASE}/api/workspaces/${ws.id}/tabs`, {
+  const tabRes = await request.post(`${base}/api/workspaces/${ws.id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   if (!tabRes.ok()) throw new Error(`Failed to create tab in ws ${ws.id}: ${tabRes.status()}`);
@@ -25,14 +107,14 @@ async function setupWorkspace(request, projectName) {
   return { wsId: ws.id, tabId: tab.id };
 }
 
-async function teardownWorkspace(request, projectName, wsId) {
-  if (wsId) await request.delete(`${BASE}/api/workspaces/${wsId}`);
-  await request.delete(`${BASE}/api/projects/${projectName}`);
+async function teardownWorkspace(request, base, projectName, wsId) {
+  if (wsId) await request.delete(`${base}/api/workspaces/${wsId}`);
+  await request.delete(`${base}/api/projects/${projectName}`);
 }
 
-function makeHelpers(getTabId, projectName) {
+function makeHelpers(getTabId, getBase, projectName) {
   async function connectToTerminal(page) {
-    await page.goto('/');
+    await page.goto(getBase() + '/');
     await page.click('text=Workspaces');
     await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
     await page.locator('.ws-sidebar-item').filter({ hasText: projectName }).click();
@@ -88,4 +170,4 @@ function makeHelpers(getTabId, projectName) {
   return { connectToTerminal, waitForAltScreen, waitForContent, typeCmd, startLess, quitLess };
 }
 
-module.exports = { BASE, setupWorkspace, teardownWorkspace, makeHelpers };
+module.exports = { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers };

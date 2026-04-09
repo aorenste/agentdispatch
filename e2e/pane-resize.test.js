@@ -1,7 +1,8 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
 // Test that terminal dimensions are correct after switching between panes.
 // Bug: terminals stashed offscreen at width:100vw keep that wider size when
@@ -12,31 +13,32 @@ let tab1Id = null;
 let tab2Id = null;
 
 test.beforeAll(async ({ request }) => {
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+  server = await startServer();
+  const wsRes = await request.get(`${server.base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === 'e2e-pane-resize') {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-pane-resize`);
+  await request.delete(`${server.base}/api/projects/e2e-pane-resize`);
 
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-pane-resize', root_dir: '/tmp', git: false, agent: 'None' },
   });
 
-  const launchRes = await request.post(`${BASE}/api/projects/e2e-pane-resize/launch`, {
+  const launchRes = await request.post(`${server.base}/api/projects/e2e-pane-resize/launch`, {
     data: {},
   });
   const ws = await launchRes.json();
   wsId = ws.id;
 
   // Create two shell tabs
-  let res = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  let res = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell 1', tab_type: 'shell' },
   });
   tab1Id = (await res.json()).id;
 
-  res = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  res = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell 2', tab_type: 'shell' },
   });
   tab2Id = (await res.json()).id;
@@ -44,15 +46,16 @@ test.beforeAll(async ({ request }) => {
 
 test.afterAll(async ({ request }) => {
   if (wsId != null) {
-    await request.delete(`${BASE}/api/workspaces/${wsId}`);
+    await request.delete(`${server.base}/api/workspaces/${wsId}`);
   }
-  await request.delete(`${BASE}/api/projects/e2e-pane-resize`);
+  await request.delete(`${server.base}/api/projects/e2e-pane-resize`);
+  stopServer(server);
 });
 
 test('terminal cols match after switching tabs', async ({ page }) => {
   test.setTimeout(15000);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-pane-resize' }).click();

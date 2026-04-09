@@ -1,7 +1,8 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
 // Tests that terminal content is restored via capture-pane when output
 // history is unavailable (simulates server restart losing in-memory state).
@@ -13,29 +14,33 @@ const BASE = 'http://localhost:8916';
 let wsId = null;
 let ws2Id = null;
 
+test.beforeAll(async () => {
+  server = await startServer();
+});
 test.afterAll(async ({ request }) => {
-  if (wsId) await request.delete(`${BASE}/api/workspaces/${wsId}`);
-  if (ws2Id) await request.delete(`${BASE}/api/workspaces/${ws2Id}`);
-  await request.delete(`${BASE}/api/projects/e2e-capture`);
+  if (wsId) await request.delete(`${server.base}/api/workspaces/${wsId}`);
+  if (ws2Id) await request.delete(`${server.base}/api/workspaces/${ws2Id}`);
+  await request.delete(`${server.base}/api/projects/e2e-capture`);
+  stopServer(server);
 });
 
 test('shell content restored via capture-pane fallback', async ({ page, request }) => {
   test.setTimeout(20000);
 
   // Create project and workspace
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-capture', root_dir: '/tmp', git: false, agent: 'None' },
   });
-  const launchRes = await request.post(`${BASE}/api/projects/e2e-capture/launch`, { data: {} });
+  const launchRes = await request.post(`${server.base}/api/projects/e2e-capture/launch`, { data: {} });
   const ws = await launchRes.json();
   wsId = ws.id;
-  const tabRes = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   const tab = await tabRes.json();
 
   // Connect and type a marker
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-capture' }).click();
@@ -83,7 +88,7 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
   await page.goto('about:blank');
   await page.waitForTimeout(500);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-capture' }).click();

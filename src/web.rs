@@ -212,9 +212,17 @@ mod tests {
     #[test]
     fn test_e2e_playwright() {
         // Clean up stale E2E state before running Playwright
-        let _ = std::fs::remove_file("/tmp/agentdispatch-e2e.db");
-        let _ = std::fs::remove_file("/tmp/agentdispatch-e2e.db-wal");
-        let _ = std::fs::remove_file("/tmp/agentdispatch-e2e.db-shm");
+        if let Ok(entries) = std::fs::read_dir("/tmp") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("agentdispatch-e2e-") && name.ends_with(".db") {
+                    let _ = std::fs::remove_file(entry.path());
+                    let _ = std::fs::remove_file(format!("{}-wal", entry.path().display()));
+                    let _ = std::fs::remove_file(format!("{}-shm", entry.path().display()));
+                }
+            }
+        }
 
         // Use `timeout` command to prevent Playwright from hanging on exit
         // (tmux child processes can keep the process tree alive).

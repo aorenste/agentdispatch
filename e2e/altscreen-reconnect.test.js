@@ -1,16 +1,20 @@
 // @ts-check
 // Altscreen reconnect/reload tests
 const { test, expect } = require('@playwright/test');
-const { BASE, setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
+const { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
 
-let wsId, tabId;
+let server, wsId, tabId;
 const proj = 'e2e-altreconnect';
-const h = makeHelpers(() => tabId, proj);
+const h = makeHelpers(() => tabId, () => server.base, proj);
 
 test.beforeAll(async ({ request }) => {
-  ({ wsId, tabId } = await setupWorkspace(request, proj));
+  server = await startServer();
+  ({ wsId, tabId } = await setupWorkspace(request, server.base, proj));
 });
-test.afterAll(async ({ request }) => { await teardownWorkspace(request, proj, wsId); });
+test.afterAll(async ({ request }) => {
+  await teardownWorkspace(request, server.base, proj, wsId);
+  stopServer(server);
+});
 
 test('altScreen state survives reconnect', async ({ page }) => {
   test.setTimeout(20000);
@@ -42,13 +46,13 @@ test('altScreen state survives reconnect', async ({ page }) => {
 test('display updates after quitting FS app post-reload', async ({ page, request }) => {
   test.setTimeout(20000);
 
-  const tabRes = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'FreshShell', tab_type: 'shell' },
   });
   const freshTab = await tabRes.json();
   const freshTabId = freshTab.id;
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
@@ -103,7 +107,7 @@ test('display updates after quitting FS app post-reload', async ({ page, request
     { timeout: 3000 }
   );
 
-  await request.delete(`${BASE}/api/tabs/${freshTabId}`);
+  await request.delete(`${server.base}/api/tabs/${freshTabId}`);
 });
 
 test('no stale scrollback after reconnect to altscreen pane', async ({ page }) => {

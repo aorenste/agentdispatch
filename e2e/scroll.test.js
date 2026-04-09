@@ -1,29 +1,31 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
 let wsId = null;
 let tabId = null;
 
 test.beforeAll(async ({ request }) => {
+  server = await startServer();
   // Clean up any leftover state from previous scroll test runs
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+  const wsRes = await request.get(`${server.base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === 'e2e-scrolltest') {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-scrolltest`);
+  await request.delete(`${server.base}/api/projects/e2e-scrolltest`);
 
   // Create project (no git, no agent — just a shell)
-  const projRes = await request.post(`${BASE}/api/projects`, {
+  const projRes = await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-scrolltest', root_dir: '/tmp', git: false, agent: 'None' },
   });
   expect(projRes.ok()).toBeTruthy();
 
   // Launch workspace
-  const launchRes = await request.post(`${BASE}/api/projects/e2e-scrolltest/launch`, {
+  const launchRes = await request.post(`${server.base}/api/projects/e2e-scrolltest/launch`, {
     data: {},
   });
   expect(launchRes.ok()).toBeTruthy();
@@ -31,7 +33,7 @@ test.beforeAll(async ({ request }) => {
   wsId = ws.id;
 
   // Create a shell tab
-  const tabRes = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   expect(tabRes.ok()).toBeTruthy();
@@ -41,9 +43,10 @@ test.beforeAll(async ({ request }) => {
 
 test.afterAll(async ({ request }) => {
   if (wsId != null) {
-    await request.delete(`${BASE}/api/workspaces/${wsId}`);
+    await request.delete(`${server.base}/api/workspaces/${wsId}`);
   }
-  await request.delete(`${BASE}/api/projects/e2e-scrolltest`);
+  await request.delete(`${server.base}/api/projects/e2e-scrolltest`);
+  stopServer(server);
 });
 
 /** Read the visible terminal lines via xterm.js buffer API */
@@ -63,7 +66,7 @@ function readVisibleLines(tabKey) {
 test('mouse scroll works', async ({ page }) => {
   test.setTimeout(15000);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).click();
@@ -164,7 +167,7 @@ test('mouse scroll works', async ({ page }) => {
 test('text selection persists (not cleared by tmux)', async ({ page }) => {
   test.setTimeout(15000);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).first().click();

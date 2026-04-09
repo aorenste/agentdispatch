@@ -1,7 +1,8 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
 // Test that applications cannot destroy the user's scrollback history by
 // sending \e[3J (clear scrollback buffer). This sequence is commonly sent
@@ -13,26 +14,27 @@ let wsId = null;
 let tabId = null;
 
 test.beforeAll(async ({ request }) => {
+  server = await startServer();
   // Clean up
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+  const wsRes = await request.get(`${server.base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === 'e2e-scrollback-clear') {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-scrollback-clear`);
+  await request.delete(`${server.base}/api/projects/e2e-scrollback-clear`);
 
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-scrollback-clear', root_dir: '/tmp', git: false, agent: 'None' },
   });
 
-  const launchRes = await request.post(`${BASE}/api/projects/e2e-scrollback-clear/launch`, {
+  const launchRes = await request.post(`${server.base}/api/projects/e2e-scrollback-clear/launch`, {
     data: {},
   });
   const ws = await launchRes.json();
   wsId = ws.id;
 
-  const tabRes = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+  const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   const tab = await tabRes.json();
@@ -41,15 +43,16 @@ test.beforeAll(async ({ request }) => {
 
 test.afterAll(async ({ request }) => {
   if (wsId != null) {
-    await request.delete(`${BASE}/api/workspaces/${wsId}`);
+    await request.delete(`${server.base}/api/workspaces/${wsId}`);
   }
-  await request.delete(`${BASE}/api/projects/e2e-scrollback-clear`);
+  await request.delete(`${server.base}/api/projects/e2e-scrollback-clear`);
+  stopServer(server);
 });
 
 test('scrollback preserved when application sends clear scrollback sequence', async ({ page }) => {
   test.setTimeout(15000);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrollback-clear' }).click();
@@ -122,7 +125,7 @@ test('scrollback preserved when application sends clear scrollback sequence', as
 test('scrollback preserved when clear command runs', async ({ page }) => {
   test.setTimeout(15000);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrollback-clear' }).click();

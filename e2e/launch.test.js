@@ -1,28 +1,32 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
+test.beforeAll(async () => {
+  server = await startServer();
+});
 test.afterAll(async ({ request }) => {
-  // Clean up only workspaces belonging to our projects
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+  const wsRes = await request.get(`${server.base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === 'e2e-launch' || ws.project === 'e2e-nongit') {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-launch`);
+  await request.delete(`${server.base}/api/projects/e2e-launch`);
+  stopServer(server);
 });
 
 test('Launch button creates workspace and switches to it', async ({ page, request }) => {
   test.setTimeout(15000);
 
   // Create a project via API
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-launch', root_dir: '/tmp', git: false, agent: 'None' },
   });
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
 
   // Wait for projects to load
   await page.waitForSelector('.project-row', { timeout: 10000 });
@@ -59,11 +63,11 @@ test('Launch button works with special characters in project name', async ({ pag
 
   // Create a project with special chars
   const name = "test's project & <stuff>";
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name, root_dir: '/tmp', git: false, agent: 'None' },
   });
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.waitForSelector('.project-row', { timeout: 10000 });
 
   const errors = [];
@@ -83,18 +87,18 @@ test('Launch button works with special characters in project name', async ({ pag
   expect(errors).toEqual([]);
 
   // Clean up
-  await request.delete(`${BASE}/api/projects/${encodeURIComponent(name)}`);
+  await request.delete(`${server.base}/api/projects/${encodeURIComponent(name)}`);
 });
 
 test('Launch button works when git branch listing fails', async ({ page, request }) => {
   test.setTimeout(15000);
 
   // Create a git project pointing at a non-git directory
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-nongit', root_dir: '/tmp', git: true, agent: 'None' },
   });
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.waitForSelector('.project-row', { timeout: 10000 });
 
   const errors = [];
@@ -112,11 +116,11 @@ test('Launch button works when git branch listing fails', async ({ page, request
   expect(errors).toEqual([]);
 
   // Clean up
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+  const wsRes = await request.get(`${server.base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === 'e2e-nongit') {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-nongit`);
+  await request.delete(`${server.base}/api/projects/e2e-nongit`);
 });

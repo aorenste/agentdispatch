@@ -1,16 +1,18 @@
 // @ts-check
 // Keyboard handling in full-screen mode: Cmd+key, Option+key, Cmd+Backspace
 const { test, expect } = require('@playwright/test');
-const { setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
+const { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
 
-let wsId, tabId;
+let server, wsId, tabId;
 const proj = 'e2e-altkeys';
-const h = makeHelpers(() => tabId, proj);
+const h = makeHelpers(() => tabId, () => server.base, proj);
 
 test.beforeAll(async ({ request }) => {
-  ({ wsId, tabId } = await setupWorkspace(request, proj));
+  server = await startServer();
+  ({ wsId, tabId } = await setupWorkspace(request, server.base, proj));
 });
-test.afterAll(async ({ request }) => { await teardownWorkspace(request, proj, wsId); });
+test.afterAll(async ({ request }) => { await teardownWorkspace(request, server.base, proj, wsId);
+  stopServer(server); });
 
 test('Cmd+key passes through to browser in normal mode', async ({ page }) => {
   await h.connectToTerminal(page);

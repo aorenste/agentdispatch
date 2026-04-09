@@ -1,7 +1,8 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const BASE = 'http://localhost:8916';
+const { startServer, stopServer } = require('./helpers');
+let server;
 
 // Test that viewport scroll position is preserved when switching between
 // workspaces. The bug: switch away from a workspace with scrolled content,
@@ -13,47 +14,49 @@ let tab1Id = null;
 let tab2Id = null;
 
 test.beforeAll(async ({ request }) => {
+  server = await startServer();
   // Clean up
-  const wsRes = await request.get(`${BASE}/api/workspaces`);
+  const wsRes = await request.get(`${server.base}/api/workspaces`);
   for (const ws of await wsRes.json()) {
     if (ws.project === 'e2e-viewport') {
-      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+      await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${BASE}/api/projects/e2e-viewport`);
+  await request.delete(`${server.base}/api/projects/e2e-viewport`);
 
-  await request.post(`${BASE}/api/projects`, {
+  await request.post(`${server.base}/api/projects`, {
     data: { name: 'e2e-viewport', root_dir: '/tmp', git: false, agent: 'None' },
   });
 
   // Create two workspaces
-  let res = await request.post(`${BASE}/api/projects/e2e-viewport/launch`, { data: { name: 'ws-A' } });
+  let res = await request.post(`${server.base}/api/projects/e2e-viewport/launch`, { data: { name: 'ws-A' } });
   const ws1 = await res.json();
   ws1Id = ws1.id;
-  res = await request.post(`${BASE}/api/workspaces/${ws1Id}/tabs`, {
+  res = await request.post(`${server.base}/api/workspaces/${ws1Id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   tab1Id = (await res.json()).id;
 
-  res = await request.post(`${BASE}/api/projects/e2e-viewport/launch`, { data: { name: 'ws-B' } });
+  res = await request.post(`${server.base}/api/projects/e2e-viewport/launch`, { data: { name: 'ws-B' } });
   const ws2 = await res.json();
   ws2Id = ws2.id;
-  res = await request.post(`${BASE}/api/workspaces/${ws2Id}/tabs`, {
+  res = await request.post(`${server.base}/api/workspaces/${ws2Id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
   tab2Id = (await res.json()).id;
 });
 
 test.afterAll(async ({ request }) => {
-  if (ws1Id) await request.delete(`${BASE}/api/workspaces/${ws1Id}`);
-  if (ws2Id) await request.delete(`${BASE}/api/workspaces/${ws2Id}`);
-  await request.delete(`${BASE}/api/projects/e2e-viewport`);
+  if (ws1Id) await request.delete(`${server.base}/api/workspaces/${ws1Id}`);
+  if (ws2Id) await request.delete(`${server.base}/api/workspaces/${ws2Id}`);
+  await request.delete(`${server.base}/api/projects/e2e-viewport`);
+  stopServer(server);
 });
 
 test('viewport scroll position preserved when switching workspaces', async ({ page }) => {
   test.setTimeout(15000);
 
-  await page.goto('/');
+  await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
 
