@@ -235,32 +235,7 @@ mod tests {
     e2e_file_test!(test_e2e_sync_scroll, "sync-scroll");
     e2e_file_test!(test_e2e_viewport, "viewport");
 
-    /// Limit E2E concurrency — cargo may run all 16 tests at once on a
-    /// many-core machine, but each spawns node + chromium + a server.
-    const E2E_MAX_CONCURRENT: usize = 4;
-    static E2E_MUTEX: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
-    static E2E_CONDVAR: std::sync::Condvar = std::sync::Condvar::new();
-
-    struct E2ePermit;
-    impl Drop for E2ePermit {
-        fn drop(&mut self) {
-            let mut count = E2E_MUTEX.lock().unwrap();
-            *count -= 1;
-            E2E_CONDVAR.notify_one();
-        }
-    }
-
-    fn e2e_acquire() -> E2ePermit {
-        let mut count = E2E_MUTEX.lock().unwrap();
-        while *count >= E2E_MAX_CONCURRENT {
-            count = E2E_CONDVAR.wait(count).unwrap();
-        }
-        *count += 1;
-        E2ePermit
-    }
-
     fn run_playwright(args: &[&str]) {
-        let _permit = e2e_acquire();
 
         let mut cmd_args = vec!["60", "npx", "playwright", "test"];
         cmd_args.extend(args);

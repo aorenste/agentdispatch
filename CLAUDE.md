@@ -22,8 +22,6 @@ this I WILL FUCKING KILL YOU.
 - Playwright E2E tests use `target/test` automatically (configured in playwright.config.js)
 - The E2E test runner (`test_e2e_playwright`) wraps npx in `timeout 60` because
   Playwright can hang on exit due to tmux child processes
-- E2E tests use a separate tmux socket (`agentdispatch-test` via env var
-  `AGENTDISPATCH_TMUX_SOCKET`) to avoid killing the user's real sessions
 - E2E tests run in parallel (4 workers). Each test file MUST use a unique project
   name and MUST only clean up its own workspaces (filter by project name). Never
   delete all workspaces — that nukes other tests running in parallel.
@@ -33,6 +31,13 @@ this I WILL FUCKING KILL YOU.
   under load and waste time. Poll for the actual condition you're waiting for.
 - Don't use real Claude in tests. Simulate alt-screen apps with `less`, `vi`, or
   a `python3 -c` script that writes escape sequences and sleeps.
+- Each E2E test file is a separate cargo test (`test_e2e_{name}`) that starts its
+  own server with a unique port and tmux socket via `startServer()` in `beforeAll`.
+  This eliminates cross-test tmux contention. No shared server or tmux socket.
+- NEVER use hardcoded timeouts for readiness detection. Use deterministic signals:
+  poll for the condition you're waiting for, detect errors immediately (e.g.
+  `entry.connectError`), and let the global test timeout be the only bail-out.
+  Timeouts are for emergencies, not for flow control.
 
 ## tmux
 

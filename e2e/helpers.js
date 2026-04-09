@@ -30,11 +30,20 @@ function waitForServer(proc, port) {
     });
     function tryFetch() {
       if (done) return;
-      // Check /api/workspaces (not /) to ensure DB is initialized
+      // Check /api/workspaces (not /) to ensure DB is initialized and API works
       const req = http.get(`http://127.0.0.1:${port}/api/workspaces`, (res) => {
-        res.resume();
-        if (!done && res.statusCode === 200) { done = true; resolve(); }
-        else if (!done) setTimeout(tryFetch, 50);
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          if (done) return;
+          try {
+            const parsed = JSON.parse(body);
+            if (res.statusCode === 200 && Array.isArray(parsed)) { done = true; resolve(); }
+            else setTimeout(tryFetch, 50);
+          } catch {
+            setTimeout(tryFetch, 50);
+          }
+        });
       });
       req.on('error', () => {
         if (!done) setTimeout(tryFetch, 50);
