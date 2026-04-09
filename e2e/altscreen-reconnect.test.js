@@ -17,7 +17,6 @@ test.afterAll(async ({ request }) => {
 });
 
 test('altScreen state survives reconnect', async ({ page }) => {
-  test.setTimeout(20000);
   await h.connectToTerminal(page);
   await h.startLess(page);
 
@@ -44,7 +43,6 @@ test('altScreen state survives reconnect', async ({ page }) => {
 });
 
 test('display updates after quitting FS app post-reload', async ({ page, request }) => {
-  test.setTimeout(20000);
 
   const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'FreshShell', tab_type: 'shell' },
@@ -54,42 +52,42 @@ test('display updates after quitting FS app post-reload', async ({ page, request
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
   await page.click('text=FreshShell');
-  await page.waitForSelector('.xterm-screen', { timeout: 10000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    freshTabId, { timeout: 15000 }
+    freshTabId
   );
 
   await page.locator('#ws-active-pane .xterm-helper-textarea').focus();
   await page.keyboard.type('less /etc/hosts\n', { delay: 5 });
   await page.waitForFunction(
     ([key]) => { const e = _tabTerminals[key]; return e && e.altScreen === true; },
-    [freshTabId], { timeout: 5000 }
+    [freshTabId]
   );
 
   await page.reload();
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
   await page.click('text=FreshShell');
-  await page.waitForSelector('.xterm-screen', { timeout: 10000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    freshTabId, { timeout: 15000 }
+    freshTabId
   );
   await page.waitForFunction(
     ([key]) => { const e = _tabTerminals[key]; return e && e.altScreen === true; },
-    [freshTabId], { timeout: 5000 }
+    [freshTabId]
   );
 
   await page.locator('#ws-active-pane .xterm-helper-textarea').focus();
   await page.keyboard.press('q');
   await page.waitForFunction(
     ([key]) => { const e = _tabTerminals[key]; return e && e.altScreen === false; },
-    [freshTabId], { timeout: 5000 }
+    [freshTabId]
   );
 
   await page.waitForFunction(
@@ -104,14 +102,12 @@ test('display updates after quitting FS app post-reload', async ({ page, request
       return true;
     },
     freshTabId,
-    { timeout: 3000 }
   );
 
   await request.delete(`${server.base}/api/tabs/${freshTabId}`);
 });
 
 test('no stale scrollback after reconnect to altscreen pane', async ({ page }) => {
-  test.setTimeout(20000);
   await h.connectToTerminal(page);
   await h.typeCmd(page, 'seq 1 50');
   await h.waitForContent(page, '50');
@@ -133,7 +129,6 @@ test('no stale scrollback after reconnect to altscreen pane', async ({ page }) =
 });
 
 test('altScreen and scrollbar survive full page reload', async ({ page }) => {
-  test.setTimeout(20000);
   await h.connectToTerminal(page);
   await h.startLess(page);
 

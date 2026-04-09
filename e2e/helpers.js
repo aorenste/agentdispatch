@@ -19,22 +19,29 @@ function getFreePort() {
   });
 }
 
-/** Wait for a port to accept connections */
-function waitForPort(port, timeout = 10000) {
-  const start = Date.now();
+/** Wait for the server to respond to HTTP requests.
+ *  Fails immediately if the server process exits. */
+function waitForServer(proc, port) {
+  const http = require('http');
   return new Promise((resolve, reject) => {
-    function tryConnect() {
-      const sock = net.connect(port, '127.0.0.1');
-      sock.on('connect', () => { sock.destroy(); resolve(); });
-      sock.on('error', () => {
-        if (Date.now() - start > timeout) {
-          reject(new Error(`Server did not start on port ${port} within ${timeout}ms`));
-        } else {
-          setTimeout(tryConnect, 50);
-        }
+    let done = false;
+    proc.on('exit', (code) => {
+      if (!done) { done = true; reject(new Error(`Server exited with code ${code} before becoming ready`)); }
+    });
+    function tryFetch() {
+      if (done) return;
+      // Check /api/workspaces (not /) to ensure DB is initialized
+      const req = http.get(`http://127.0.0.1:${port}/api/workspaces`, (res) => {
+        res.resume();
+        if (!done && res.statusCode === 200) { done = true; resolve(); }
+        else if (!done) setTimeout(tryFetch, 50);
       });
+      req.on('error', () => {
+        if (!done) setTimeout(tryFetch, 50);
+      });
+      req.setTimeout(1000, () => { req.destroy(); });
     }
-    tryConnect();
+    tryFetch();
   });
 }
 
@@ -63,7 +70,7 @@ async function startServer() {
     if (s) process.stderr.write(`[server:${port}] ${s}\n`);
   });
 
-  await waitForPort(port);
+  await waitForServer(proc, port);
   return { base: `http://localhost:${port}`, proc, port, socket, db };
 }
 
@@ -116,13 +123,16 @@ function makeHelpers(getTabId, getBase, projectName) {
   async function connectToTerminal(page) {
     await page.goto(getBase() + '/');
     await page.click('text=Workspaces');
-    await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+    await page.waitForSelector('.ws-sidebar-item');
     await page.locator('.ws-sidebar-item').filter({ hasText: projectName }).click();
-    await page.waitForSelector('.xterm-screen', { timeout: 10000 });
+    await page.waitForSelector('.xterm-screen');
     await page.waitForFunction(
-      (key) => { const e = _tabTerminals[key]; return e && e.connected; },
+      (key) => {
+        const e = _tabTerminals[key];
+        if (e && e.connectError) throw new Error('WebSocket connection failed');
+        return e && e.connected;
+      },
       getTabId(),
-      { timeout: 15000 }
     );
   }
 
@@ -130,7 +140,6 @@ function makeHelpers(getTabId, getBase, projectName) {
     return page.waitForFunction(
       ([key, val]) => { const e = _tabTerminals[key]; return e && e.altScreen === val; },
       [getTabId(), expected],
-      { timeout: 5000 }
     );
   }
 
@@ -147,7 +156,6 @@ function makeHelpers(getTabId, getBase, projectName) {
         return false;
       },
       [getTabId(), text],
-      { timeout: 5000 }
     );
   }
 

@@ -19,7 +19,6 @@ test.afterAll(async ({ request }) => {
 });
 
 test('Launch button creates workspace and switches to it', async ({ page, request }) => {
-  test.setTimeout(15000);
 
   // Create a project via API
   await request.post(`${server.base}/api/projects`, {
@@ -29,7 +28,7 @@ test('Launch button creates workspace and switches to it', async ({ page, reques
   await page.goto(server.base + '/');
 
   // Wait for projects to load
-  await page.waitForSelector('.project-row', { timeout: 10000 });
+  await page.waitForSelector('.project-row');
 
   // Verify no JS errors
   const errors = [];
@@ -40,26 +39,25 @@ test('Launch button creates workspace and switches to it', async ({ page, reques
     .locator('button', { hasText: 'Launch' }).click();
 
   // The launch dialog should appear
-  await page.waitForSelector('.dialog-overlay.open', { timeout: 5000 });
+  await page.waitForSelector('.dialog-overlay.open');
 
   // Click OK to launch with default name
   await page.click('#dialog-ok');
 
   // Should switch to Workspaces tab and show the new workspace
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   const wsName = await page.locator('.ws-sidebar-item .ws-name').first().textContent();
   expect(wsName).toBeTruthy();
 
   // The workspace should be selected (active)
   const activeItem = page.locator('.ws-sidebar-item.active');
-  await expect(activeItem).toBeVisible({ timeout: 5000 });
+  await expect(activeItem).toBeVisible();
 
   // No JS errors should have occurred
   expect(errors).toEqual([]);
 });
 
 test('Launch button works with special characters in project name', async ({ page, request }) => {
-  test.setTimeout(15000);
 
   // Create a project with special chars
   const name = "test's project & <stuff>";
@@ -68,7 +66,7 @@ test('Launch button works with special characters in project name', async ({ pag
   });
 
   await page.goto(server.base + '/');
-  await page.waitForSelector('.project-row', { timeout: 10000 });
+  await page.waitForSelector('.project-row');
 
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -78,11 +76,11 @@ test('Launch button works with special characters in project name', async ({ pag
     .locator('button', { hasText: 'Launch' }).click();
 
   // Dialog should appear
-  await page.waitForSelector('.dialog-overlay.open', { timeout: 5000 });
+  await page.waitForSelector('.dialog-overlay.open');
   await page.click('#dialog-ok');
 
   // Should create a workspace
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
 
   expect(errors).toEqual([]);
 
@@ -91,7 +89,6 @@ test('Launch button works with special characters in project name', async ({ pag
 });
 
 test('Launch button works when git branch listing fails', async ({ page, request }) => {
-  test.setTimeout(15000);
 
   // Create a git project pointing at a non-git directory
   await request.post(`${server.base}/api/projects`, {
@@ -99,7 +96,7 @@ test('Launch button works when git branch listing fails', async ({ page, request
   });
 
   await page.goto(server.base + '/');
-  await page.waitForSelector('.project-row', { timeout: 10000 });
+  await page.waitForSelector('.project-row');
 
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -108,10 +105,10 @@ test('Launch button works when git branch listing fails', async ({ page, request
     .locator('button', { hasText: 'Launch' }).click();
 
   // Dialog should still appear despite branches fetch failing
-  await page.waitForSelector('.dialog-overlay.open', { timeout: 10000 });
+  await page.waitForSelector('.dialog-overlay.open');
   await page.click('#dialog-ok');
 
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
 
   expect(errors).toEqual([]);
 

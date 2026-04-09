@@ -42,7 +42,7 @@ test('scrollback not polluted by repeated full-screen redraws', async ({ page })
       }
       return count <= 1;
     },
-    tabId, { timeout: 5000 }
+    tabId
   );
 
   const allText = await page.evaluate((key) => {

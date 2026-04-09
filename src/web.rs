@@ -237,7 +237,7 @@ mod tests {
 
     /// Limit E2E concurrency — cargo may run all 16 tests at once on a
     /// many-core machine, but each spawns node + chromium + a server.
-    const E2E_MAX_CONCURRENT: usize = 6;
+    const E2E_MAX_CONCURRENT: usize = 4;
     static E2E_MUTEX: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
     static E2E_CONDVAR: std::sync::Condvar = std::sync::Condvar::new();
 

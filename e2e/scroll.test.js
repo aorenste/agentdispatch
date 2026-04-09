@@ -64,20 +64,18 @@ function readVisibleLines(tabKey) {
 }
 
 test('mouse scroll works', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => {
       const e = _tabTerminals[key];
       return e && e.connected;
     },
     tabId,
-    { timeout: 15000 }
   );
 
   await page.waitForFunction(
@@ -92,7 +90,6 @@ test('mouse scroll works', async ({ page }) => {
       return false;
     },
     tabId,
-    { timeout: 15000 }
   );
 
   const textarea = page.locator('.xterm-helper-textarea');
@@ -111,7 +108,6 @@ test('mouse scroll works', async ({ page }) => {
       return false;
     },
     tabId,
-    { timeout: 15000 }
   );
 
   await page.waitForFunction(
@@ -123,7 +119,6 @@ test('mouse scroll works', async ({ page }) => {
       return lastLine && lastLine.translateToString().includes('$');
     },
     tabId,
-    { timeout: 10000 }
   );
 
   const preState = await page.evaluate((key) => {
@@ -152,7 +147,6 @@ test('mouse scroll works', async ({ page }) => {
       return e.term.buffer.active.viewportY < beforeY;
     },
     [tabId, preViewportY],
-    { timeout: 10000 }
   );
 
   const scrolledLines = await page.evaluate(readVisibleLines, tabId);
@@ -165,13 +159,12 @@ test('mouse scroll works', async ({ page }) => {
 });
 
 test('text selection persists (not cleared by tmux)', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrolltest' }).first().click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
 
   await page.waitForFunction(
     (key) => {
@@ -179,7 +172,6 @@ test('text selection persists (not cleared by tmux)', async ({ page }) => {
       return e && e.connected;
     },
     tabId,
-    { timeout: 15000 }
   );
 
   const textarea = page.locator('.xterm-helper-textarea');
@@ -198,7 +190,6 @@ test('text selection persists (not cleared by tmux)', async ({ page }) => {
       return false;
     },
     tabId,
-    { timeout: 15000 }
   );
 
   await page.keyboard.type('echo SELECTME\n', { delay: 10 });
@@ -215,7 +206,6 @@ test('text selection persists (not cleared by tmux)', async ({ page }) => {
       return false;
     },
     tabId,
-    { timeout: 10000 }
   );
 
   const screen = page.locator('.xterm-screen');

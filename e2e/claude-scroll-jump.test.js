@@ -26,7 +26,7 @@ test('viewport at bottom after full-screen redraw', async ({ page }) => {
       const e = _tabTerminals[key];
       return e && e.term.buffer.active.baseY > 50;
     },
-    tabId, { timeout: 5000 }
+    tabId
   );
 
   // Scroll to the top
@@ -44,7 +44,7 @@ test('viewport at bottom after full-screen redraw', async ({ page }) => {
       const buf = e.term.buffer.active;
       return buf.viewportY < buf.baseY;
     },
-    tabId, { timeout: 5000 }
+    tabId
   );
 
   const preState = await page.evaluate((key) => {

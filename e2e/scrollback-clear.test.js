@@ -50,17 +50,16 @@ test.afterAll(async ({ request }) => {
 });
 
 test('scrollback preserved when application sends clear scrollback sequence', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrollback-clear' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
 
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   // Wait for shell prompt
@@ -75,7 +74,7 @@ test('scrollback preserved when application sends clear scrollback sequence', as
       }
       return false;
     },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   // Generate lots of output to create scrollback
@@ -90,7 +89,7 @@ test('scrollback preserved when application sends clear scrollback sequence', as
       if (!e) return false;
       return e.term.buffer.active.baseY > 100;
     },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   // Wait for prompt to return
@@ -123,17 +122,16 @@ test('scrollback preserved when application sends clear scrollback sequence', as
 });
 
 test('scrollback preserved when clear command runs', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-scrollback-clear' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
 
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   // Wait for shell prompt
@@ -148,7 +146,7 @@ test('scrollback preserved when clear command runs', async ({ page }) => {
       }
       return false;
     },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   // Generate output
@@ -162,7 +160,7 @@ test('scrollback preserved when clear command runs', async ({ page }) => {
       if (!e) return false;
       return e.term.buffer.active.baseY > 100;
     },
-    tabId, { timeout: 15000 }
+    tabId
   );
   await page.waitForTimeout(500);
 

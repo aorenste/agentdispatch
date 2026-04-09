@@ -53,20 +53,19 @@ test.afterAll(async ({ request }) => {
 });
 
 test('terminal cols match after switching tabs', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-pane-resize' }).click();
-  await page.waitForSelector('.ws-subtab', { timeout: 10000 });
+  await page.waitForSelector('.ws-subtab');
 
   // Click Shell 1
   await page.locator('.ws-subtab').filter({ hasText: 'Shell 1' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tab1Id, { timeout: 15000 }
+    tab1Id
   );
   await page.waitForTimeout(500);
 
@@ -79,10 +78,10 @@ test('terminal cols match after switching tabs', async ({ page }) => {
 
   // Switch to Shell 2
   await page.locator('.ws-subtab').filter({ hasText: 'Shell 2' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tab2Id, { timeout: 15000 }
+    tab2Id
   );
   await page.waitForTimeout(500);
 

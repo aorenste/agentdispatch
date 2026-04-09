@@ -16,7 +16,6 @@ test.afterAll(async ({ request }) => {
 });
 
 test('output from other tabs does not leak', async ({ page, request }) => {
-  test.setTimeout(15000);
 
   const tab2Res = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell 2', tab_type: 'shell' },
@@ -27,15 +26,15 @@ test('output from other tabs does not leak', async ({ page, request }) => {
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
-  await page.waitForSelector('.ws-subtab', { timeout: 10000 });
+  await page.waitForSelector('.ws-subtab');
 
   await page.locator('.ws-subtab').filter({ hasText: 'Shell 2' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tab2Id, { timeout: 15000 }
+    tab2Id
   );
 
   const textarea = page.locator('#ws-active-pane .xterm-helper-textarea');
@@ -52,21 +51,21 @@ test('output from other tabs does not leak', async ({ page, request }) => {
       }
       return false;
     },
-    tab2Id, { timeout: 15000 }
+    tab2Id
   );
 
   const page2 = await page.context().newPage();
   await page2.goto(server.base + '/');
   await page2.click('text=Workspaces');
-  await page2.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page2.waitForSelector('.ws-sidebar-item');
   await page2.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
-  await page2.waitForSelector('.ws-subtab', { timeout: 10000 });
+  await page2.waitForSelector('.ws-subtab');
   await page2.locator('.ws-subtab').filter({ hasText: 'Shell' }).first().click();
 
-  await page2.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page2.waitForSelector('.xterm-screen');
   await page2.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   const textarea2 = page2.locator('.xterm-helper-textarea');
@@ -85,7 +84,7 @@ test('output from other tabs does not leak', async ({ page, request }) => {
       }
       return false;
     },
-    tabId, { timeout: 15000 }
+    tabId
   );
   await page2.close();
 
@@ -108,7 +107,6 @@ test('output from other tabs does not leak', async ({ page, request }) => {
 });
 
 test('prior output is visible after reconnect', async ({ page, request }) => {
-  test.setTimeout(15000);
 
   const launchRes = await request.post(`${server.base}/api/projects/${proj}/launch`, { data: {} });
   expect(launchRes.ok()).toBeTruthy();
@@ -121,12 +119,12 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).last().click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    reconnTab.id, { timeout: 15000 }
+    reconnTab.id
   );
 
   const textarea = page.locator('.xterm-helper-textarea');
@@ -139,12 +137,12 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).last().click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    reconnTab.id, { timeout: 15000 }
+    reconnTab.id
   );
 
   const textarea2 = page.locator('.xterm-helper-textarea');
@@ -163,7 +161,7 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
       }
       return false;
     },
-    reconnTab.id, { timeout: 10000 }
+    reconnTab.id
   );
 
   await request.delete(`${server.base}/api/workspaces/${ws2.id}`);

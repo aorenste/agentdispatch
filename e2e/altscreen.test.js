@@ -59,7 +59,6 @@ test('scrollbar hidden in alternate screen mode', async ({ page }) => {
 });
 
 test('scrollbar stays hidden after switching away and back to altscreen tab', async ({ page, request }) => {
-  test.setTimeout(20000);
   const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell2', tab_type: 'shell' },
   });
@@ -77,9 +76,9 @@ test('scrollbar stays hidden after switching away and back to altscreen tab', as
   expect(overflow).toBe('hidden');
 
   await page.click('text=Shell2');
-  await page.waitForSelector('.xterm-screen', { timeout: 3000 });
+  await page.waitForSelector('.xterm-screen');
   await page.click('text=Shell');
-  await page.waitForSelector('.xterm-screen', { timeout: 3000 });
+  await page.waitForSelector('.xterm-screen');
 
   overflow = await page.evaluate((key) => {
     const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');

@@ -16,7 +16,6 @@ test.afterAll(async ({ request }) => { await teardownWorkspace(request, server.b
   stopServer(server); });
 
 test('full-screen app display restored after reconnect', async ({ page }) => {
-  test.setTimeout(15000);
   await h.connectToTerminal(page);
 
   // Launch a script that enters alt screen, fills it with known content, and waits

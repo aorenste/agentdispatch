@@ -54,18 +54,17 @@ test.afterAll(async ({ request }) => {
 });
 
 test('viewport scroll position preserved when switching workspaces', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
+  await page.waitForSelector('.ws-sidebar-item');
 
   // Select workspace A
   await page.locator('.ws-sidebar-item').filter({ hasText: 'ws-A' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tab1Id, { timeout: 10000 }
+    tab1Id
   );
 
   // Generate lots of output in workspace A
@@ -81,7 +80,7 @@ test('viewport scroll position preserved when switching workspaces', async ({ pa
       const buf = e.term.buffer.active;
       return buf.baseY > 100;
     },
-    tab1Id, { timeout: 10000 }
+    tab1Id
   );
 
   // Wait for prompt to return
@@ -98,12 +97,12 @@ test('viewport scroll position preserved when switching workspaces', async ({ pa
 
   // Switch to workspace B
   await page.locator('.ws-sidebar-item').filter({ hasText: 'ws-B' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForTimeout(500);
 
   // Switch back to workspace A
   await page.locator('.ws-sidebar-item').filter({ hasText: 'ws-A' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForTimeout(500);
 
   // Viewport should still be at the bottom

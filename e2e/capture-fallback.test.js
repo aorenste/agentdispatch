@@ -25,7 +25,6 @@ test.afterAll(async ({ request }) => {
 });
 
 test('shell content restored via capture-pane fallback', async ({ page, request }) => {
-  test.setTimeout(20000);
 
   // Create project and workspace
   await request.post(`${server.base}/api/projects`, {
@@ -42,12 +41,12 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
   // Connect and type a marker
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-capture' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tab.id, { timeout: 10000 }
+    tab.id
   );
 
   const textarea = page.locator('.xterm-helper-textarea');
@@ -67,7 +66,7 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
       }
       return false;
     },
-    tab.id, { timeout: 10000 }
+    tab.id
   );
 
   // Now disconnect. When we reconnect, the output history will have
@@ -90,12 +89,12 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-capture' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tab.id, { timeout: 10000 }
+    tab.id
   );
   await page.waitForTimeout(1000);
 

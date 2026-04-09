@@ -13,17 +13,16 @@ test.afterAll(async ({ request }) => {
 });
 
 test('unchecking git worktree checkbox is respected on submit', async ({ page, request }) => {
-  test.setTimeout(15000);
 
   // Clean up
   await request.delete(`${server.base}/api/projects/e2e-git-cb`);
 
   await page.goto(server.base + '/');
-  await page.waitForSelector('.project-row,.empty-msg', { timeout: 10000 });
+  await page.waitForSelector('.project-row,.empty-msg');
 
   // Click "Add" button to open the Add Project dialog
   await page.click('button:has-text("Add")');
-  await page.waitForSelector('.dialog-overlay.open', { timeout: 5000 });
+  await page.waitForSelector('.dialog-overlay.open');
 
   // Fill in project name and a git directory (this repo's root)
   await page.fill('#dlg-proj-name', 'e2e-git-cb');

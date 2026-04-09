@@ -779,6 +779,7 @@ function initTerminal(key, paneEl, opts) {
     };
 
     ws.onerror = () => {
+      entry.connectError = true;
       const overlay = document.createElement('div');
       overlay.className = 'pane-error-overlay';
       overlay.innerHTML = 'Connection failed \u2014 session may no longer exist.'

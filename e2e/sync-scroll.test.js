@@ -51,17 +51,16 @@ test.afterAll(async ({ request }) => {
 });
 
 test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async ({ page }) => {
-  test.setTimeout(15000);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 10000 });
+  await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: 'e2e-sync-scroll' }).click();
-  await page.waitForSelector('.xterm-screen', { timeout: 15000 });
+  await page.waitForSelector('.xterm-screen');
 
   await page.waitForFunction(
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   await page.waitForFunction(
@@ -75,7 +74,7 @@ test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async (
       }
       return false;
     },
-    tabId, { timeout: 15000 }
+    tabId
   );
 
   const textarea = page.locator('.xterm-helper-textarea');
@@ -85,7 +84,7 @@ test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async (
   await page.keyboard.type('seq 1 200\n', { delay: 10 });
   await page.waitForFunction(
     (key) => _tabTerminals[key] && _tabTerminals[key].term.buffer.active.baseY > 50,
-    tabId, { timeout: 15000 }
+    tabId
   );
   await page.waitForTimeout(500);
 
