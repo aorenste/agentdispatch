@@ -450,24 +450,26 @@ pub async fn create_tab(
     use_tmux: UseTmux,
 ) -> HttpResponse {
     let ws_id = path.into_inner();
-    let conn = db.lock().unwrap();
-    let tab = db::add_workspace_tab(&conn, ws_id, &body.name, &body.tab_type);
+    let (tab, cwd) = {
+        let conn = db.lock().unwrap();
+        let tab = db::add_workspace_tab(&conn, ws_id, &body.name, &body.tab_type);
+        let cwd = db::get_workspace(&conn, ws_id)
+            .and_then(|ws| {
+                ws.worktree_dir.or_else(|| {
+                    db::list_projects(&conn).into_iter()
+                        .find(|p| p.name == ws.project)
+                        .map(|p| p.root_dir)
+                })
+            })
+            .unwrap_or_else(|| "/tmp".to_string());
+        (tab, cwd)
+    };
 
-    // Create tmux window for the new tab
+    // Create tmux window for the new tab (outside DB lock)
     if **use_tmux {
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = format!("tab-{}", tab.id);
         if tmux::has_session(&tmux_session) {
-            // Get the workspace's cwd
-            let cwd = db::get_workspace(&conn, ws_id)
-                .and_then(|ws| {
-                    ws.worktree_dir.or_else(|| {
-                        db::list_projects(&conn).into_iter()
-                            .find(|p| p.name == ws.project)
-                            .map(|p| p.root_dir)
-                    })
-                })
-                .unwrap_or_else(|| "/tmp".to_string());
             if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &cwd, None) {
                 eprintln!("Failed to create tmux window tab-{}: {e}", tab.id);
             }

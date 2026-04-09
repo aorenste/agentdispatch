@@ -4,10 +4,12 @@ const { test, expect } = require('@playwright/test');
 const BASE = 'http://localhost:8916';
 
 test.afterAll(async ({ request }) => {
-  // Clean up any workspaces and projects created by tests
+  // Clean up only workspaces belonging to our projects
   const wsRes = await request.get(`${BASE}/api/workspaces`);
   for (const ws of await wsRes.json()) {
-    await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+    if (ws.project === 'e2e-launch' || ws.project === 'e2e-nongit') {
+      await request.delete(`${BASE}/api/workspaces/${ws.id}`);
+    }
   }
   await request.delete(`${BASE}/api/projects/e2e-launch`);
 });

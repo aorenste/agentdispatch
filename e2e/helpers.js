@@ -15,10 +15,12 @@ async function setupWorkspace(request, projectName) {
     data: { name: projectName, root_dir: '/tmp', git: false, agent: 'None' },
   });
   const launchRes = await request.post(`${BASE}/api/projects/${projectName}/launch`, { data: {} });
+  if (!launchRes.ok()) throw new Error(`Failed to launch ${projectName}: ${launchRes.status()}`);
   const ws = await launchRes.json();
   const tabRes = await request.post(`${BASE}/api/workspaces/${ws.id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
+  if (!tabRes.ok()) throw new Error(`Failed to create tab in ws ${ws.id}: ${tabRes.status()}`);
   const tab = await tabRes.json();
   return { wsId: ws.id, tabId: tab.id };
 }

@@ -1,134 +1,75 @@
 // @ts-check
+// Test that a full-screen app's display is restored after reconnect.
+// Uses a fake alt-screen script instead of real Claude for speed.
 const { test, expect } = require('@playwright/test');
+const { setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
 
-const BASE = 'http://localhost:8916';
+let wsId, tabId;
+const proj = 'e2e-fsreconnect';
+const h = makeHelpers(() => tabId, proj);
 
-let wsId = null;
-let projectName = 'e2e-claude-reconnect';
-
-test.afterAll(async ({ request }) => {
-  if (wsId) {
-    await request.delete(`${BASE}/api/workspaces/${wsId}`);
-  }
-  await request.delete(`${BASE}/api/projects/${projectName}`);
+test.beforeAll(async ({ request }) => {
+  ({ wsId, tabId } = await setupWorkspace(request, proj));
 });
+test.afterAll(async ({ request }) => { await teardownWorkspace(request, proj, wsId); });
 
-test('Claude screen is identical after reconnect', async ({ page }) => {
-  test.setTimeout(20000);
+test('full-screen app display restored after reconnect', async ({ page }) => {
+  test.setTimeout(15000);
+  await h.connectToTerminal(page);
 
-  // Create project with Claude agent
-  await page.request.post(`${BASE}/api/projects`, {
-    data: { name: projectName, root_dir: '/tmp', git: false, agent: 'Claude', claude_skip_permissions: true },
-  });
-  const launchRes = await page.request.post(`${BASE}/api/projects/${projectName}/launch`, { data: {} });
-  const ws = await launchRes.json();
-  wsId = ws.id;
-
-  // Navigate to workspace
-  await page.goto('/');
-  await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
-  await page.locator('.ws-sidebar-item').filter({ hasText: projectName }).first().click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
-
-  // Wait for Claude to show content
-  console.log('1: waiting for claude');
-  await page.waitForFunction(() => {
-    const e = Object.values(_tabTerminals)[0];
-    if (!e || !e.connected) return false;
-    const buf = e.term.buffer.active;
-    let n = 0;
-    for (let i = 0; i < buf.length; i++) {
-      if (buf.getLine(i)?.translateToString().trim().length > 5) n++;
-    }
-    return n >= 5;
-  }, null, { timeout: 10000 });
-
-  // Accept trust prompt
-  console.log('2: accepting trust');
-  await page.locator('.xterm-helper-textarea').focus();
-  await page.keyboard.press('Enter');
-  // Wait for Claude to render real content after trust prompt
-  await page.waitForFunction(() => {
-    const e = Object.values(_tabTerminals)[0];
-    if (!e) return false;
-    const buf = e.term.buffer.active;
-    let n = 0;
-    for (let i = 0; i < buf.length; i++) {
-      if (buf.getLine(i)?.translateToString().trim().length > 5) n++;
-    }
-    return n >= 10;
-  }, null, { timeout: 10000 });
+  // Launch a script that enters alt screen, fills it with known content, and waits
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type(
+    "python3 -c \"import sys,time; sys.stdout.buffer.write(b'\\x1b[?1049h\\x1b[H' + b''.join(b'FSLINE-%03d\\r\\n' % i for i in range(30))); sys.stdout.flush(); time.sleep(60)\"\n",
+    { delay: 5 }
+  );
+  await h.waitForAltScreen(page, true);
+  await h.waitForContent(page, 'FSLINE-029');
 
   // Screenshot before
-  console.log('3: screenshot before');
-  const fs = require('fs');
-  const before = await page.screenshot({ fullPage: true });
-  fs.writeFileSync('/tmp/claude-before.png', before);
+  const before = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return '';
+    const buf = e.term.buffer.active;
+    const lines = [];
+    for (let i = 0; i < e.term.rows; i++) {
+      const line = buf.getLine(buf.viewportY + i);
+      if (line) lines.push(line.translateToString().trimEnd());
+    }
+    return lines.join('\n');
+  }, tabId);
+  expect(before).toContain('FSLINE-000');
+  expect(before).toContain('FSLINE-029');
 
-  // Disconnect
-  console.log('4: disconnect');
+  // Disconnect and reconnect
   await page.goto('about:blank');
+  await h.connectToTerminal(page);
+  await h.waitForAltScreen(page, true);
 
-  // Reconnect
-  console.log('5: reconnect');
-  await page.goto('/');
-  await page.click('text=Workspaces');
-  await page.waitForSelector('.ws-sidebar-item', { timeout: 5000 });
-  await page.locator('.ws-sidebar-item').filter({ hasText: projectName }).first().click();
-  await page.waitForSelector('.xterm-screen', { timeout: 5000 });
+  // After reconnect, the content should be restored via capture-pane
+  await h.waitForContent(page, 'FSLINE-000');
 
-  console.log('6: waiting for terminal');
-  await page.waitForFunction(() => {
-    const e = Object.values(_tabTerminals)[0];
-    return e && e.connected;
-  }, null, { timeout: 10000 });
-
-  // Wait for content
-  console.log('7: waiting for content');
-  await page.waitForFunction(() => {
-    const e = Object.values(_tabTerminals)[0];
-    if (!e) return false;
+  const after = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return '';
     const buf = e.term.buffer.active;
-    let n = 0;
-    for (let i = 0; i < buf.length; i++) {
-      if (buf.getLine(i)?.translateToString().trim().length > 5) n++;
+    const lines = [];
+    for (let i = 0; i < e.term.rows; i++) {
+      const line = buf.getLine(buf.viewportY + i);
+      if (line) lines.push(line.translateToString().trimEnd());
     }
-    return n >= 5;
-  }, null, { timeout: 10000 });
+    return lines.join('\n');
+  }, tabId);
 
-  // Wait for redraw to settle — content should match pre-disconnect
-  await page.waitForFunction(() => {
-    const e = Object.values(_tabTerminals)[0];
-    if (!e) return false;
-    const buf = e.term.buffer.active;
-    let n = 0;
-    for (let i = 0; i < buf.length; i++) {
-      if (buf.getLine(i)?.translateToString().trim().length > 5) n++;
-    }
-    return n >= 10;
-  }, null, { timeout: 10000 });
+  // Should have real content, not blank
+  expect(after).toContain('FSLINE-000');
 
-  // Screenshot after
-  console.log('8: screenshot after');
-  const after = await page.screenshot({ fullPage: true });
-  fs.writeFileSync('/tmp/claude-after.png', after);
-  console.log('9: comparing');
+  // Content should be similar (capture-pane may strip colors but text matches)
+  const beforeLines = before.split('\n').filter(l => l.startsWith('FSLINE'));
+  const afterLines = after.split('\n').filter(l => l.startsWith('FSLINE'));
+  expect(afterLines.length).toBe(beforeLines.length);
 
-  // Compare PNG sizes as a rough similarity metric. Claude's redraws after
-  // reconnect clear scrollback (\e[3J), so the scrollback above the viewport
-  // may differ. Allow up to 40% size difference — the important thing is that
-  // the Claude UI itself renders correctly, which we verify by checking that
-  // the after screenshot is a real render (not blank).
-  const sizeBefore = before.length;
-  const sizeAfter = after.length;
-  const diff = Math.abs(sizeBefore - sizeAfter);
-  const pct = (diff / Math.max(sizeBefore, sizeAfter)) * 100;
-  console.log(`Size before: ${sizeBefore}, after: ${sizeAfter}, diff: ${diff} (${pct.toFixed(2)}%)`);
-
-  // After should have real content (not blank/minimal)
-  expect(sizeAfter).toBeGreaterThan(30000);
-  if (pct > 40) {
-    throw new Error(`Screenshots differ significantly (${pct.toFixed(2)}%). See /tmp/claude-before.png and /tmp/claude-after.png`);
-  }
+  // Clean up: kill the python script
+  await page.keyboard.press('Control+c');
 });

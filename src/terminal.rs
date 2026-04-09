@@ -66,37 +66,32 @@ pub async fn ws_terminal(
     let tab_id = query.tab_id.clone();
     let init_cols = query.cols.unwrap_or(80);
     let init_rows = query.rows.unwrap_or(24);
-    let (response, session, msg_stream) = actix_ws::handle(&req, stream)?;
 
-    // Determine what to spawn
+    // Determine what to spawn. Tmux operations run on a blocking thread pool
+    // to avoid stalling the async runtime when multiple connections arrive.
     let (spawn_cmd, spawn_args, mode) = if **use_tmux && workspace_id.is_some() && tab_id.is_some() {
         let ws_id = workspace_id.unwrap();
-        let tid = tab_id.as_ref().unwrap();
+        let tid = tab_id.as_ref().unwrap().clone();
         let tmux_session = format!("ws-{ws_id}");
-        let tmux_window = tid.clone();
+        let tmux_window = tid;
 
-        // Sessions/windows are created by launch_project and create_tab.
-        // The terminal handler only attaches to existing ones.
-        if !tmux::has_session(&tmux_session) {
-            return Err(actix_web::error::ErrorNotFound(
-                format!("tmux session {tmux_session} not found — workspace may need to be relaunched"),
-            ));
-        }
-        if !tmux::has_window(&tmux_session, &tmux_window) {
-            return Err(actix_web::error::ErrorNotFound(
-                format!("tmux window {tmux_window} not found in {tmux_session}"),
-            ));
-        }
+        let result = web::block(move || {
+            if !tmux::has_session(&tmux_session) {
+                return Err(format!("tmux session {tmux_session} not found — workspace may need to be relaunched"));
+            }
+            if !tmux::has_window(&tmux_session, &tmux_window) {
+                return Err(format!("tmux window {tmux_window} not found in {tmux_session}"));
+            }
+            let (c, a, pane_id, link_name) = tmux::attach_args(&tmux_session, &tmux_window)?;
+            let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
+            eprintln!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} alt_screen={initial_alt_screen}");
+            Ok((c, a, pane_id, link_name, initial_alt_screen))
+        }).await.map_err(|e| actix_web::error::ErrorInternalServerError(format!("{e}")))?
+          .map_err(|e| actix_web::error::ErrorNotFound(e))?;
 
-        let (c, a, pane_id, link_name) = tmux::attach_args(&tmux_session, &tmux_window)
-            .map_err(|e| actix_web::error::ErrorInternalServerError(
-                format!("Failed to attach to tmux: {e}"),
-            ))?;
-        let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
-        eprintln!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} alt_screen={initial_alt_screen}");
+        let (c, a, pane_id, link_name, initial_alt_screen) = result;
         (c, a, SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen })
     } else {
-        // Direct shell (no tmux)
         let shell = user_shell();
         let args = if let Some(ref run_cmd) = cmd {
             vec!["-ic".to_string(), run_cmd.clone()]
@@ -105,6 +100,8 @@ pub async fn ws_terminal(
         };
         (shell, args, SessionMode::Direct)
     };
+
+    let (response, session, msg_stream) = actix_ws::handle(&req, stream)?;
 
     // Open PTY
     let pty = nix::pty::openpty(None, None).map_err(|e| {
