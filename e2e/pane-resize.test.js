@@ -50,7 +50,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('terminal cols match after switching tabs', async ({ page }) => {
-  test.setTimeout(45000);
+  test.setTimeout(15000);
 
   await page.goto('/');
   await page.click('text=Workspaces');

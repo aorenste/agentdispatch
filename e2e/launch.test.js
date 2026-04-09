@@ -13,7 +13,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('Launch button creates workspace and switches to it', async ({ page, request }) => {
-  test.setTimeout(30000);
+  test.setTimeout(15000);
 
   // Create a project via API
   await request.post(`${BASE}/api/projects`, {
@@ -53,7 +53,7 @@ test('Launch button creates workspace and switches to it', async ({ page, reques
 });
 
 test('Launch button works with special characters in project name', async ({ page, request }) => {
-  test.setTimeout(30000);
+  test.setTimeout(15000);
 
   // Create a project with special chars
   const name = "test's project & <stuff>";
@@ -85,7 +85,7 @@ test('Launch button works with special characters in project name', async ({ pag
 });
 
 test('Launch button works when git branch listing fails', async ({ page, request }) => {
-  test.setTimeout(30000);
+  test.setTimeout(15000);
 
   // Create a git project pointing at a non-git directory
   await request.post(`${BASE}/api/projects`, {

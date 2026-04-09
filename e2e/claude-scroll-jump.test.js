@@ -44,7 +44,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('viewport at bottom after full-screen redraw', async ({ page }) => {
-  test.setTimeout(45000);
+  test.setTimeout(20000);
 
   await page.goto('/');
   await page.click('text=Workspaces');

@@ -747,7 +747,8 @@ function initTerminal(key, paneEl, opts) {
 
     ws.onopen = () => {
       entry.connected = true;
-      term.focus();
+      // Only focus if this terminal is in the active pane (not stashed)
+      if (entry.container.closest('#ws-active-pane')) term.focus();
     };
 
     ws.onmessage = (e) => {
@@ -758,9 +759,6 @@ function initTerminal(key, paneEl, opts) {
           const indicator = document.getElementById('altscreen-' + key);
           if (indicator) indicator.style.display = msg.active ? 'inline' : 'none';
           entry.container.classList.toggle('xterm-altscreen', msg.active);
-          // On reconnect, capture-pane content was written to the normal buffer
-          // creating stale scrollback. Clear it after pending writes flush.
-          if (msg.active && msg.reconnect) term.write('', () => term.clearScrollback());
         } catch {}
         return;
       }

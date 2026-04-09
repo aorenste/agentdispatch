@@ -14,7 +14,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('Claude screen is identical after reconnect', async ({ page }) => {
-  test.setTimeout(60000);
+  test.setTimeout(20000);
 
   // Create project with Claude agent
   await page.request.post(`${BASE}/api/projects`, {

@@ -8,7 +8,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('unchecking git worktree checkbox is respected on submit', async ({ page, request }) => {
-  test.setTimeout(30000);
+  test.setTimeout(15000);
 
   // Clean up
   await request.delete(`${BASE}/api/projects/e2e-git-cb`);

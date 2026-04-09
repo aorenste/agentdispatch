@@ -93,6 +93,7 @@ pub async fn ws_terminal(
                 format!("Failed to attach to tmux: {e}"),
             ))?;
         let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
+        eprintln!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} alt_screen={initial_alt_screen}");
         (c, a, SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen })
     } else {
         // Direct shell (no tmux)
@@ -328,6 +329,16 @@ fn spawn_cc_bridge(
 
         // Replay pane content on reconnect.
         let mut last_alt_screen = initial_alt_screen;
+        if last_alt_screen {
+            // Switch xterm.js to alt buffer BEFORE writing capture-pane content.
+            // This ensures: (1) content doesn't create scrollback in the normal
+            // buffer, (2) live output from the app renders correctly since xterm.js
+            // is in the same buffer mode as tmux.
+            if session_clone.binary(b"\x1b[?1049h".to_vec()).await.is_err() {
+                let _ = session_clone.close(None).await;
+                return;
+            }
+        }
         if let Some(content) = initial_content {
             if !content.is_empty() {
                 if session_clone.binary(content).await.is_err() {
@@ -336,9 +347,7 @@ fn spawn_cc_bridge(
                 }
             }
         }
-        // Tell the browser about alt screen state. The browser will set the
-        // badge/CSS and clear scrollback (capture-pane content would otherwise
-        // linger as stale scrollback in a full-screen app's pane).
+        // Tell the browser about alt screen state (for badge/CSS).
         if last_alt_screen {
             let msg = format!("{{\"type\":\"altscreen\",\"active\":true,\"reconnect\":true}}");
             if session_clone.text(msg).await.is_err() {

@@ -48,7 +48,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async ({ page }) => {
-  test.setTimeout(45000);
+  test.setTimeout(15000);
 
   await page.goto('/');
   await page.click('text=Workspaces');

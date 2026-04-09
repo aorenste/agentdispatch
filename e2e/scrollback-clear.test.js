@@ -47,7 +47,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('scrollback preserved when application sends clear scrollback sequence', async ({ page }) => {
-  test.setTimeout(45000);
+  test.setTimeout(15000);
 
   await page.goto('/');
   await page.click('text=Workspaces');
@@ -120,7 +120,7 @@ test('scrollback preserved when application sends clear scrollback sequence', as
 });
 
 test('scrollback preserved when clear command runs', async ({ page }) => {
-  test.setTimeout(45000);
+  test.setTimeout(15000);
 
   await page.goto('/');
   await page.click('text=Workspaces');

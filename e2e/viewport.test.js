@@ -51,7 +51,7 @@ test.afterAll(async ({ request }) => {
 });
 
 test('viewport scroll position preserved when switching workspaces', async ({ page }) => {
-  test.setTimeout(30000);
+  test.setTimeout(15000);
 
   await page.goto('/');
   await page.click('text=Workspaces');
