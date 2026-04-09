@@ -1,9 +1,7 @@
-use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
 
 use actix_web::{HttpRequest, HttpResponse, get, web};
 use nix::libc;
@@ -13,10 +11,6 @@ use crate::tmux;
 use crate::tmux_cc::{self, CcReader, CcEvent, CcWriter};
 
 pub type UseTmux = web::Data<bool>;
-
-/// Stores accumulated terminal output per tmux pane so reconnects can replay it.
-/// Key: "ws-{id}:{window}" (e.g. "ws-1:agent"), Value: all decoded %output bytes.
-pub type OutputHistory = web::Data<Arc<Mutex<HashMap<String, Vec<u8>>>>>;
 
 fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
@@ -65,7 +59,6 @@ pub async fn ws_terminal(
     stream: web::Payload,
     query: web::Query<TerminalQuery>,
     use_tmux: UseTmux,
-    output_history: OutputHistory,
 ) -> Result<HttpResponse, actix_web::Error> {
     let cwd = query.cwd.clone();
     let cmd = query.cmd.clone();
@@ -76,13 +69,11 @@ pub async fn ws_terminal(
     let (response, session, msg_stream) = actix_ws::handle(&req, stream)?;
 
     // Determine what to spawn
-    let mut history_key = String::new();
     let (spawn_cmd, spawn_args, mode) = if **use_tmux && workspace_id.is_some() && tab_id.is_some() {
         let ws_id = workspace_id.unwrap();
         let tid = tab_id.as_ref().unwrap();
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = tid.clone();
-        history_key = format!("{tmux_session}:{tmux_window}");
 
         // Sessions/windows are created by launch_project and create_tab.
         // The terminal handler only attaches to existing ones.
@@ -201,21 +192,13 @@ pub async fn ws_terminal(
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
         SessionMode::TmuxControl { pane_id, link_name, initial_alt_screen } => {
-            // Replay content on reconnect. Prefer output history (survives within
-            // a server session) but fall back to capture-pane (survives server restart).
-            let (initial_content, content_is_history) = {
-                let map = output_history.lock().unwrap();
-                match map.get(&history_key).cloned() {
-                    Some(h) => (Some(h), true),
-                    None => (tmux::capture_pane_with_cursor(&pane_id), false),
-                }
-            };
+            let initial_content = tmux::capture_pane_with_cursor(&pane_id);
 
             // Send initial resize
             let resize_cmd = tmux_cc::encode_resize(init_cols, init_rows);
             std_file_write(&tokio_fd, &resize_cmd);
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, content_is_history, init_cols, init_rows, output_history.as_ref().clone(), history_key, initial_alt_screen);
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, initial_content, init_cols, init_rows, initial_alt_screen);
         }
     }
 
@@ -330,11 +313,8 @@ fn spawn_cc_bridge(
     pane_id: String,
     link_name: String,
     initial_content: Option<Vec<u8>>,
-    content_is_history: bool,
     _init_cols: u16,
     _init_rows: u16,
-    output_history: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    history_key: String,
     initial_alt_screen: bool,
 ) {
     let child_pid = child.id();
@@ -350,18 +330,15 @@ fn spawn_cc_bridge(
         let mut last_alt_screen = initial_alt_screen;
         if let Some(content) = initial_content {
             if !content.is_empty() {
-                // Only scan output history for alt screen sequences — capture-pane
-                // content doesn't contain them (it's rendered text, not raw escapes).
-                if content_is_history {
-                    last_alt_screen = tmux_cc::scan_alt_screen(&content);
-                }
                 if session_clone.binary(content).await.is_err() {
                     let _ = session_clone.close(None).await;
                     return;
                 }
             }
         }
-        // Send initial altscreen state to browser (from tmux query or history)
+        // Send initial altscreen state to browser (from tmux query).
+        // We always trust tmux's #{alternate_on} as the source of truth
+        // rather than scanning history, which may be stale.
         if last_alt_screen {
             let msg = format!("{{\"type\":\"altscreen\",\"active\":{last_alt_screen}}}");
             if session_clone.text(msg).await.is_err() {
@@ -370,16 +347,14 @@ fn spawn_cc_bridge(
             }
         }
 
-        let mut reader = CcReader::new(read_pane_id);
-        reader.set_alternate_screen(last_alt_screen);
-        let mut raw_buf = [0u8; 4096];
-        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        ping_interval.tick().await;
-
         // Debug: log all output sent to the browser for replay/analysis.
         // Enable with AGENTDISPATCH_DUMP_OUTPUT=1.
         let mut dump_file = if std::env::var("AGENTDISPATCH_DUMP_OUTPUT").is_ok() {
-            let dump_path = format!("/tmp/agentdispatch-output-{}.bin", history_key.replace(':', "-"));
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let dump_path = format!("/tmp/agentdispatch-output-{}-{ts}.bin", read_pane_id.replace('%', ""));
             let f = std::fs::File::create(&dump_path).ok();
             if f.is_some() {
                 eprintln!("[debug] logging terminal output to {dump_path}");
@@ -388,6 +363,12 @@ fn spawn_cc_bridge(
         } else {
             None
         };
+
+        let mut reader = CcReader::new(read_pane_id);
+        reader.set_alternate_screen(last_alt_screen);
+        let mut raw_buf = [0u8; 4096];
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        ping_interval.tick().await;
 
         'outer: loop {
             tokio::select! {
@@ -411,12 +392,6 @@ fn spawn_cc_bridge(
                                             let len = (decoded.len() as u32).to_be_bytes();
                                             let _ = f.write_all(&len);
                                             let _ = f.write_all(&decoded);
-                                        }
-                                        if let Ok(mut map) = output_history.lock() {
-                                            let history_data = tmux_cc::strip_for_history(&decoded);
-                                            map.entry(history_key.clone())
-                                                .or_default()
-                                                .extend_from_slice(&history_data);
                                         }
                                         if session_clone.binary(decoded).await.is_err() {
                                             break 'outer;

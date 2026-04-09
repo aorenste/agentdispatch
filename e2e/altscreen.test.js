@@ -125,7 +125,7 @@ test('scrollbar hidden in alternate screen mode', async ({ page }) => {
   // Scrollbar should be hidden — no scrolling in full-screen apps
   const overflowDuring = await page.evaluate((key) => {
     const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
-    return vp ? vp.style.overflowY : null;
+    return vp ? getComputedStyle(vp).overflowY : null;
   }, tabId);
   expect(overflowDuring).toBe('hidden');
 
@@ -136,7 +136,7 @@ test('scrollbar hidden in alternate screen mode', async ({ page }) => {
   // Scrollbar should be restored
   const overflowAfter = await page.evaluate((key) => {
     const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
-    return vp ? vp.style.overflowY : null;
+    return vp ? getComputedStyle(vp).overflowY : null;
   }, tabId);
   expect(overflowAfter).not.toBe('hidden');
 });
@@ -177,6 +177,13 @@ test('altScreen state survives reconnect', async ({ page }) => {
   const badge = page.locator(`#altscreen-${tabId}`);
   await expect(badge).toBeVisible();
 
+  // Scrollbar should be hidden after reconnect in altscreen mode
+  const overflowReconnect = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? getComputedStyle(vp).overflowY : null;
+  }, tabId);
+  expect(overflowReconnect).toBe('hidden');
+
   // Type a key — altScreen must stay true (not reset by CcReader)
   const textarea2 = page.locator('.xterm-helper-textarea');
   await textarea2.focus();
@@ -194,6 +201,99 @@ test('altScreen state survives reconnect', async ({ page }) => {
 
   // Clean up: quit less
   await page.keyboard.press('q');
+});
+
+test('altScreen and scrollbar survive full page reload', async ({ page }) => {
+  test.setTimeout(20000);
+  await connectToTerminal(page);
+
+  // Start less (alternate screen)
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type('less /etc/passwd\n', { delay: 10 });
+  await page.waitForTimeout(1000);
+
+  let state = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    return e ? e.altScreen : null;
+  }, tabId);
+  expect(state).toBe(true);
+
+  // Full page reload
+  await page.reload();
+  await connectToTerminal(page);
+  await page.waitForTimeout(1000);
+
+  // altScreen should still be true
+  state = await page.evaluate((key) => {
+    const e = _tabTerminals[key];
+    return e ? e.altScreen : null;
+  }, tabId);
+  expect(state).toBe(true);
+
+  // Scrollbar should be hidden
+  const overflow = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? getComputedStyle(vp).overflowY : null;
+  }, tabId);
+  expect(overflow).toBe('hidden');
+
+  // Clean up
+  const ta = page.locator('.xterm-helper-textarea');
+  await ta.focus();
+  await page.keyboard.press('q');
+});
+
+test('scrollbar stays hidden after switching away and back to altscreen tab', async ({ page, request }) => {
+  test.setTimeout(20000);
+
+  // Create a second tab to switch to
+  const tabRes = await request.post(`${BASE}/api/workspaces/${wsId}/tabs`, {
+    data: { name: 'Shell2', tab_type: 'shell' },
+  });
+  const tab2 = await tabRes.json();
+
+  await connectToTerminal(page);
+
+  // Generate scrollback then enter alternate screen
+  const textarea = page.locator('.xterm-helper-textarea');
+  await textarea.focus();
+  await page.keyboard.type('seq 1 50\n', { delay: 10 });
+  await page.waitForTimeout(500);
+  await page.keyboard.type('less /etc/passwd\n', { delay: 10 });
+  await page.waitForTimeout(1000);
+
+  // Verify altscreen and hidden scrollbar
+  let state = await page.evaluate((key) => _tabTerminals[key].altScreen, tabId);
+  expect(state).toBe(true);
+  let overflow = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? getComputedStyle(vp).overflowY : null;
+  }, tabId);
+  expect(overflow).toBe('hidden');
+
+  // Switch to the other tab
+  await page.click(`text=Shell2`);
+  await page.waitForTimeout(500);
+
+  // Switch back to the altscreen tab
+  await page.click(`text=Shell`);
+  await page.waitForTimeout(500);
+
+  // Scrollbar should STILL be hidden
+  overflow = await page.evaluate((key) => {
+    const vp = _tabTerminals[key].container.querySelector('.xterm-viewport');
+    return vp ? getComputedStyle(vp).overflowY : null;
+  }, tabId);
+  expect(overflow).toBe('hidden');
+
+  // Clean up: switch back to Shell tab if needed, quit less
+  await page.click(`text=Shell`);
+  await page.waitForTimeout(300);
+  await page.locator('.xterm-helper-textarea').first().focus();
+  await page.keyboard.press('q');
+  await page.waitForTimeout(300);
+  await request.delete(`${BASE}/api/tabs/${tab2.id}`);
 });
 
 test('Cmd+key passes through to browser in normal mode', async ({ page }) => {

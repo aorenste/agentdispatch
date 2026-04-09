@@ -616,11 +616,11 @@ function renderSelectedWorkspace() {
     }
   }
 
-  // Restore altscreen badge state for all tabs
+  // Restore altscreen badge and scrollbar state for all tabs
   for (const [key, entry] of Object.entries(_tabTerminals)) {
     const badge = document.getElementById('altscreen-' + key);
-    if (entry.altScreen) console.log('restore badge:', key, 'altScreen:', entry.altScreen, 'badge:', !!badge);
     if (badge) badge.style.display = entry.altScreen ? 'inline' : 'none';
+    entry.container.classList.toggle('xterm-altscreen', entry.altScreen);
   }
 }
 
@@ -757,8 +757,7 @@ function initTerminal(key, paneEl, opts) {
           entry.altScreen = msg.active;
           const indicator = document.getElementById('altscreen-' + key);
           if (indicator) indicator.style.display = msg.active ? 'inline' : 'none';
-          const vp = entry.container.querySelector('.xterm-viewport');
-          if (vp) vp.style.overflowY = msg.active ? 'hidden' : 'auto';
+          entry.container.classList.toggle('xterm-altscreen', msg.active);
         } catch {}
         return;
       }

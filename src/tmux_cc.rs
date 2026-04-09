@@ -82,24 +82,6 @@ fn parse_output_line(line: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&rest[..space_pos], &rest[space_pos + 1..]))
 }
 
-/// Scan raw terminal data for the final alternate screen state.
-/// Returns true if the last alternate screen sequence in `data` is an enable.
-pub fn scan_alt_screen(data: &[u8]) -> bool {
-    let mut alt = false;
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0x1b && i + 4 < data.len() && data[i + 1] == b'[' && data[i + 2] == b'?' {
-            if data[i + 3..].starts_with(b"1049h") { alt = true; i += 8; continue; }
-            if data[i + 3..].starts_with(b"1049l") { alt = false; i += 8; continue; }
-            if data[i + 3..].starts_with(b"1047h") { alt = true; i += 8; continue; }
-            if data[i + 3..].starts_with(b"1047l") { alt = false; i += 8; continue; }
-            if data[i + 3..].starts_with(b"47h") { alt = true; i += 6; continue; }
-            if data[i + 3..].starts_with(b"47l") { alt = false; i += 6; continue; }
-        }
-        i += 1;
-    }
-    alt
-}
 
 /// Filter escape sequences from terminal output.
 ///
@@ -152,25 +134,6 @@ fn filter_escapes(data: &[u8]) -> Vec<u8> {
             }
         } else {
             saw_erase_display = false;
-        }
-        result.push(data[i]);
-        i += 1;
-    }
-    result
-}
-
-/// Strip \e[2J and \e[3J from data for output history storage.
-/// On reconnect replay, \e[2J would push content to scrollback and \e[3J
-/// would clear it, destroying previously replayed content.
-pub fn strip_for_history(data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len());
-    let mut i = 0;
-    while i < data.len() {
-        if data[i] == 0x1b && i + 3 < data.len() && data[i + 1] == b'[' {
-            if (data[i + 2] == b'2' || data[i + 2] == b'3') && data[i + 3] == b'J' {
-                i += 4;
-                continue;
-            }
         }
         result.push(data[i]);
         i += 1;

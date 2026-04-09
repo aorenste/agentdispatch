@@ -97,18 +97,12 @@ async fn main() -> std::io::Result<()> {
     let hash_data = actix_web::web::Data::new(build_hash);
     let db_data = actix_web::web::Data::new(db_arc);
     let tmux_data = actix_web::web::Data::new(use_tmux);
-    let output_history = actix_web::web::Data::new(
-        std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::<String, Vec<u8>>::new()
-        ))
-    );
     HttpServer::new(move || {
         App::new()
             .app_data(tx_data.clone())
             .app_data(hash_data.clone())
             .app_data(db_data.clone())
             .app_data(tmux_data.clone())
-            .app_data(output_history.clone())
             .service(web::icon)
             .service(web::app_js)
             .service(web::index)
