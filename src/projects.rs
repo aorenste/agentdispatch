@@ -352,9 +352,22 @@ pub async fn list_branches(
 }
 
 #[get("/api/workspaces")]
-pub async fn list_workspaces(db: Db) -> HttpResponse {
+pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     let conn = db.lock().unwrap();
-    HttpResponse::Ok().json(db::list_workspaces(&conn))
+    let workspaces = db::list_workspaces(&conn);
+    if !**use_tmux {
+        return HttpResponse::Ok().json(workspaces);
+    }
+    // Annotate with agent pane activity timestamps
+    let activities = tmux::agent_pane_activities();
+    let annotated: Vec<serde_json::Value> = workspaces.into_iter().map(|ws| {
+        let mut v = serde_json::to_value(&ws).unwrap();
+        if let Some(&ts) = activities.get(&ws.id) {
+            v["agent_activity"] = serde_json::json!(ts);
+        }
+        v
+    }).collect();
+    HttpResponse::Ok().json(annotated)
 }
 
 #[delete("/api/workspaces/{id}")]
@@ -910,6 +923,7 @@ mod tests {
         let app = actix_web::test::init_service(
             App::new()
                 .app_data(db.clone())
+                .app_data(test_tmux_data())
                 .service(list_workspaces)
                 .service(rename_workspace),
         )

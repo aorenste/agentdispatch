@@ -411,8 +411,28 @@ async function fetchWorkspaces() {
     const res = await fetch('/api/workspaces');
     const workspaces = await res.json();
     _workspaces = workspaces;
+    // Initialize activity timestamps from server-reported tmux pane activity
+    for (const ws of workspaces) {
+      if (ws.agent_activity != null && !_wsLastOutput[ws.id]) {
+        _wsLastOutput[ws.id] = ws.agent_activity * 1000; // seconds → ms
+      }
+    }
     renderWorkspaces();
   } catch {}
+}
+
+function updateActivityDots() {
+  const now = Date.now();
+  for (const ws of _workspaces) {
+    const ts = _wsLastOutput[ws.id];
+    if (!ts) continue;
+    const age = now - ts;
+    const cls = age >= 10000 ? 'idle' : age >= 5000 ? 'recent' : '';
+    const sidebar = document.getElementById('activity-ws-' + ws.id);
+    if (sidebar) sidebar.className = 'activity-dot' + (cls ? ' ' + cls : '');
+    const tab = document.getElementById('activity-tab-' + ws.id);
+    if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
+  }
 }
 
 function renderWorkspaces() {
@@ -439,6 +459,7 @@ function renderWorkspaces() {
     </div>
   `).join('');
   renderSelectedWorkspace();
+  updateActivityDots();
 }
 
 function selectWorkspace(id) {
@@ -625,6 +646,7 @@ function renderSelectedWorkspace() {
     if (badge) badge.style.display = entry.altScreen ? 'inline' : 'none';
     entry.container.classList.toggle('xterm-altscreen', entry.altScreen);
   }
+  updateActivityDots();
 }
 
 function startSetupPoll() {
@@ -1299,20 +1321,7 @@ if (typeof document !== 'undefined') {
   fetchProjects();
 
   // Activity dot updater — green = idle (Claude done), gray = active
-  setInterval(() => {
-    const now = Date.now();
-    for (const ws of _workspaces) {
-      const ts = _wsLastOutput[ws.id];
-      if (!ts) continue; // no output yet — stay default gray
-      const age = now - ts;
-      // <5s = just printed (gray), 5-10s = probably idle (dim green), >10s = idle (bright green)
-      const cls = age >= 10000 ? 'idle' : age >= 5000 ? 'recent' : '';
-      const sidebar = document.getElementById('activity-ws-' + ws.id);
-      if (sidebar) sidebar.className = 'activity-dot' + (cls ? ' ' + cls : '');
-      const tab = document.getElementById('activity-tab-' + ws.id);
-      if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
-    }
-  }, 1000);
+  setInterval(updateActivityDots, 1000);
 }
 
 /* Node.js exports for testing */

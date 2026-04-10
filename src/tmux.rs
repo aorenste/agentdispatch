@@ -230,6 +230,30 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
+/// Query the last activity timestamp for all agent panes.
+/// Returns a map of workspace ID → Unix timestamp (seconds).
+pub fn agent_pane_activities() -> std::collections::HashMap<i64, u64> {
+    let mut result = std::collections::HashMap::new();
+    let output = tmux_base()
+        .args(["list-windows", "-a", "-F", "#{session_name} #{window_name} #{window_activity}"])
+        .output();
+    if let Ok(o) = output {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
+                if parts.len() == 3 && parts[1] == "agent" {
+                    if let Some(id_str) = parts[0].strip_prefix("ws-") {
+                        if let (Ok(id), Ok(ts)) = (id_str.parse::<i64>(), parts[2].parse::<u64>()) {
+                            result.insert(id, ts);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Capture scrollback history + visible content of a pane with cursor position.
 /// On reconnect this restores both the visible screen and scrollback so the
 /// user can scroll up to see previous output.
