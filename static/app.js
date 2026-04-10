@@ -563,6 +563,7 @@ function renderSelectedWorkspace() {
   }
   for (const [, entry] of Object.entries(_tabTerminals)) {
     if (entry.container.parentElement) {
+      entry.skipNextFit = true;
       stash.appendChild(entry.container);
     }
   }
