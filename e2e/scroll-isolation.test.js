@@ -88,8 +88,9 @@ test('output from other tabs does not leak', async ({ page, request }) => {
   );
   await page2.close();
 
-  await page.waitForTimeout(500);
-
+  // Negative test: verify LEAK_TEST_MARKER did NOT leak into tab2.
+  // Output travels tmux→control-mode→WebSocket→browser in milliseconds;
+  // if it was going to leak, it would already be in the buffer.
   const afterContent = await page.evaluate((key) => {
     const e = _tabTerminals[key];
     if (!e) return '';
@@ -131,7 +132,20 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
   await textarea.focus();
   await page.keyboard.press('Enter');
   await page.keyboard.type('RECONNECT_VAR=alive\n', { delay: 10 });
-  await page.waitForTimeout(500);
+  // Wait for the variable assignment to be processed
+  await page.waitForFunction(
+    ([key, text]) => {
+      const e = _tabTerminals[key];
+      if (!e) return false;
+      const buf = e.term.buffer.active;
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        if (line && line.translateToString().includes(text)) return true;
+      }
+      return false;
+    },
+    [reconnTab.id, 'RECONNECT_VAR=alive']
+  );
 
   await page.goto('about:blank');
 

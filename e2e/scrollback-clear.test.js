@@ -92,9 +92,6 @@ test('scrollback preserved when application sends clear scrollback sequence', as
     tabId
   );
 
-  // Wait for prompt to return
-  await page.waitForTimeout(500);
-
   // Record scrollback amount before the clear
   const beforeBaseY = await page.evaluate((key) => {
     const e = _tabTerminals[key];
@@ -105,7 +102,17 @@ test('scrollback preserved when application sends clear scrollback sequence', as
   // Send \e[3J (clear scrollback buffer) — this is what `clear` and TUI
   // frameworks send to wipe scrollback history.
   await page.keyboard.type("printf '\\033[3J'\n", { delay: 10 });
-  await page.waitForTimeout(1000);
+  // Wait for the printf command echo to appear (proves it was processed)
+  await page.waitForFunction((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line && line.translateToString().includes('printf')) return true;
+    }
+    return false;
+  }, tabId);
 
   // Scrollback should still be present — the server should have stripped \e[3J
   const afterBaseY = await page.evaluate((key) => {
@@ -162,7 +169,6 @@ test('scrollback preserved when clear command runs', async ({ page }) => {
     },
     tabId
   );
-  await page.waitForTimeout(500);
 
   const beforeBaseY = await page.evaluate((key) => {
     const e = _tabTerminals[key];
@@ -172,7 +178,15 @@ test('scrollback preserved when clear command runs', async ({ page }) => {
 
   // Run `clear` which typically sends \e[H\e[2J\e[3J
   await page.keyboard.type('clear\n', { delay: 10 });
-  await page.waitForTimeout(1000);
+  // Wait for clear to execute (visible area gets wiped)
+  await page.waitForFunction((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    // After clear, the first visible line should be mostly empty
+    const buf = e.term.buffer.active;
+    const line = buf.getLine(buf.viewportY);
+    return line && line.translateToString().trim().length < 5;
+  }, tabId);
 
   const afterBaseY = await page.evaluate((key) => {
     const e = _tabTerminals[key];

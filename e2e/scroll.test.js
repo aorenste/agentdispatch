@@ -228,7 +228,11 @@ test('text selection persists (not cleared by tmux)', async ({ page }) => {
   await page.mouse.move(box.x + box.width - 10, y, { steps: 10 });
   await page.mouse.up();
 
-  await page.waitForTimeout(500);
+  // Poll until xterm.js registers the selection
+  await page.waitForFunction(
+    (key) => { const e = _tabTerminals[key]; return e && e.term.hasSelection(); },
+    tabId
+  );
 
   const hasSelection = await page.evaluate((key) => {
     const e = _tabTerminals[key];

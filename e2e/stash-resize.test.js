@@ -58,8 +58,16 @@ test('stashing terminal does not widen its columns', async ({ page }) => {
     tabId2,
   );
 
-  // Wait for ResizeObserver debounce (100ms) + margin
-  await page.waitForTimeout(300);
+  // Wait for the ResizeObserver debounce to consume skipNextFit.
+  // When the terminal is stashed, skipNextFit is set to true.  After the
+  // 100ms debounce fires, it's set to false.  Poll for that.
+  await page.waitForFunction(
+    (key) => {
+      const e = _tabTerminals[key];
+      return e && e.skipNextFit === false;
+    },
+    tabId1,
+  );
 
   // The stashed terminal's cols should NOT have increased
   const colsWhileStashed = await page.evaluate(

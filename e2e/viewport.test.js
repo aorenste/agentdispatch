@@ -83,9 +83,6 @@ test('viewport scroll position preserved when switching workspaces', async ({ pa
     tab1Id
   );
 
-  // Wait for prompt to return
-  await page.waitForTimeout(500);
-
   // Record the viewport position (should be at bottom)
   const posBeforeSwitch = await page.evaluate((key) => {
     const e = _tabTerminals[key];
@@ -98,12 +95,19 @@ test('viewport scroll position preserved when switching workspaces', async ({ pa
   // Switch to workspace B
   await page.locator('.ws-sidebar-item').filter({ hasText: 'ws-B' }).click();
   await page.waitForSelector('.xterm-screen');
-  await page.waitForTimeout(500);
+  await page.waitForFunction(
+    (key) => { const e = _tabTerminals[key]; return e && e.connected; },
+    tab2Id
+  );
 
   // Switch back to workspace A
   await page.locator('.ws-sidebar-item').filter({ hasText: 'ws-A' }).click();
   await page.waitForSelector('.xterm-screen');
-  await page.waitForTimeout(500);
+  // Wait for skipNextFit to be consumed (layout settled)
+  await page.waitForFunction(
+    (key) => { const e = _tabTerminals[key]; return e && e.skipNextFit === false; },
+    tab1Id
+  );
 
   // Viewport should still be at the bottom
   const posAfterSwitch = await page.evaluate((key) => {
@@ -134,7 +138,13 @@ test('viewport scroll position preserved when switching workspaces', async ({ pa
   const box = await screen.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -300);
-  await page.waitForTimeout(500);
+  // Poll until viewport has scrolled up
+  await page.waitForFunction((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    return buf.viewportY < buf.baseY;
+  }, tab1Id);
 
   // Viewport should have scrolled UP (not jumped to top)
   const posAfterScroll = await page.evaluate((key) => {

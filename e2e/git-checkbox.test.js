@@ -31,9 +31,9 @@ test('unchecking git worktree checkbox is respected on submit', async ({ page, r
 
   // Trigger blur to auto-detect git — this should check the git checkbox
   await dirInput.evaluate(el => el.blur());
-  await page.waitForTimeout(500); // wait for async checkIsGitDir
 
   const gitCheckbox = page.locator('#dlg-proj-git');
+  // Poll until async checkIsGitDir completes and checks the box
   await expect(gitCheckbox).toBeChecked();
   await expect(gitCheckbox).toBeEnabled();
 
@@ -46,13 +46,20 @@ test('unchecking git worktree checkbox is respected on submit', async ({ page, r
   // which should NOT re-check the checkbox the user explicitly unchecked.
   await dirInput.focus();
   await dirInput.evaluate(el => el.blur());
-  await page.waitForTimeout(500);
 
-  // The checkbox should STILL be unchecked
+  // Wait for async checkIsGitDir to complete, then verify checkbox stayed unchecked
+  // (poll for the fetch to finish by checking the checkbox is still enabled)
+  await expect(gitCheckbox).toBeEnabled();
   await expect(gitCheckbox).not.toBeChecked();
 
   await page.click('#dialog-ok');
-  await page.waitForTimeout(1000);
+
+  // Poll until the project appears in the API
+  await page.waitForFunction(async (base) => {
+    const res = await fetch(base + '/api/projects');
+    const projects = await res.json();
+    return projects.some(p => p.name === 'e2e-git-cb');
+  }, server.base);
 
   // Verify the project was created with git=false
   const res = await request.get(`${server.base}/api/projects`);

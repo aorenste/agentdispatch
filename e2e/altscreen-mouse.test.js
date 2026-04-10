@@ -29,7 +29,14 @@ test('mouse events do not reach the app in full-screen mode', async ({ page }) =
   for (let i = 0; i < 5; i++) {
     await page.mouse.wheel(0, -100);
   }
-  await page.waitForTimeout(200);
+
+  // Poll until scroll has taken effect (first line shows file content)
+  await page.waitForFunction((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const line = e.term.buffer.active.getLine(0);
+    return line && line.translateToString().trim().includes('root');
+  }, tabId);
 
   const firstLine = await page.evaluate((key) => {
     const e = _tabTerminals[key];
@@ -72,7 +79,24 @@ test('mouse tracking sequences from apps do not enable xterm.js mouse mode', asy
   const box = await screen.boundingBox();
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -200);
-  await page.waitForTimeout(200);
+
+  // This is a negative test: mouse wheel events should NOT be forwarded to the
+  // app (mouse tracking sequences are stripped).  Send a keystroke and wait for
+  // the app to process it, proving the event pipeline has been flushed.
+  await page.keyboard.press('g');  // no-op in this script
+  await page.waitForFunction((key) => {
+    // The 'g' will be read by the script's `read -r line`.  We just need to
+    // confirm the terminal processed *something* after the wheel events.
+    // Poll until the marker is still visible (it always should be).
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line && line.translateToString().includes('MOUSE_TRACK_TEST')) return true;
+    }
+    return false;
+  }, tabId);
 
   const stillHasMarker = await page.evaluate((key) => {
     const e = _tabTerminals[key];

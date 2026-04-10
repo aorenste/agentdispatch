@@ -67,7 +67,6 @@ test('terminal cols match after switching tabs', async ({ page }) => {
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
     tab1Id
   );
-  await page.waitForTimeout(500);
 
   // Record Shell 1's cols
   const cols1 = await page.evaluate((key) => {
@@ -83,7 +82,6 @@ test('terminal cols match after switching tabs', async ({ page }) => {
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
     tab2Id
   );
-  await page.waitForTimeout(500);
 
   // Record Shell 2's cols
   const cols2 = await page.evaluate((key) => {
@@ -93,7 +91,11 @@ test('terminal cols match after switching tabs', async ({ page }) => {
 
   // Switch back to Shell 1
   await page.locator('.ws-subtab').filter({ hasText: 'Shell 1' }).click();
-  await page.waitForTimeout(500);
+  // Wait for skipNextFit to be consumed by the ResizeObserver debounce
+  await page.waitForFunction(
+    (key) => { const e = _tabTerminals[key]; return e && e.skipNextFit === false; },
+    tab1Id
+  );
 
   // Shell 1's cols after reattach should match the original
   const cols1After = await page.evaluate((key) => {

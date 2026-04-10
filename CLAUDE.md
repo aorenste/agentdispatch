@@ -43,6 +43,11 @@ this I WILL FUCKING KILL YOU.
 
 - tmux sessions are created in `launch_project` (agent window) and `create_tab` (shell windows)
 - The terminal WebSocket handler only attaches to existing sessions, never creates them
-- On reconnect, pane content is restored via `capture_pane_with_cursor` (visible area only)
+- On reconnect, pane content is restored via `capture_pane_with_cursor` (scrollback + visible area)
 - Alternate screen state is queried from tmux (`#{alternate_on}`) on connect; if active,
   `\x1b[?1049h` is sent to xterm.js before the capture-pane content so the buffers match
+- Shell tabs auto-close when their pane exits. Detection uses `%unlinked-window-close`
+  (not `%exit`) in tmux control mode — `%exit` fires for any session kill (including
+  reconnection cleanup) while `%unlinked-window-close` only fires when a window is
+  actually destroyed. The server sends `{"type":"pane_exit"}` only for `WindowClosed`
+  events, and the browser calls `closeTab()` only for shell tabs (numeric key), not agent tabs.

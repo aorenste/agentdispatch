@@ -31,7 +31,7 @@ test('Shell tab auto-closes when shell exits', async ({ page }) => {
   await page.waitForFunction(() => {
     return !document.querySelector('.ws-subtab-label')
       || ![...document.querySelectorAll('.ws-subtab-label')].some(el => el.textContent === 'Shell');
-  }, { timeout: 10000 });
+  });
 
   // Verify via API that the tab was deleted
   const wsRes = await page.request.get(`${server.base}/api/workspaces`);

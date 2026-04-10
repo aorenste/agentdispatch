@@ -40,7 +40,20 @@ test('Cmd+key is intercepted as Meta+key in full-screen mode', async ({ page }) 
 
   await page.evaluate(() => navigator.clipboard.writeText('SHOULD_NOT_PASTE'));
   await page.keyboard.press('Meta+v');
-  await page.waitForTimeout(200);
+
+  // Type 'g' (go-to-top in less) and wait for it to appear, proving the
+  // keyboard pipeline flushed — any paste would have landed by now.
+  await page.keyboard.press('g');
+  await page.waitForFunction((key) => {
+    const e = _tabTerminals[key];
+    if (!e) return false;
+    const buf = e.term.buffer.active;
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (line && line.translateToString().includes('root')) return true;
+    }
+    return false;
+  }, tabId);
 
   const hasPasted = await page.evaluate((key) => {
     const e = _tabTerminals[key];
@@ -122,7 +135,8 @@ test('Option+V pastes from clipboard in full-screen mode', async ({ page }) => {
   const textarea = page.locator('.xterm-helper-textarea');
   await textarea.focus();
   await page.keyboard.type('cat > /tmp/paste_test\n', { delay: 5 });
-  await page.waitForTimeout(200);
+  // Wait for cat to be running (command echoed in terminal)
+  await h.waitForContent(page, 'cat > /tmp/paste_test');
 
   await page.evaluate((key) => {
     const e = _tabTerminals[key]; if (e) e.altScreen = true;
@@ -130,10 +144,10 @@ test('Option+V pastes from clipboard in full-screen mode', async ({ page }) => {
 
   await page.evaluate(() => navigator.clipboard.writeText('OPTION_V_PASTED'));
   await page.keyboard.press('Alt+v');
-  await page.waitForTimeout(200);
+  // Wait for pasted text to appear in the terminal
+  await h.waitForContent(page, 'OPTION_V_PASTED');
   await page.keyboard.press('Control+d');
-  await page.waitForTimeout(100);
-
+  // cat exited — type next command and wait for its output
   await page.keyboard.type('cat /tmp/paste_test\n', { delay: 5 });
   await h.waitForContent(page, 'OPTION_V_PASTED');
 

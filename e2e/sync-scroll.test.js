@@ -86,7 +86,6 @@ test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async (
     (key) => _tabTerminals[key] && _tabTerminals[key].term.buffer.active.baseY > 50,
     tabId
   );
-  await page.waitForTimeout(500);
 
   // Verify auto-scroll starts ON
   const initialAutoScroll = await page.evaluate(
@@ -100,7 +99,11 @@ test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async (
   const box = await screen.boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.wheel(0, -300);
-  await page.waitForTimeout(200);
+  // Poll until auto-scroll is disabled by the wheel-up event
+  await page.waitForFunction(
+    (key) => _tabTerminals[key] && _tabTerminals[key]._autoScroll === false,
+    tabId
+  );
 
   const afterScrollUp = await page.evaluate(
     (key) => _tabTerminals[key]._autoScroll,
@@ -112,7 +115,11 @@ test('wheel scroll up disables auto-scroll, wheel to bottom re-enables', async (
   for (let i = 0; i < 40; i++) {
     await page.mouse.wheel(0, 300);
   }
-  await page.waitForTimeout(500);
+  // Poll until auto-scroll is re-enabled by reaching the bottom
+  await page.waitForFunction(
+    (key) => _tabTerminals[key] && _tabTerminals[key]._autoScroll === true,
+    tabId
+  );
 
   const afterScrollDown = await page.evaluate(
     (key) => _tabTerminals[key]._autoScroll,

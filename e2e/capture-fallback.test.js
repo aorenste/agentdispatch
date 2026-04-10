@@ -85,8 +85,6 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
   // This E2E test verifies the full reconnect flow restores content.
 
   await page.goto('about:blank');
-  await page.waitForTimeout(500);
-
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item');
@@ -96,10 +94,9 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
     (key) => { const e = _tabTerminals[key]; return e && e.connected; },
     tab.id
   );
-  await page.waitForTimeout(1000);
 
-  // Marker should be visible (from output history or capture-pane)
-  const found = await page.evaluate((key) => {
+  // Poll for marker to be visible (from output history or capture-pane)
+  await page.waitForFunction((key) => {
     const e = _tabTerminals[key];
     if (!e) return false;
     const buf = e.term.buffer.active;
@@ -109,5 +106,4 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
     }
     return false;
   }, tab.id);
-  expect(found).toBeTruthy();
 });

@@ -55,17 +55,14 @@ test('scrollback survives page reload', async ({ page }) => {
     tabId,
   );
 
-  // Wait for capture-pane content to be written
-  await page.waitForTimeout(500);
-
   // After reconnect, the terminal should still have scrollback — i.e.,
   // baseY > 0.  If capture-pane content was painted with absolute cursor
   // positioning into a single screen, baseY will be 0 (no scrollback).
-  const scrollbackAfter = await page.evaluate((key) => {
-    const e = _tabTerminals[key];
-    if (!e) return -1;
-    return e.term.buffer.active.baseY;
-  }, tabId);
-
-  expect(scrollbackAfter).toBeGreaterThan(0);
+  await page.waitForFunction(
+    (key) => {
+      const e = _tabTerminals[key];
+      return e && e.term.buffer.active.baseY > 0;
+    },
+    tabId,
+  );
 });
