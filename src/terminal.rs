@@ -322,6 +322,8 @@ fn spawn_cc_bridge(
     let mut session_clone = session.clone();
     let tokio_fd_read = tokio_fd.clone();
     let read_pane_id = pane_id.clone();
+    let log_pane = pane_id.clone();
+    let log_link = link_name.clone();
     let pty_to_ws = actix_web::rt::spawn(async move {
         use std::io::Read;
 
@@ -383,13 +385,19 @@ fn spawn_cc_bridge(
                 ready_result = tokio_fd_read.readable() => {
                     let mut ready = match ready_result {
                         Ok(r) => r,
-                        Err(_) => break,
+                        Err(e) => {
+                            eprintln!("[terminal] {log_link} pane={log_pane}: readable error: {e}");
+                            break;
+                        }
                     };
                     match ready.try_io(|fd| {
                         let n = fd.get_ref().read(&mut raw_buf)?;
                         Ok(n)
                     }) {
-                        Ok(Ok(0)) => break,
+                        Ok(Ok(0)) => {
+                            eprintln!("[terminal] {log_link} pane={log_pane}: PTY EOF");
+                            break;
+                        }
                         Ok(Ok(n)) => {
                             reader.feed(&raw_buf[..n]);
                             while let Some(event) = reader.next_event() {
@@ -413,8 +421,12 @@ fn spawn_cc_bridge(
                                             }
                                         }
                                     }
-                                    CcEvent::Exit => break 'outer,
+                                    CcEvent::Exit => {
+                                        eprintln!("[terminal] {log_link} pane={log_pane}: %exit (session ended)");
+                                        break 'outer;
+                                    }
                                     CcEvent::WindowClosed => {
+                                        eprintln!("[terminal] {log_link} pane={log_pane}: window closed (pane exited), sending pane_exit");
                                         let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
                                         break 'outer;
                                     }

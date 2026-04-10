@@ -9,6 +9,7 @@ let _selectedWsSubtab = 'agent';
 let _wsSubtabs = {}; // workspace id -> last selected subtab
 let _tabTerminals = {}; // keyed by tab id -> {term, ws, fitAddon, container}
 let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, container}
+const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -424,6 +425,7 @@ function renderWorkspaces() {
   sidebar.innerHTML = _workspaces.map(ws => `
     <div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
          onclick="selectWorkspace(${ws.id})">
+      <span id="activity-ws-${ws.id}" class="activity-dot"></span>
       <div class="ws-sidebar-info">
         <div class="ws-name" ondblclick="event.stopPropagation(); renameWorkspace(${ws.id})">${esc(ws.name)}</div>
         <div class="ws-project">${esc(ws.project)}</div>
@@ -586,7 +588,7 @@ function renderSelectedWorkspace() {
 
   main.innerHTML = `
     <div class="ws-subtabs">
-      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
+      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span id="activity-tab-${ws.id}" class="activity-dot"></span><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
       ${tabButtons}
       <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
     </div>
@@ -755,7 +757,9 @@ function initTerminal(key, paneEl, opts) {
     ws.onmessage = (e) => {
       if (typeof e.data === 'string' && e.data.startsWith('{"type":"pane_exit"')) {
         // Auto-close shell tabs when their pane exits
+        console.log('[pane_exit] received for key=' + key + ' (type=' + typeof key + ')');
         if (typeof key === 'number') {
+          console.log('[pane_exit] auto-closing tab ' + key);
           closeTab(key);
         }
         return;
@@ -771,6 +775,10 @@ function initTerminal(key, paneEl, opts) {
         return;
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+      // Track agent output for activity dot
+      if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
+        _wsLastOutput[opts.workspaceId] = Date.now();
+      }
       // Capture agent terminal screen before erase-display clears it
       if (typeof key === 'string' && key.startsWith('agent-') && data instanceof Uint8Array && containsEraseDisplay(data)) {
         captureAndAppendSnapshot(opts.workspaceId, term);
@@ -1289,6 +1297,22 @@ if (typeof document !== 'undefined') {
   });
   connectSSE();
   fetchProjects();
+
+  // Activity dot updater — green = idle (Claude done), gray = active
+  setInterval(() => {
+    const now = Date.now();
+    for (const ws of _workspaces) {
+      const ts = _wsLastOutput[ws.id];
+      if (!ts) continue; // no output yet — stay default gray
+      const age = now - ts;
+      // <5s = just printed (gray), 5-10s = probably idle (dim green), >10s = idle (bright green)
+      const cls = age >= 10000 ? 'idle' : age >= 5000 ? 'recent' : '';
+      const sidebar = document.getElementById('activity-ws-' + ws.id);
+      if (sidebar) sidebar.className = 'activity-dot' + (cls ? ' ' + cls : '');
+      const tab = document.getElementById('activity-tab-' + ws.id);
+      if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
+    }
+  }, 1000);
 }
 
 /* Node.js exports for testing */

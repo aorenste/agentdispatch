@@ -284,12 +284,17 @@ impl CcReader {
                 None
             };
             if let Some(prefix_len) = wclose_prefix {
+                let rest = std::str::from_utf8(&line[prefix_len..]).unwrap_or("?");
+                let line_str = std::str::from_utf8(&line).unwrap_or("?");
                 if let Some(ref wid) = self.window_id {
-                    let rest = &line[prefix_len..];
-                    if rest == wid.as_bytes() {
+                    if rest.as_bytes() == wid.as_bytes() {
+                        eprintln!("[cc] pane={}: {line_str} — matches our window {wid}, emitting WindowClosed", self.pane_id);
                         self.saw_exit = true;
                         return Some(CcEvent::WindowClosed);
                     }
+                    eprintln!("[cc] pane={}: {line_str} — ignored (our window is {wid})", self.pane_id);
+                } else {
+                    eprintln!("[cc] pane={}: {line_str} — ignored (no window_id set)", self.pane_id);
                 }
                 continue;
             }

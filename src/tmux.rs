@@ -230,9 +230,17 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
-/// Capture the current visible content of a pane with cursor position.
-/// Falls back for reconnect when output history is unavailable (server restart).
+/// Capture scrollback history + visible content of a pane with cursor position.
+/// On reconnect this restores both the visible screen and scrollback so the
+/// user can scroll up to see previous output.
 pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
+    // 1. Capture scrollback (lines above the visible area)
+    let scrollback = tmux_base()
+        .args(["capture-pane", "-t", pane_id, "-p", "-e", "-S", "-"])
+        .output()
+        .ok();
+
+    // 2. Capture visible area
     let content = tmux_base()
         .args(["capture-pane", "-t", pane_id, "-p", "-e"])
         .output()
@@ -241,12 +249,53 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
         return None;
     }
 
+    // 3. Capture cursor position
     let cursor = tmux_base()
-        .args(["list-panes", "-t", pane_id, "-F", "#{cursor_x} #{cursor_y} #{cursor_flag}"])
+        .args(["list-panes", "-t", pane_id, "-F", "#{cursor_x} #{cursor_y} #{cursor_flag} #{pane_height}"])
         .output()
         .ok()?;
 
     let mut result = Vec::new();
+
+    // Parse pane height from cursor info (needed to split scrollback from visible)
+    let pane_height = if cursor.status.success() {
+        let s = String::from_utf8_lossy(&cursor.stdout);
+        s.lines().next()
+            .and_then(|l| l.trim().split(' ').nth(3))
+            .and_then(|h| h.parse::<usize>().ok())
+            .unwrap_or(24)
+    } else {
+        24
+    };
+
+    // Write scrollback lines as regular output (creates xterm.js scrollback).
+    // capture-pane -S - returns scrollback + visible; we strip the visible
+    // portion (last pane_height lines) since we paint that separately below.
+    if let Some(ref sb) = scrollback {
+        if sb.status.success() && !sb.stdout.is_empty() {
+            let mut all_stdout = sb.stdout.as_slice();
+            if all_stdout.last() == Some(&b'\n') {
+                all_stdout = &all_stdout[..all_stdout.len() - 1];
+            }
+            let all_lines: Vec<&[u8]> = all_stdout.split(|&b| b == b'\n').collect();
+            let sb_count = all_lines.len().saturating_sub(pane_height);
+            if sb_count > 0 {
+                for line in &all_lines[..sb_count] {
+                    result.extend_from_slice(line);
+                    result.extend_from_slice(b"\r\n");
+                }
+                // Push all scrollback lines off-screen by writing enough
+                // blank newlines to fill the visible area.
+                for _ in 0..pane_height {
+                    result.extend_from_slice(b"\r\n");
+                }
+                // Erase the visible area (now contains blank lines)
+                result.extend_from_slice(b"\x1b[2J");
+            }
+        }
+    }
+
+    // Write visible area with absolute positioning (existing behavior)
     let mut stdout = content.stdout.as_slice();
     if stdout.last() == Some(&b'\n') {
         stdout = &stdout[..stdout.len() - 1];
@@ -260,6 +309,7 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
         }
     }
 
+    // Position cursor
     if cursor.status.success() {
         let cursor_str = String::from_utf8_lossy(&cursor.stdout);
         if let Some(line) = cursor_str.lines().next() {
