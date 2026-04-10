@@ -149,8 +149,13 @@ pub enum CcEvent {
     /// `alternate_screen` is true when the app inside the pane has switched
     /// to the alternate screen buffer (emacs, vim, less — but NOT Claude).
     Output { data: Vec<u8>, alternate_screen: bool },
-    /// The tmux control client is exiting.
+    /// The tmux control client is exiting (generic %exit).
+    /// This fires when the linked session is killed (e.g. reconnection cleanup)
+    /// as well as when the session has no more windows.
     Exit,
+    /// The pane's window was destroyed (shell exited).
+    /// Only fires on %unlinked-window-close / %window-close matching our window.
+    WindowClosed,
 }
 
 /// Parses tmux control mode output from raw PTY bytes.
@@ -283,7 +288,7 @@ impl CcReader {
                     let rest = &line[prefix_len..];
                     if rest == wid.as_bytes() {
                         self.saw_exit = true;
-                        return Some(CcEvent::Exit);
+                        return Some(CcEvent::WindowClosed);
                     }
                 }
                 continue;
@@ -463,7 +468,7 @@ mod tests {
         let mut r = CcReader::new("%0".to_string());
         r.set_window_id("@1".to_string());
         r.feed(b"%unlinked-window-close @1\r\n");
-        assert!(matches!(r.next_event(), Some(CcEvent::Exit)));
+        assert!(matches!(r.next_event(), Some(CcEvent::WindowClosed)));
         assert!(r.next_event().is_none());
     }
 
@@ -472,7 +477,7 @@ mod tests {
         let mut r = CcReader::new("%0".to_string());
         r.set_window_id("@3".to_string());
         r.feed(b"%window-close @3\r\n");
-        assert!(matches!(r.next_event(), Some(CcEvent::Exit)));
+        assert!(matches!(r.next_event(), Some(CcEvent::WindowClosed)));
         assert!(r.next_event().is_none());
     }
 
@@ -495,6 +500,22 @@ mod tests {
         match r.next_event() {
             Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
             other => panic!("expected Output, got {:?}", other.is_some()),
+        }
+    }
+
+    /// %exit must produce CcEvent::Exit (NOT WindowClosed), even when a
+    /// window_id is set.  The linked session can be killed during reconnection
+    /// cleanup — that sends %exit but the pane is still alive.  Treating it
+    /// as WindowClosed would auto-close the browser tab.
+    #[test]
+    fn test_reader_exit_is_not_window_closed() {
+        let mut r = CcReader::new("%0".to_string());
+        r.set_window_id("@1".to_string());
+        r.feed(b"%exit\r\n");
+        match r.next_event() {
+            Some(CcEvent::Exit) => {} // correct — generic exit, not a window close
+            Some(CcEvent::WindowClosed) => panic!("%exit must not produce WindowClosed"),
+            other => panic!("expected Exit, got {:?}", other.is_some()),
         }
     }
 

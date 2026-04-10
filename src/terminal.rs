@@ -413,7 +413,8 @@ fn spawn_cc_bridge(
                                             }
                                         }
                                     }
-                                    CcEvent::Exit => {
+                                    CcEvent::Exit => break 'outer,
+                                    CcEvent::WindowClosed => {
                                         let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
                                         break 'outer;
                                     }
