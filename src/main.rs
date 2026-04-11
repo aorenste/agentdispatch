@@ -1,5 +1,23 @@
 #![deny(warnings)]
 
+/// Like `eprintln!` but prepends a timestamp.
+macro_rules! tlog {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = now.as_secs();
+        let h = (secs / 3600) % 24;
+        let m = (secs / 60) % 60;
+        let s = secs % 60;
+        let ms = now.subsec_millis();
+        let mut stderr = std::io::stderr().lock();
+        let _ = write!(stderr, "{h:02}:{m:02}:{s:02}.{ms:03} ");
+        let _ = writeln!(stderr, $($arg)*);
+    }};
+}
+
 mod db;
 mod projects;
 mod terminal;
@@ -40,7 +58,7 @@ async fn main() -> std::io::Result<()> {
     let use_tmux = !args.no_tmux;
 
     if args.reset {
-        eprintln!("Resetting: killing tmux server and deleting database");
+        tlog!("Resetting: killing tmux server and deleting database");
         tmux::kill_server();
         let _ = std::fs::remove_file(&args.db);
         // Also remove WAL/SHM files
@@ -54,7 +72,7 @@ async fn main() -> std::io::Result<()> {
 
     if use_tmux {
         if !tmux::check_installed() {
-            eprintln!("Error: tmux is required but not found in PATH (use --no-tmux to disable)");
+            tlog!("Error: tmux is required but not found in PATH (use --no-tmux to disable)");
             std::process::exit(1);
         }
     }
@@ -71,14 +89,14 @@ async fn main() -> std::io::Result<()> {
             if let Some(id_str) = session_name.strip_prefix("ws-") {
                 // Kill stale linked sessions (ws-N--window-M) from previous server runs
                 if id_str.contains("--") {
-                    eprintln!("Killing stale linked session: {session_name}");
+                    tlog!("Killing stale linked session: {session_name}");
                     tmux::kill_session(&session_name);
                     continue;
                 }
                 // Kill orphan main sessions not in the DB
                 if let Ok(id) = id_str.parse::<i64>() {
                     if !ws_ids.contains(&id) {
-                        eprintln!("Killing orphan tmux session: {session_name}");
+                        tlog!("Killing orphan tmux session: {session_name}");
                         tmux::kill_session(&session_name);
                     }
                 }
@@ -89,7 +107,7 @@ async fn main() -> std::io::Result<()> {
     let (tx, _) = tokio::sync::broadcast::channel::<web::UpdateBatch>(64);
 
     let build_hash = web::build_hash();
-    eprintln!("Build hash: {}", build_hash);
+    tlog!("Build hash: {}", build_hash);
 
     println!("http://localhost:{}", args.port);
 

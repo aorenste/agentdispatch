@@ -56,7 +56,7 @@ fn run_migrations(conn: &Connection) {
 
     for v in version..CURRENT_VERSION {
         let idx = v as usize;
-        eprintln!("Running migration {} -> {}", v, v + 1);
+        tlog!("Running migration {} -> {}", v, v + 1);
         conn.execute_batch(MIGRATIONS[idx])
             .unwrap_or_else(|e| panic!("Migration {} -> {} failed: {}", v, v + 1, e));
         conn.execute_batch(&format!("PRAGMA user_version = {}", v + 1))

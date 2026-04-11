@@ -810,7 +810,7 @@ function initTerminal(key, paneEl, opts) {
       // wheel-scroll-up, not by transient viewport desyncs that can occur
       // during xterm.js sync mode rendering or resize reflows.
       term.write(data, () => {
-        if (entry._autoScroll) {
+        if (entry._autoScroll && !term.hasSelection()) {
           term.scrollToBottom();
         }
       });
@@ -922,6 +922,7 @@ function initTerminal(key, paneEl, opts) {
   });
 
   term.onData((data) => {
+    if (term.hasSelection()) term.clearSelection();
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) { entry.ws.send(data); }
   });
 

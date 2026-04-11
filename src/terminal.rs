@@ -84,7 +84,7 @@ pub async fn ws_terminal(
             }
             let (c, a, pane_id, link_name, window_id) = tmux::attach_args(&tmux_session, &tmux_window)?;
             let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
-            eprintln!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen}");
+            tlog!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen}");
             Ok((c, a, pane_id, link_name, window_id, initial_alt_screen))
         }).await.map_err(|e| actix_web::error::ErrorInternalServerError(format!("{e}")))?
           .map_err(|e| actix_web::error::ErrorNotFound(e))?;
@@ -366,7 +366,7 @@ fn spawn_cc_bridge(
             let dump_path = format!("/tmp/agentdispatch-output-{}-{ts}.bin", read_pane_id.replace('%', ""));
             let f = std::fs::File::create(&dump_path).ok();
             if f.is_some() {
-                eprintln!("[debug] logging terminal output to {dump_path}");
+                tlog!("[debug] logging terminal output to {dump_path}");
             }
             f
         } else {
@@ -386,7 +386,7 @@ fn spawn_cc_bridge(
                     let mut ready = match ready_result {
                         Ok(r) => r,
                         Err(e) => {
-                            eprintln!("[terminal] {log_link} pane={log_pane}: readable error: {e}");
+                            tlog!("[terminal] {log_link} pane={log_pane}: readable error: {e}");
                             break;
                         }
                     };
@@ -395,7 +395,7 @@ fn spawn_cc_bridge(
                         Ok(n)
                     }) {
                         Ok(Ok(0)) => {
-                            eprintln!("[terminal] {log_link} pane={log_pane}: PTY EOF");
+                            tlog!("[terminal] {log_link} pane={log_pane}: PTY EOF");
                             break;
                         }
                         Ok(Ok(n)) => {
@@ -422,11 +422,11 @@ fn spawn_cc_bridge(
                                         }
                                     }
                                     CcEvent::Exit => {
-                                        eprintln!("[terminal] {log_link} pane={log_pane}: %exit (session ended)");
+                                        tlog!("[terminal] {log_link} pane={log_pane}: %exit (session ended)");
                                         break 'outer;
                                     }
                                     CcEvent::WindowClosed => {
-                                        eprintln!("[terminal] {log_link} pane={log_pane}: window closed (pane exited), sending pane_exit");
+                                        tlog!("[terminal] {log_link} pane={log_pane}: window closed (pane exited), sending pane_exit");
                                         let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
                                         break 'outer;
                                     }

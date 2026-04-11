@@ -276,10 +276,12 @@ impl CcReader {
             // (e.g. shell exits), the linked session still has other windows
             // so %exit won't fire. Detect it via %unlinked-window-close
             // (grouped sessions) or %window-close (standalone sessions).
+            // Only %unlinked-window-close means the window was truly destroyed
+            // from the session group (pane exited).  %window-close also fires
+            // when a linked session is torn down during reconnection cleanup,
+            // which is NOT a real pane death.
             let wclose_prefix = if line.starts_with(b"%unlinked-window-close ") {
                 Some(b"%unlinked-window-close ".len())
-            } else if line.starts_with(b"%window-close ") {
-                Some(b"%window-close ".len())
             } else {
                 None
             };
@@ -288,13 +290,13 @@ impl CcReader {
                 let line_str = std::str::from_utf8(&line).unwrap_or("?");
                 if let Some(ref wid) = self.window_id {
                     if rest.as_bytes() == wid.as_bytes() {
-                        eprintln!("[cc] pane={}: {line_str} — matches our window {wid}, emitting WindowClosed", self.pane_id);
+                        tlog!("[cc] pane={}: {line_str} — matches our window {wid}, emitting WindowClosed", self.pane_id);
                         self.saw_exit = true;
                         return Some(CcEvent::WindowClosed);
                     }
-                    eprintln!("[cc] pane={}: {line_str} — ignored (our window is {wid})", self.pane_id);
+                    tlog!("[cc] pane={}: {line_str} — ignored (our window is {wid})", self.pane_id);
                 } else {
-                    eprintln!("[cc] pane={}: {line_str} — ignored (no window_id set)", self.pane_id);
+                    tlog!("[cc] pane={}: {line_str} — ignored (no window_id set)", self.pane_id);
                 }
                 continue;
             }
@@ -478,12 +480,17 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_window_close() {
+    fn test_reader_window_close_ignored() {
+        // %window-close fires when a linked session is torn down (reconnection
+        // cleanup), not just when a pane exits.  Only %unlinked-window-close
+        // is a reliable signal that the window was truly destroyed.
         let mut r = CcReader::new("%0".to_string());
         r.set_window_id("@3".to_string());
-        r.feed(b"%window-close @3\r\n");
-        assert!(matches!(r.next_event(), Some(CcEvent::WindowClosed)));
-        assert!(r.next_event().is_none());
+        r.feed(b"%window-close @3\r\n%output %0 data\r\n");
+        match r.next_event() {
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
+            other => panic!("expected Output (window-close should be ignored), got {:?}", other.is_some()),
+        }
     }
 
     #[test]

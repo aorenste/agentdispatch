@@ -92,7 +92,7 @@ pub async fn events(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("SSE client lagged, missed {} messages", n);
+                            tlog!("SSE client lagged, missed {} messages", n);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }

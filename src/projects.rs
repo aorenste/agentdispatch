@@ -224,7 +224,7 @@ pub async fn launch_project(
                         .output();
                     if let Ok(o) = sub {
                         if !o.status.success() {
-                            eprintln!("Warning: submodule init failed in {wt_path_str}: {}",
+                            tlog!("Warning: submodule init failed in {wt_path_str}: {}",
                                 String::from_utf8_lossy(&o.stderr).trim());
                             // Clean up broken submodule .git files that point to
                             // incomplete gitdirs (missing HEAD, refs, etc.)
@@ -259,16 +259,16 @@ pub async fn launch_project(
                             &tmux_session, "agent", &path,
                             if agent != "None" { Some(&agent_cmd) } else { None },
                         ) {
-                            eprintln!("Failed to create tmux session for workspace {ws_id}: {e}");
+                            tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
                         }
                     }
                 }
                 Ok(Err(e)) => {
-                    eprintln!("Worktree creation failed for workspace {ws_id}: {e}");
+                    tlog!("Worktree creation failed for workspace {ws_id}: {e}");
                     db::update_workspace_status(&conn, ws_id, "error", None);
                 }
                 Err(e) => {
-                    eprintln!("Worktree creation failed for workspace {ws_id}: {e}");
+                    tlog!("Worktree creation failed for workspace {ws_id}: {e}");
                     db::update_workspace_status(&conn, ws_id, "error", None);
                 }
             }
@@ -286,7 +286,7 @@ pub async fn launch_project(
             &tmux_session, "agent", cwd,
             if agent != "None" { Some(&agent_cmd) } else { None },
         ) {
-            eprintln!("Failed to create tmux session for workspace {}: {e}", ws.id);
+            tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
         }
     }
     // For git worktree projects, tmux session is created after worktree setup (below)
@@ -417,7 +417,7 @@ pub async fn delete_workspace(
             }
             // Fall back to rm -rf
             if let Err(e) = std::fs::remove_dir_all(&wt) {
-                eprintln!("Warning: failed to remove worktree dir {wt}: {e}");
+                tlog!("Warning: failed to remove worktree dir {wt}: {e}");
             }
         })
         .await;
@@ -484,7 +484,7 @@ pub async fn create_tab(
         let tmux_window = format!("tab-{}", tab.id);
         if tmux::has_session(&tmux_session) {
             if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &cwd, None) {
-                eprintln!("Failed to create tmux window tab-{}: {e}", tab.id);
+                tlog!("Failed to create tmux window tab-{}: {e}", tab.id);
             }
         }
     }

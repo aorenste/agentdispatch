@@ -22,7 +22,7 @@ fn clean_stale_socket() {
                 {
                     let socket_path = format!("/tmp/tmux-{uid}/{}", socket_name());
                     let _ = std::fs::remove_file(&socket_path);
-                    eprintln!("Removed stale tmux socket: {socket_path}");
+                    tlog!("Removed stale tmux socket: {socket_path}");
                 }
             }
         }
