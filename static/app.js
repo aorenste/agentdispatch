@@ -982,19 +982,31 @@ function initTerminal(key, paneEl, opts) {
 
 }
 
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  }).catch(() => {});
+}
+
 function showWsInfo(id) {
   closeAllWsMenus();
   const ws = _workspaces.find(w => w.id === id);
   if (!ws) return;
   const proj = _projects.find(p => p.name === ws.project);
-  let info = `Name: ${ws.name}\nProject: ${ws.project}\nCreated: ${ws.created_at}`;
+  const copyBtn = (path) => `<button class="copy-btn" onclick="copyText('${esc(path)}', this)">Copy</button>`;
+  let html = `<div class="ws-info">`;
+  html += `<div>Name: ${esc(ws.name)}</div>`;
+  html += `<div>Project: ${esc(ws.project)}</div>`;
+  html += `<div>Created: ${esc(ws.created_at)}</div>`;
   if (ws.worktree_dir) {
-    info += `\nWorktree: ${ws.worktree_dir}`;
+    html += `<div>Worktree: <code>${esc(ws.worktree_dir)}</code> ${copyBtn(ws.worktree_dir)}</div>`;
   }
   if (proj) {
-    info += `\nRoot: ${proj.root_dir}`;
+    html += `<div>Root: <code>${esc(proj.root_dir)}</code> ${copyBtn(proj.root_dir)}</div>`;
   }
-  showDialog(info);
+  html += `</div>`;
+  showDialog(html, true);
 }
 
 function toggleWsMenu(id) {
@@ -1251,7 +1263,10 @@ function openDialog(msg, fields, callback, opts) {
   if (first) { first.focus(); first.select(); }
 }
 
-function showDialog(msg) { openDialog(msg, [], null); }
+function showDialog(msg, html) {
+  openDialog(msg, [], null);
+  if (html) document.getElementById('dialog-msg').innerHTML = msg;
+}
 function showConfirm(msg, callback, okText) {
   openDialog(msg, [], () => callback(), {destructive: true, okText: okText || 'Remove'});
 }
