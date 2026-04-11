@@ -70,6 +70,15 @@ pub fn ensure_server_config() {
     let _ = tmux_base()
         .args(["set-option", "-g", "history-limit", "10000"])
         .output();
+    // Allow apps to send OSC/DCS sequences through tmux (e.g. OSC 8 hyperlinks).
+    // "all" passes unrecognized sequences through without requiring DCS wrappers.
+    let _ = tmux_base()
+        .args(["set-option", "-g", "allow-passthrough", "all"])
+        .output();
+    // Enable hyperlink support so tmux processes OSC 8 and includes it in output.
+    let _ = tmux_base()
+        .args(["set-option", "-ga", "terminal-features", "xterm*:hyperlinks"])
+        .output();
 }
 
 pub fn new_session(session: &str, window: &str, cwd: &str, cmd: Option<&str>) -> Result<(), String> {

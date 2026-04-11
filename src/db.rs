@@ -217,7 +217,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
     .ok()
 }
 
-fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<WorkspaceTab> {
+pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<WorkspaceTab> {
     let mut stmt = conn
         .prepare("SELECT id, sort_order, name, tab_type FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
         .unwrap();

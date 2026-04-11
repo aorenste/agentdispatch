@@ -497,6 +497,65 @@ pub struct RenameWorkspaceRequest {
     name: String,
 }
 
+#[post("/api/workspaces/{id}/recreate")]
+pub async fn recreate_workspace(
+    db: Db,
+    path: web::Path<i64>,
+    use_tmux: UseTmux,
+) -> HttpResponse {
+    let ws_id = path.into_inner();
+    let (ws, project) = {
+        let conn = db.lock().unwrap();
+        let ws = db::get_workspace(&conn, ws_id);
+        let proj = ws.as_ref().and_then(|w| {
+            db::list_projects(&conn).into_iter().find(|p| p.name == w.project)
+        });
+        (ws, proj)
+    };
+    let ws = match ws {
+        Some(w) => w,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "workspace not found"})),
+    };
+    let project = match project {
+        Some(p) => p,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "project not found"})),
+    };
+
+    if !**use_tmux {
+        return HttpResponse::Ok().json(serde_json::json!({"status": "ok"}));
+    }
+
+    let tmux_session = format!("ws-{ws_id}");
+    // Kill existing session if any
+    tmux::kill_session(&tmux_session);
+
+    let cwd = ws.worktree_dir.as_deref().unwrap_or(&project.root_dir);
+    let agent = normalize_agent(&project.agent).unwrap_or("Claude");
+    let agent_cmd = build_agent_command(agent, &project);
+
+    if let Err(e) = tmux::new_session(
+        &tmux_session, "agent", cwd,
+        if agent != "None" { Some(&agent_cmd) } else { None },
+    ) {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("Failed to create tmux session: {e}")}));
+    }
+
+    // Recreate tmux windows for existing tabs
+    let tabs = {
+        let conn = db.lock().unwrap();
+        db::list_workspace_tabs(&conn, ws_id)
+    };
+    for tab in &tabs {
+        let tmux_window = format!("tab-{}", tab.id);
+        if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, None) {
+            tlog!("Failed to recreate tmux window tab-{}: {e}", tab.id);
+        }
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({"status": "recreated"}))
+}
+
 #[put("/api/workspaces/{id}")]
 pub async fn rename_workspace(
     db: Db,

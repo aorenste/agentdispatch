@@ -49,6 +49,7 @@ function getTerminalConfig() {
   return {
     cursorBlink: true,
     scrollback: 10000,
+    allowProposedApi: true,
     theme: {
       background: '#000000',
       foreground: '#e2e8f0',
@@ -860,7 +861,10 @@ function initTerminal(key, paneEl, opts) {
       const overlay = document.createElement('div');
       overlay.className = 'pane-error-overlay';
       overlay.innerHTML = 'Connection failed \u2014 session may no longer exist.'
-        + (opts.workspaceId != null ? '<br><button class="btn-danger" style="margin-top:8px" onclick="this.disabled=true;this.textContent=\'Destroying\u2026\';destroyWorkspace(' + opts.workspaceId + ')">Destroy Workspace</button>' : '');
+        + (opts.workspaceId != null
+          ? '<br><button class="btn-primary" style="margin-top:8px;margin-right:8px" onclick="this.disabled=true;this.textContent=\'Recreating\u2026\';recreateWorkspace(' + opts.workspaceId + ')">Recreate</button>'
+            + '<button class="btn-danger" style="margin-top:8px" onclick="this.disabled=true;this.textContent=\'Destroying\u2026\';destroyWorkspace(' + opts.workspaceId + ')">Destroy Workspace</button>'
+          : '');
       container.style.position = 'relative';
       container.appendChild(overlay);
     };
@@ -908,10 +912,10 @@ function initTerminal(key, paneEl, opts) {
       } else if (e.shiftKey && key.length === 1) {
         key = key.toUpperCase();
       }
-      // Cmd+C with selection → browser copy
+      // In normal mode: Cmd+C (with selection) → copy, Cmd+V → paste
+      // In FS mode: all Cmd+key → ESC+key (except Cmd+C with selection)
       if (key.toLowerCase() === 'c' && term.hasSelection()) return true;
-      // Cmd+V → browser paste
-      if (key.toLowerCase() === 'v') return true;
+      if (key.toLowerCase() === 'v' && !entry.altScreen) return true;
       if (key.length === 1) {
         if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
           entry.ws.send('\x1b' + key);
@@ -1058,6 +1062,21 @@ function closeAllWsMenus() {
 
 function closeTermContextMenu() {
   document.querySelectorAll('.term-context-menu').forEach(el => el.remove());
+}
+
+async function recreateWorkspace(id) {
+  const ws = _workspaces.find(w => w.id === id);
+  if (ws) {
+    for (const tab of ws.tabs) disposeTerminal(tab.id);
+  }
+  disposeTerminal('agent-' + id);
+  const res = await fetch(`/api/workspaces/${id}/recreate`, {method: 'POST'});
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert('Recreate failed: ' + (err.error || res.statusText));
+    return;
+  }
+  renderSelectedWorkspace();
 }
 
 async function destroyWorkspace(id) {

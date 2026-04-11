@@ -134,6 +134,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::delete_project)
             .service(projects::list_workspaces)
             .service(projects::rename_workspace)
+            .service(projects::recreate_workspace)
             .service(projects::delete_workspace)
             .service(projects::create_tab)
             .service(projects::update_tab)
