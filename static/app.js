@@ -781,6 +781,11 @@ function initTerminal(key, paneEl, opts) {
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
+  if (typeof WebLinksAddon !== 'undefined') {
+    term.loadAddon(new WebLinksAddon.WebLinksAddon((e, url) => {
+      if (e.ctrlKey || e.metaKey) window.open(url, '_blank');
+    }));
+  }
   term.open(container);
   fitAddon.fit();
 
@@ -894,13 +899,8 @@ function initTerminal(key, paneEl, opts) {
     '\\':'|', '`':'~', '1':'!', '2':'@', '3':'#', '4':'$', '5':'%', '6':'^',
     '7':'&', '8':'*', '9':'(', '0':')', '-':'_', '=':'+'};
   term.attachCustomKeyEventHandler((e) => {
-    if (!entry.altScreen) {
-      // Normal mode: let browser handle all Cmd+key and Option+key
-      return true;
-    }
-
-    // Full-screen mode (emacs, vim):
-    // Cmd+key → Meta+key (ESC prefix)
+    // Cmd+key → send to terminal as Meta+key (ESC prefix) in all modes.
+    // Exceptions: Cmd+C with selection (copy), Cmd+V (paste).
     if (e.metaKey && !e.ctrlKey && !e.altKey) {
       let key = e.key;
       if (e.shiftKey && key.length === 1 && _shiftMap[key]) {
@@ -908,8 +908,10 @@ function initTerminal(key, paneEl, opts) {
       } else if (e.shiftKey && key.length === 1) {
         key = key.toUpperCase();
       }
-      // Still let Cmd+C copy when there's a selection
+      // Cmd+C with selection → browser copy
       if (key.toLowerCase() === 'c' && term.hasSelection()) return true;
+      // Cmd+V → browser paste
+      if (key.toLowerCase() === 'v') return true;
       if (key.length === 1) {
         if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
           entry.ws.send('\x1b' + key);
@@ -917,7 +919,7 @@ function initTerminal(key, paneEl, opts) {
         e.preventDefault();
         return false;
       }
-      // Cmd+Backspace/Delete → send as Meta+Backspace (ESC + DEL)
+      // Cmd+Backspace → Meta+Backspace (ESC + DEL)
       if (key === 'Backspace') {
         if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
           entry.ws.send('\x1b\x7f');
