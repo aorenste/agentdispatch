@@ -10,6 +10,7 @@ let _wsSubtabs = {}; // workspace id -> last selected subtab
 let _tabTerminals = {}; // keyed by tab id -> {term, ws, fitAddon, container}
 let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, container}
 const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
+const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -428,10 +429,25 @@ function updateActivityDots() {
     if (!ts) continue;
     const age = now - ts;
     const cls = age >= 10000 ? 'idle' : age >= 5000 ? 'recent' : '';
+    const prev = _wsDotState[ws.id] || '';
+    _wsDotState[ws.id] = cls;
     const sidebar = document.getElementById('activity-ws-' + ws.id);
     if (sidebar) sidebar.className = 'activity-dot' + (cls ? ' ' + cls : '');
     const tab = document.getElementById('activity-tab-' + ws.id);
     if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
+    // Notify when a workspace transitions to idle (was active, now green)
+    if (cls === 'idle' && prev === 'recent') {
+      notifyIdle(ws.name);
+    }
+  }
+}
+
+function notifyIdle(name) {
+  if (document.hasFocus()) return; // only notify when on a different screen
+  if (Notification.permission === 'granted') {
+    new Notification('AgentDispatch', { body: `${name} is idle`, tag: 'idle-' + name });
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission();
   }
 }
 
@@ -772,6 +788,7 @@ function initTerminal(key, paneEl, opts) {
 
     ws.onopen = () => {
       entry.connected = true;
+      entry.connectedAt = Date.now();
       // Only focus if this terminal is in the active pane (not stashed)
       if (entry.container.closest('#ws-active-pane')) term.focus();
     };
@@ -797,8 +814,10 @@ function initTerminal(key, paneEl, opts) {
         return;
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
-      // Track agent output for activity dot
-      if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
+      // Track agent output for activity dot.
+      // Skip the first 2s after connection — that's capture-pane replay, not live output.
+      if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null
+          && entry.connectedAt && Date.now() - entry.connectedAt > 2000) {
         _wsLastOutput[opts.workspaceId] = Date.now();
       }
       // Capture agent terminal screen before erase-display clears it
