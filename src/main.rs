@@ -133,6 +133,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::list_branches)
             .service(projects::delete_project)
             .service(projects::list_workspaces)
+            .service(projects::reorder_workspaces)
             .service(projects::rename_workspace)
             .service(projects::recreate_workspace)
             .service(projects::delete_workspace)

@@ -476,6 +476,7 @@ function renderWorkspaces() {
   }
   sidebar.innerHTML = _workspaces.map(ws => `
     <div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
+         draggable="true" data-ws-id="${ws.id}"
          onclick="selectWorkspace(${ws.id})">
       <span id="activity-ws-${ws.id}" class="activity-dot"></span>
       <div class="ws-sidebar-info">
@@ -490,6 +491,44 @@ function renderWorkspaces() {
       </div>
     </div>
   `).join('');
+
+  // Drag-and-drop reordering
+  let dragId = null;
+  sidebar.querySelectorAll('.ws-sidebar-item').forEach(el => {
+    el.addEventListener('dragstart', (e) => {
+      dragId = parseInt(el.dataset.wsId);
+      e.dataTransfer.effectAllowed = 'move';
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+      sidebar.querySelectorAll('.ws-sidebar-item').forEach(x => x.classList.remove('drag-over'));
+    });
+    el.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      sidebar.querySelectorAll('.ws-sidebar-item').forEach(x => x.classList.remove('drag-over'));
+      if (parseInt(el.dataset.wsId) !== dragId) el.classList.add('drag-over');
+    });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.classList.remove('drag-over');
+      const targetId = parseInt(el.dataset.wsId);
+      if (dragId == null || dragId === targetId) return;
+      const fromIdx = _workspaces.findIndex(w => w.id === dragId);
+      const toIdx = _workspaces.findIndex(w => w.id === targetId);
+      if (fromIdx < 0 || toIdx < 0) return;
+      const [moved] = _workspaces.splice(fromIdx, 1);
+      _workspaces.splice(toIdx, 0, moved);
+      renderWorkspaces();
+      fetch('/api/workspaces/reorder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ids: _workspaces.map(w => w.id)}),
+      });
+    });
+  });
+
   renderSelectedWorkspace();
   updateActivityDots();
 }

@@ -556,6 +556,21 @@ pub async fn recreate_workspace(
     HttpResponse::Ok().json(serde_json::json!({"status": "recreated"}))
 }
 
+#[derive(Deserialize)]
+pub struct ReorderRequest {
+    ids: Vec<i64>,
+}
+
+#[post("/api/workspaces/reorder")]
+pub async fn reorder_workspaces(
+    db: Db,
+    body: web::Json<ReorderRequest>,
+) -> HttpResponse {
+    let conn = db.lock().unwrap();
+    db::reorder_workspaces(&conn, &body.ids);
+    HttpResponse::Ok().json(serde_json::json!({"status": "reordered"}))
+}
+
 #[put("/api/workspaces/{id}")]
 pub async fn rename_workspace(
     db: Db,

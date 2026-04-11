@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 8;
+const CURRENT_VERSION: i64 = 9;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -47,6 +47,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE workspaces ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'",
     // 7 -> 8: add agent to projects
     "ALTER TABLE projects ADD COLUMN agent TEXT NOT NULL DEFAULT 'Claude'",
+    // 8 -> 9: add sort_order to workspaces
+    "ALTER TABLE workspaces ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0; UPDATE workspaces SET sort_order = id;",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -175,7 +177,7 @@ pub struct Workspace {
 
 pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
     let mut stmt = conn
-        .prepare("SELECT id, name, project, created_at, worktree_dir, status FROM workspaces ORDER BY id")
+        .prepare("SELECT id, name, project, created_at, worktree_dir, status FROM workspaces ORDER BY sort_order, id")
         .unwrap();
     let mut workspaces: Vec<Workspace> = stmt.query_map([], |row| {
         Ok(Workspace {
@@ -235,9 +237,12 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
 }
 
 pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir: Option<&str>, status: &str) -> Workspace {
+    let next_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces", [], |row| row.get(0))
+        .unwrap_or(0);
     conn.execute(
-        "INSERT INTO workspaces (name, project, worktree_dir, status) VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, project, worktree_dir, status],
+        "INSERT INTO workspaces (name, project, worktree_dir, status, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![name, project, worktree_dir, status, next_order],
     )
     .expect("Failed to insert workspace");
     let id = conn.last_insert_rowid();
@@ -245,6 +250,16 @@ pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir:
         .query_row("SELECT created_at FROM workspaces WHERE id = ?1", [id], |row| row.get(0))
         .unwrap();
     Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), tabs: Vec::new() }
+}
+
+pub fn reorder_workspaces(conn: &Connection, ids: &[i64]) {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE workspaces SET sort_order = ?1 WHERE id = ?2",
+            rusqlite::params![i as i64, id],
+        )
+        .ok();
+    }
 }
 
 pub fn rename_workspace(conn: &Connection, id: i64, name: &str) {
