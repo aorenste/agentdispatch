@@ -436,14 +436,29 @@ function updateActivityDots() {
     const tab = document.getElementById('activity-tab-' + ws.id);
     if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
     // Notify when a workspace transitions to idle (was active, now green)
+    if (cls !== prev) {
+      console.log(`[activity] ${ws.name}: ${prev || 'active'} -> ${cls || 'active'} (age=${Math.round(age/1000)}s)`);
+    }
     if (cls === 'idle' && prev === 'recent') {
+      console.log(`[activity] ${ws.name}: firing notification`);
       notifyIdle(ws.name);
     }
   }
 }
 
 function notifyIdle(name) {
-  if (document.hasFocus()) return; // only notify when on a different screen
+  // In-page toast
+  const toast = document.createElement('div');
+  toast.className = 'idle-toast';
+  toast.textContent = `${name} is idle`;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 300);
+  }, 5000);
+
+  // Browser notification (best-effort)
   if (Notification.permission === 'granted') {
     new Notification('AgentDispatch', { body: `${name} is idle`, tag: 'idle-' + name });
   } else if (Notification.permission !== 'denied') {
