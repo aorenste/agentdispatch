@@ -363,45 +363,18 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
         if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
         return HttpResponse::Ok().json(resp);
     }
-    // Annotate with agent pane activity timestamps and titles
-    let activities = tmux::agent_pane_activities();
+    // Annotate with agent pane titles
+    let titles = tmux::agent_pane_titles();
     let annotated: Vec<serde_json::Value> = workspaces.into_iter().map(|ws| {
         let mut v = serde_json::to_value(&ws).unwrap();
-        if let Some(info) = activities.get(&ws.id) {
-            v["agent_activity"] = serde_json::json!(info.activity);
-            v["agent_io"] = serde_json::json!(info.io_bytes_per_sec);
-            if !info.title.is_empty() {
-                v["agent_title"] = serde_json::json!(info.title);
-            }
+        if let Some(title) = titles.get(&ws.id) {
+            v["agent_title"] = serde_json::json!(title);
         }
         v
     }).collect();
     let mut resp = serde_json::json!({ "workspaces": annotated });
     if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
     HttpResponse::Ok().json(resp)
-}
-
-#[get("/api/workspace-status")]
-pub async fn workspace_status(db: Db, use_tmux: UseTmux) -> HttpResponse {
-    if !**use_tmux {
-        return HttpResponse::Ok().json(serde_json::json!([]));
-    }
-    let ws_ids: Vec<i64> = {
-        let conn = db.lock().unwrap();
-        db::list_workspaces(&conn).into_iter().map(|ws| ws.id).collect()
-    };
-    let activities = tmux::agent_pane_activities();
-    let statuses: Vec<serde_json::Value> = ws_ids.into_iter().map(|id| {
-        let mut v = serde_json::json!({"id": id});
-        if let Some(info) = activities.get(&id) {
-            v["io"] = serde_json::json!(info.io_bytes_per_sec);
-            if !info.title.is_empty() {
-                v["title"] = serde_json::json!(info.title);
-            }
-        }
-        v
-    }).collect();
-    HttpResponse::Ok().json(statuses)
 }
 
 #[delete("/api/workspaces/{id}")]

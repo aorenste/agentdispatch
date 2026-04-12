@@ -11,10 +11,10 @@ let _tabTerminals = {}; // keyed by tab id -> {term, ws, fitAddon, container}
 let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, container}
 const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
+const _wsWasSelected = {}; // workspace id -> was agent pane selected last tick
+const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
 const _wsTitles = {}; // workspace id -> pane title string
-const _wsBusy = {}; // workspace id -> I/O bytes/sec from server
-const _wsLastInput = {}; // workspace id -> last user input timestamp (ms)
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -421,16 +421,10 @@ async function fetchWorkspaces() {
     if (data.divider_pos != null) {
       _wsDividerPos = data.divider_pos;
     }
-    // Update busy state, activity timestamps, and titles from server
+    // Initialize activity timestamps and titles from server-reported tmux data
     for (const ws of workspaces) {
-      if (ws.agent_activity != null && !_wsLastOutput[ws.id]) {
-        _wsLastOutput[ws.id] = ws.agent_activity * 1000;
-      }
       if (ws.agent_title && !_wsTitles[ws.id]) {
         _wsTitles[ws.id] = ws.agent_title;
-      }
-      if (ws.agent_io != null) {
-        _wsBusy[ws.id] = ws.agent_io;
       }
     }
     renderWorkspaces();
@@ -438,70 +432,73 @@ async function fetchWorkspaces() {
 }
 
 
-// Dot state machine:
-//   gray     = unused workspace (initial / user selected it while green)
-//   busy     = bright yellow (active I/O or terminal output)
-//   slowing  = dim yellow (no activity for 5s)
-//   done     = green (no activity for 10s → notify)
-//
-// _wsDotState[id] = '' | 'busy' | 'slowing' | 'done'
-// _wsIdleSince[id] = timestamp when activity last stopped
-const _wsIdleSince = {};
+// Pure state machine for activity dots.
+function isAgentPaneSelected(selectedWsId, selectedSubtab, wsId) {
+  return selectedWsId === wsId && selectedSubtab === 'agent';
+}
 
-function isWsBusy(wsId) {
-  const io = _wsBusy[wsId];
-  const now = Date.now();
-  const outputAge = _wsLastOutput[wsId] ? now - _wsLastOutput[wsId] : Infinity;
-  return (io !== undefined && io > 768000) || outputAge < 5000;
+function shouldRecordOutput(isSelected, now, graceUntil) {
+  if (isSelected) return false;
+  if (graceUntil != null && now < graceUntil) return false;
+  return true;
+}
+
+// prev: current state ('' | 'busy' | 'slowing' | 'done')
+// lastOutputMs: timestamp of last text output (ms), or null/undefined
+// now: current time (ms)
+// isSelected: whether this workspace is currently selected by the user
+function computeDotState(prev, lastOutputMs, now, isSelected) {
+  if (isSelected) return '';
+  const age = lastOutputMs != null ? now - lastOutputMs : Infinity;
+  const recentOutput = age < 5000;
+
+  if (prev === 'done') {
+    if (recentOutput) return 'busy';
+    return 'done';
+  }
+  if (prev === 'slowing') {
+    if (recentOutput) return 'busy';
+    if (age >= 10000) return 'done';
+    return 'slowing';
+  }
+  if (prev === 'busy') {
+    if (recentOutput) return 'busy';
+    return 'slowing';
+  }
+  // prev === '' (gray)
+  if (recentOutput) return 'busy';
+  return '';
+}
+
+// Full tick: compute new state and clear output if user is watching.
+// Returns { state, outputMs, notify, graceUntil }.
+function tickDot(prev, lastOutputMs, now, isSelected, wasSelected) {
+  const state = computeDotState(prev, lastOutputMs, now, isSelected);
+  const justDeselected = wasSelected && !isSelected;
+  return {
+    state,
+    outputMs: isSelected ? null : lastOutputMs,
+    notify: state === 'done' && prev === 'slowing',
+    graceUntil: justDeselected ? now + 2000 : null,
+  };
 }
 
 function updateActivityDots() {
   const now = Date.now();
   for (const ws of _workspaces) {
     const prev = _wsDotState[ws.id] || '';
-    const busy = isWsBusy(ws.id);
-    let cls = prev;
-
-    if (prev === '') {
-      // Gray: only transition to busy after user submits input
-      // (text output alone isn't enough — avoids sporadic I/O false positives)
-      if (busy && _wsLastInput[ws.id]) cls = 'busy';
-    } else if (prev === 'busy') {
-      // Bright yellow: dim after 5s idle
-      if (!busy) {
-        if (!_wsIdleSince[ws.id]) _wsIdleSince[ws.id] = now;
-        if (now - _wsIdleSince[ws.id] >= 5000) cls = 'slowing';
-      } else {
-        _wsIdleSince[ws.id] = 0;
-      }
-    } else if (prev === 'slowing') {
-      // Dim yellow: back to busy on activity, green after 10s total idle
-      if (busy) {
-        cls = 'busy';
-        _wsIdleSince[ws.id] = 0;
-      } else if (_wsIdleSince[ws.id] && now - _wsIdleSince[ws.id] >= 10000) {
-        notifyIdle(ws.name);
-        // If user is viewing this workspace, go straight to gray (acknowledged)
-        if (_selectedWsId === ws.id) {
-          cls = '';
-          _wsIdleSince[ws.id] = 0;
-        } else {
-          cls = 'done';
-        }
-      }
-    } else if (prev === 'done') {
-      // Green: back to busy on activity
-      if (busy) {
-        cls = 'busy';
-        _wsIdleSince[ws.id] = 0;
-      }
-    }
-
-    _wsDotState[ws.id] = cls;
+    const isSelected = isAgentPaneSelected(_selectedWsId, _selectedWsSubtab, ws.id);
+    const wasSelected = _wsWasSelected[ws.id] || false;
+    const r = tickDot(prev, _wsLastOutput[ws.id], now, isSelected, wasSelected);
+    _wsDotState[ws.id] = r.state;
+    _wsLastOutput[ws.id] = r.outputMs;
+    _wsWasSelected[ws.id] = isSelected;
+    if (r.graceUntil) _wsOutputGrace[ws.id] = r.graceUntil;
     const sidebar = document.getElementById('activity-ws-' + ws.id);
-    if (sidebar) sidebar.className = 'activity-dot' + (cls ? ' ' + cls : '');
+    if (sidebar) sidebar.className = 'activity-dot' + (r.state ? ' ' + r.state : '');
     const tab = document.getElementById('activity-tab-' + ws.id);
-    if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
+    if (tab) tab.className = 'activity-dot' + (r.state ? ' ' + r.state : '');
+    if (r.notify) notifyIdle(ws.name);
   }
 }
 
@@ -651,11 +648,6 @@ function renderWorkspaces() {
 }
 
 function selectWorkspace(id) {
-  // Green → gray when user acknowledges by selecting
-  if (_wsDotState[id] === 'done') {
-    _wsDotState[id] = '';
-    _wsIdleSince[id] = 0;
-  }
   _selectedWsId = id;
   const ws = _workspaces.find(w => w.id === id);
   _selectedWsSubtab = normalizeWsSubtab(ws, _wsSubtabs[id] || getDefaultWsSubtab(ws));
@@ -998,8 +990,12 @@ function initTerminal(key, paneEl, opts) {
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
       // Track agent output for activity dot.
       // Skip the first 2s after connection — that's capture-pane replay, not live output.
+      // Don't record while user is watching or during the grace period after leaving.
       if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null
-          && entry.connectedAt && Date.now() - entry.connectedAt > 2000) {
+          && entry.connectedAt && Date.now() - entry.connectedAt > 2000
+          && shouldRecordOutput(
+              isAgentPaneSelected(_selectedWsId, _selectedWsSubtab, opts.workspaceId),
+              Date.now(), _wsOutputGrace[opts.workspaceId])) {
         _wsLastOutput[opts.workspaceId] = Date.now();
       }
       // Capture agent terminal screen before erase-display clears it
@@ -1129,7 +1125,6 @@ function initTerminal(key, paneEl, opts) {
 
   term.onData((data) => {
     if (term.hasSelection()) term.clearSelection();
-    if (opts.workspaceId != null) _wsLastInput[opts.workspaceId] = Date.now();
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) { entry.ws.send(data); }
   });
 
@@ -1567,25 +1562,8 @@ if (typeof document !== 'undefined') {
   connectSSE();
   fetchProjects();
 
-  // Activity dot updater — green = idle (Claude done), gray = active
+  // Activity dot updater
   setInterval(updateActivityDots, 1000);
-
-  // Poll lightweight workspace status every 3 seconds
-  setInterval(async () => {
-    try {
-      const res = await fetch('/api/workspace-status');
-      const statuses = await res.json();
-      for (const s of statuses) {
-        _wsBusy[s.id] = s.io || 0;
-        // Update title
-        if (s.title) {
-          _wsTitles[s.id] = s.title;
-          const sideEl = document.getElementById('title-ws-' + s.id);
-          if (sideEl) sideEl.textContent = s.title;
-        }
-      }
-    } catch {}
-  }, 3000);
 }
 
 /* Node.js exports for testing */
@@ -1598,6 +1576,10 @@ if (typeof module !== 'undefined' && module.exports) {
     buildAgentCommand,
     escAttr,
     containsEraseDisplay,
+    computeDotState,
+    tickDot,
+    isAgentPaneSelected,
+    shouldRecordOutput,
     _setProjects: (p) => { _projects = p; },
   };
 }

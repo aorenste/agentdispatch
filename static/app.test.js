@@ -255,3 +255,283 @@ describe('containsEraseDisplay', () => {
     assert.equal(app.containsEraseDisplay(new Uint8Array([0x68, 0x65, 0x6c, 0x6c, 0x6f])), false);
   });
 });
+
+describe('computeDotState', () => {
+  const compute = app.computeDotState;
+  const now = 100000;
+
+  // Initial state: gray
+  test('starts gray with no output', () => {
+    assert.equal(compute('', null, now, false), '');
+  });
+
+  test('stays gray with no output even if selected', () => {
+    assert.equal(compute('', null, now, true), '');
+  });
+
+  // Gray → busy on text output
+  test('gray goes busy when output is recent', () => {
+    assert.equal(compute('', now - 1000, now, false), 'busy');
+  });
+
+  test('gray goes busy when output just happened', () => {
+    assert.equal(compute('', now, now, false), 'busy');
+  });
+
+  // Gray does NOT go busy if output is already old (e.g. initial load with stale data)
+  test('gray stays gray if output is already 5s old', () => {
+    assert.equal(compute('', now - 5000, now, false), '');
+  });
+
+  test('gray stays gray if output is already 10s old', () => {
+    assert.equal(compute('', now - 10000, now, false), '');
+  });
+
+  // Busy stays busy while output is recent
+  test('busy stays busy with recent output', () => {
+    assert.equal(compute('busy', now - 2000, now, false), 'busy');
+  });
+
+  test('busy stays busy at 4999ms', () => {
+    assert.equal(compute('busy', now - 4999, now, false), 'busy');
+  });
+
+  // Busy → slowing at 5s
+  test('busy goes slowing at 5s idle', () => {
+    assert.equal(compute('busy', now - 5000, now, false), 'slowing');
+  });
+
+  test('busy goes slowing at 7s idle', () => {
+    assert.equal(compute('busy', now - 7000, now, false), 'slowing');
+  });
+
+  // Busy → slowing, not directly to done
+  test('busy does NOT skip to done at 10s', () => {
+    assert.equal(compute('busy', now - 10000, now, false), 'slowing');
+  });
+
+  // Slowing → busy on new output
+  test('slowing goes back to busy on new output', () => {
+    assert.equal(compute('slowing', now - 1000, now, false), 'busy');
+  });
+
+  // Slowing stays slowing between 5-10s
+  test('slowing stays slowing at 7s', () => {
+    assert.equal(compute('slowing', now - 7000, now, false), 'slowing');
+  });
+
+  // Slowing → done at 10s (not selected)
+  test('slowing goes done at 10s when not selected', () => {
+    assert.equal(compute('slowing', now - 10000, now, false), 'done');
+  });
+
+  test('slowing goes done at 15s when not selected', () => {
+    assert.equal(compute('slowing', now - 15000, now, false), 'done');
+  });
+
+  // Selected (viewing agent pane) → always gray, regardless of state
+  test('selected: gray stays gray with recent output', () => {
+    assert.equal(compute('', now - 1000, now, true), '');
+  });
+
+  test('selected: busy goes gray', () => {
+    assert.equal(compute('busy', now - 2000, now, true), '');
+  });
+
+  test('selected: slowing goes gray', () => {
+    assert.equal(compute('slowing', now - 7000, now, true), '');
+  });
+
+  test('selected: slowing goes gray even at 10s', () => {
+    assert.equal(compute('slowing', now - 10000, now, true), '');
+  });
+
+  // Done is sticky — stays done regardless of time
+  test('done stays done with old output', () => {
+    assert.equal(compute('done', now - 30000, now, false), 'done');
+  });
+
+  test('done stays done with no output', () => {
+    assert.equal(compute('done', null, now, false), 'done');
+  });
+
+  // Done → busy on new output
+  test('done goes busy on new output', () => {
+    assert.equal(compute('done', now - 1000, now, false), 'busy');
+  });
+
+  // Done → gray when user clicks (selected)
+  test('done goes gray when selected', () => {
+    assert.equal(compute('done', now - 30000, now, true), '');
+  });
+
+  // Done → gray when selected even with no output
+  test('done goes gray when selected with no output', () => {
+    assert.equal(compute('done', null, now, true), '');
+  });
+});
+
+describe('tickDot', () => {
+  const tick = app.tickDot;
+  const now = 100000;
+
+  // Basic: not selected, no output → gray, no output change
+  test('gray with no output stays gray', () => {
+    const r = tick('', null, now, false);
+    assert.equal(r.state, '');
+    assert.equal(r.outputMs, null);
+  });
+
+  // Not selected, recent output → busy, output preserved
+  test('gray with recent output goes busy', () => {
+    const r = tick('', now - 1000, now, false);
+    assert.equal(r.state, 'busy');
+    assert.equal(r.outputMs, now - 1000);
+  });
+
+  // Selected → gray, output CLEARED (user saw it)
+  // tickDot(prev, lastOutputMs, now, isSelected, wasSelected)
+  // 5th param tracks previous tick's selected state
+
+  test('selected clears output and stays gray', () => {
+    const r = tick('', now - 500, now, true, true);
+    assert.equal(r.state, '');
+    assert.equal(r.outputMs, null);
+  });
+
+  test('selected clears output from busy state', () => {
+    const r = tick('busy', now - 500, now, true, false);
+    assert.equal(r.state, '');
+    assert.equal(r.outputMs, null);
+  });
+
+  test('selected clears output from done state', () => {
+    const r = tick('done', now - 30000, now, true, false);
+    assert.equal(r.state, '');
+    assert.equal(r.outputMs, null);
+  });
+
+  // Just deselected → sets grace period to suppress residual output
+  test('just deselected returns graceUntil', () => {
+    const r = tick('', null, now, false, true);
+    assert.equal(r.state, '');
+    assert.ok(r.graceUntil > now);
+  });
+
+  test('not just deselected returns no graceUntil', () => {
+    const r = tick('', null, now, false, false);
+    assert.equal(r.graceUntil, null);
+  });
+
+  test('staying selected returns no graceUntil', () => {
+    const r = tick('', null, now, true, true);
+    assert.equal(r.graceUntil, null);
+  });
+
+  // THE KEY BUG SCENARIO:
+  // User watches agent pane, output happening. Leaves. Residual WebSocket
+  // data arrives. Should NOT trigger busy because of grace period.
+  test('full scenario: watch, leave, residual output stays gray', () => {
+    // Tick 1: watching, output happening
+    const t1 = tick('', now - 500, now, true, true);
+    assert.equal(t1.state, '');
+    assert.equal(t1.outputMs, null);
+
+    // Tick 2: user just left (wasSelected=true, isSelected=false)
+    const t2 = tick(t1.state, t1.outputMs, now + 1000, false, true);
+    assert.equal(t2.state, '');
+    assert.ok(t2.graceUntil > now + 1000); // grace period set
+
+    // Between ticks, WS data arrives — but shouldRecordOutput blocks it
+    // (tested separately below)
+
+    // Tick 3: still away, no output recorded (grace blocked it)
+    const t3 = tick(t2.state, null, now + 2000, false, false);
+    assert.equal(t3.state, '');
+  });
+
+  // New output well after grace period DOES trigger busy
+  test('output after grace period triggers busy', () => {
+    const t1 = tick('', null, now, false, true); // just deselected
+    // Grace expires after ~2s. New output at now+5000:
+    const t2 = tick(t1.state, now + 5000, now + 5500, false, false);
+    assert.equal(t2.state, 'busy');
+  });
+
+  // Notification flag
+  test('notify on slowing → done transition', () => {
+    const r = tick('slowing', now - 10000, now, false, false);
+    assert.equal(r.state, 'done');
+    assert.equal(r.notify, true);
+  });
+
+  test('no notify on other transitions', () => {
+    assert.equal(tick('', now - 1000, now, false, false).notify, false);
+    assert.equal(tick('busy', now - 5000, now, false, false).notify, false);
+    assert.equal(tick('busy', now - 1000, now, false, false).notify, false);
+  });
+});
+
+describe('shouldRecordOutput', () => {
+  const should = app.shouldRecordOutput;
+  const now = 100000;
+
+  test('no when selected', () => {
+    assert.equal(should(true, now, null), false);
+  });
+
+  test('yes when not selected and no grace', () => {
+    assert.equal(should(false, now, null), true);
+  });
+
+  test('yes when not selected and grace is null', () => {
+    assert.equal(should(false, now, undefined), true);
+  });
+
+  test('no when within grace period', () => {
+    assert.equal(should(false, now, now + 1000), false);
+  });
+
+  test('yes when grace expired', () => {
+    assert.equal(should(false, now, now - 1), true);
+  });
+
+  test('yes when grace is exactly now', () => {
+    assert.equal(should(false, now, now), true);
+  });
+});
+
+describe('isAgentPaneSelected', () => {
+  const isSel = app.isAgentPaneSelected;
+
+  test('true when workspace matches and subtab is agent', () => {
+    assert.equal(isSel(42, 'agent', 42), true);
+  });
+
+  test('false when different workspace', () => {
+    assert.equal(isSel(42, 'agent', 99), false);
+  });
+
+  test('false when subtab is not agent', () => {
+    assert.equal(isSel(42, 'tab-1', 42), false);
+    assert.equal(isSel(42, 'history', 42), false);
+  });
+
+  test('false when no workspace selected', () => {
+    assert.equal(isSel(null, 'agent', 42), false);
+  });
+
+  // Output should NOT be recorded while viewing the agent pane
+  // This is the guard the WebSocket handler must use
+  test('used to gate output recording', () => {
+    // Simulating: ws handler receives output for workspace 42
+    // User is viewing workspace 42 agent pane → don't record
+    assert.equal(isSel(42, 'agent', 42), true); // selected → skip recording
+
+    // User switches to shell tab → record
+    assert.equal(isSel(42, 'tab-1', 42), false); // not selected → record
+
+    // User switches to different workspace → record
+    assert.equal(isSel(99, 'agent', 42), false); // not selected → record
+  });
+});
