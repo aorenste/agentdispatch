@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 9;
+const CURRENT_VERSION: i64 = 10;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -49,6 +49,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE projects ADD COLUMN agent TEXT NOT NULL DEFAULT 'Claude'",
     // 8 -> 9: add sort_order to workspaces
     "ALTER TABLE workspaces ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0; UPDATE workspaces SET sort_order = id;",
+    // 9 -> 10: settings table
+    "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -237,12 +239,33 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
 }
 
 pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir: Option<&str>, status: &str) -> Workspace {
-    let next_order: i64 = conn
-        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces", [], |row| row.get(0))
-        .unwrap_or(0);
+    // Insert just before the divider (or at end if no divider)
+    let divider_pos: i64 = get_setting(conn, "ws_divider_pos")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(i64::MAX);
+    let insert_order: i64 = conn
+        .query_row(
+            "SELECT COALESCE(sort_order, 0) FROM workspaces ORDER BY sort_order, id LIMIT 1 OFFSET ?1",
+            [divider_pos],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| {
+            // Divider is past all workspaces — insert at end
+            conn.query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces", [], |row| row.get(0))
+                .unwrap_or(0)
+        });
+    // Bump everything at or after the insert position
+    conn.execute(
+        "UPDATE workspaces SET sort_order = sort_order + 1 WHERE sort_order >= ?1",
+        [insert_order],
+    ).ok();
+    // Also bump the divider position
+    if divider_pos < i64::MAX {
+        set_setting(conn, "ws_divider_pos", &(divider_pos + 1).to_string());
+    }
     conn.execute(
         "INSERT INTO workspaces (name, project, worktree_dir, status, sort_order) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![name, project, worktree_dir, status, next_order],
+        rusqlite::params![name, project, worktree_dir, status, insert_order],
     )
     .expect("Failed to insert workspace");
     let id = conn.last_insert_rowid();
@@ -250,6 +273,21 @@ pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir:
         .query_row("SELECT created_at FROM workspaces WHERE id = ?1", [id], |row| row.get(0))
         .unwrap();
     Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), tabs: Vec::new() }
+}
+
+pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        [key],
+        |row| row.get(0),
+    ).ok()
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+        rusqlite::params![key, value],
+    ).ok();
 }
 
 pub fn reorder_workspaces(conn: &Connection, ids: &[i64]) {

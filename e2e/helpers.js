@@ -38,7 +38,7 @@ function waitForServer(proc, port) {
           if (done) return;
           try {
             const parsed = JSON.parse(body);
-            if (res.statusCode === 200 && Array.isArray(parsed)) { done = true; resolve(); }
+            if (res.statusCode === 200 && (Array.isArray(parsed) || parsed.workspaces)) { done = true; resolve(); }
             else setTimeout(tryFetch, 50);
           } catch {
             setTimeout(tryFetch, 50);

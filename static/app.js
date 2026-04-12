@@ -11,6 +11,7 @@ let _tabTerminals = {}; // keyed by tab id -> {term, ws, fitAddon, container}
 let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, container}
 const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
+let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -411,8 +412,12 @@ async function removeProject(name) {
 async function fetchWorkspaces() {
   try {
     const res = await fetch('/api/workspaces');
-    const workspaces = await res.json();
+    const data = await res.json();
+    const workspaces = data.workspaces || data; // handle wrapped or raw format
     _workspaces = workspaces;
+    if (data.divider_pos != null) {
+      _wsDividerPos = data.divider_pos;
+    }
     // Initialize activity timestamps from server-reported tmux pane activity
     for (const ws of workspaces) {
       if (ws.agent_activity != null && !_wsLastOutput[ws.id]) {
@@ -467,6 +472,17 @@ function notifyIdle(name) {
   }
 }
 
+function saveWorkspaceOrder() {
+  fetch('/api/workspaces/reorder', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      ids: _workspaces.map(w => w.id),
+      divider_pos: _wsDividerPos,
+    }),
+  });
+}
+
 function renderWorkspaces() {
   const sidebar = document.getElementById('ws-sidebar');
   if (_workspaces.length === 0) {
@@ -474,7 +490,7 @@ function renderWorkspaces() {
     renderSelectedWorkspace();
     return;
   }
-  const dividerPos = parseInt(localStorage.getItem('ws-divider-pos') || _workspaces.length);
+  const dividerPos = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
   const wsHtml = _workspaces.map((ws, i) => {
     let html = '';
     if (i === dividerPos) {
@@ -539,7 +555,8 @@ function renderWorkspaces() {
         // Divider dropped on a workspace — move divider to that position
         const targetIdx = _workspaces.findIndex(w => w.id === parseInt(el.dataset.wsId));
         if (targetIdx >= 0) {
-          localStorage.setItem('ws-divider-pos', targetIdx);
+          _wsDividerPos = targetIdx;
+          saveWorkspaceOrder();
           renderWorkspaces();
         }
       } else if (dragType === 'ws') {
@@ -547,17 +564,13 @@ function renderWorkspaces() {
           // Workspace dropped on divider — move it to the divider position
           const fromIdx = _workspaces.findIndex(w => w.id === dragWsId);
           if (fromIdx >= 0) {
-            let dp = parseInt(localStorage.getItem('ws-divider-pos') || _workspaces.length);
+            let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
             const [moved] = _workspaces.splice(fromIdx, 1);
-            // Adjust divider pos if we removed from above it
             if (fromIdx < dp) dp--;
             _workspaces.splice(dp, 0, moved);
+            _wsDividerPos = dp;
+            saveWorkspaceOrder();
             renderWorkspaces();
-            fetch('/api/workspaces/reorder', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({ids: _workspaces.map(w => w.id)}),
-            });
           }
         } else {
           // Workspace dropped on workspace — reorder
@@ -566,19 +579,14 @@ function renderWorkspaces() {
           const fromIdx = _workspaces.findIndex(w => w.id === dragWsId);
           const toIdx = _workspaces.findIndex(w => w.id === targetId);
           if (fromIdx < 0 || toIdx < 0) return;
-          // Adjust divider position if items moved across it
-          let dp = parseInt(localStorage.getItem('ws-divider-pos') || _workspaces.length);
+          let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
           if (fromIdx < dp && toIdx >= dp) dp--;
           else if (fromIdx >= dp && toIdx < dp) dp++;
-          localStorage.setItem('ws-divider-pos', dp);
+          _wsDividerPos = dp;
           const [moved] = _workspaces.splice(fromIdx, 1);
           _workspaces.splice(toIdx, 0, moved);
+          saveWorkspaceOrder();
           renderWorkspaces();
-          fetch('/api/workspaces/reorder', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ids: _workspaces.map(w => w.id)}),
-          });
         }
       }
     });
@@ -998,21 +1006,26 @@ function initTerminal(key, paneEl, opts) {
     '7':'&', '8':'*', '9':'(', '0':')', '-':'_', '=':'+'};
   term.attachCustomKeyEventHandler((e) => {
     // Cmd+key → send to terminal as Meta+key (ESC prefix) in all modes.
-    // Exceptions: Cmd+C with selection (copy), Cmd+V (paste).
-    if (e.metaKey && !e.ctrlKey && !e.altKey) {
+    // Cmd+Ctrl+key → send as ESC + Ctrl+key.
+    // Exceptions: Cmd+C with selection (copy), Cmd+V (paste in normal mode).
+    if (e.metaKey && !e.altKey) {
       let key = e.key;
       if (e.shiftKey && key.length === 1 && _shiftMap[key]) {
         key = _shiftMap[key];
       } else if (e.shiftKey && key.length === 1) {
         key = key.toUpperCase();
       }
-      // In normal mode: Cmd+C (with selection) → copy, Cmd+V → paste
-      // In FS mode: all Cmd+key → ESC+key (except Cmd+C with selection)
       if (key.toLowerCase() === 'c' && term.hasSelection()) return true;
       if (key.toLowerCase() === 'v' && !entry.altScreen) return true;
       if (key.length === 1) {
         if (e.type === 'keydown' && entry.ws && entry.ws.readyState === WebSocket.OPEN) {
-          entry.ws.send('\x1b' + key);
+          let ch = key;
+          if (e.ctrlKey) {
+            // Ctrl+key → control character (a=1, b=2, ..., z=26)
+            const code = ch.toLowerCase().charCodeAt(0);
+            if (code >= 97 && code <= 122) ch = String.fromCharCode(code - 96);
+          }
+          entry.ws.send('\x1b' + ch);
         }
         e.preventDefault();
         return false;

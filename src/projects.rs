@@ -355,8 +355,13 @@ pub async fn list_branches(
 pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     let conn = db.lock().unwrap();
     let workspaces = db::list_workspaces(&conn);
+    let divider_pos = db::get_setting(&conn, "ws_divider_pos")
+        .and_then(|v| v.parse::<i64>().ok());
+
     if !**use_tmux {
-        return HttpResponse::Ok().json(workspaces);
+        let mut resp = serde_json::json!({ "workspaces": workspaces });
+        if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
+        return HttpResponse::Ok().json(resp);
     }
     // Annotate with agent pane activity timestamps
     let activities = tmux::agent_pane_activities();
@@ -367,7 +372,9 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
         }
         v
     }).collect();
-    HttpResponse::Ok().json(annotated)
+    let mut resp = serde_json::json!({ "workspaces": annotated });
+    if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
+    HttpResponse::Ok().json(resp)
 }
 
 #[delete("/api/workspaces/{id}")]
@@ -559,6 +566,8 @@ pub async fn recreate_workspace(
 #[derive(Deserialize)]
 pub struct ReorderRequest {
     ids: Vec<i64>,
+    #[serde(default)]
+    divider_pos: Option<i64>,
 }
 
 #[post("/api/workspaces/reorder")]
@@ -568,6 +577,9 @@ pub async fn reorder_workspaces(
 ) -> HttpResponse {
     let conn = db.lock().unwrap();
     db::reorder_workspaces(&conn, &body.ids);
+    if let Some(pos) = body.divider_pos {
+        db::set_setting(&conn, "ws_divider_pos", &pos.to_string());
+    }
     HttpResponse::Ok().json(serde_json::json!({"status": "reordered"}))
 }
 
@@ -745,6 +757,11 @@ mod tests {
 
     fn test_tmux_data() -> actix_web::web::Data<bool> {
         actix_web::web::Data::new(false) // tmux disabled in tests
+    }
+
+    /// Extract workspace array from the /api/workspaces response (which wraps in {workspaces:[...]})
+    fn extract_workspaces(body: serde_json::Value) -> Vec<serde_json::Value> {
+        body["workspaces"].as_array().cloned().unwrap_or_default()
     }
 
     #[actix_web::test]
@@ -1013,7 +1030,7 @@ mod tests {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/workspaces")
             .to_request();
-        let resp: Vec<serde_json::Value> = actix_web::test::call_and_read_body_json(&app, req).await;
+        let resp = extract_workspaces(actix_web::test::call_and_read_body_json(&app, req).await);
         assert_eq!(resp.len(), 1);
         assert_eq!(resp[0]["name"], "ws1");
 
@@ -1027,7 +1044,7 @@ mod tests {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/workspaces")
             .to_request();
-        let resp: Vec<serde_json::Value> = actix_web::test::call_and_read_body_json(&app, req).await;
+        let resp = extract_workspaces(actix_web::test::call_and_read_body_json(&app, req).await);
         assert_eq!(resp[0]["name"], "renamed");
     }
 
@@ -1080,7 +1097,7 @@ mod tests {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/workspaces")
             .to_request();
-        let resp: Vec<serde_json::Value> = actix_web::test::call_and_read_body_json(&app, req).await;
+        let resp = extract_workspaces(actix_web::test::call_and_read_body_json(&app, req).await);
         assert!(resp[0]["tabs"].as_array().unwrap().is_empty());
     }
 
@@ -1129,7 +1146,7 @@ mod tests {
         let req = actix_web::test::TestRequest::get()
             .uri("/api/workspaces")
             .to_request();
-        let resp: Vec<serde_json::Value> = actix_web::test::call_and_read_body_json(&app, req).await;
+        let resp = extract_workspaces(actix_web::test::call_and_read_body_json(&app, req).await);
         assert_eq!(resp.len(), 1);
     }
 
