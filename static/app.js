@@ -13,6 +13,8 @@ const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
 const _wsTitles = {}; // workspace id -> pane title string
+const _wsBusy = {}; // workspace id -> I/O bytes/sec from server
+const _wsLastInput = {}; // workspace id -> last user input timestamp (ms)
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -419,40 +421,87 @@ async function fetchWorkspaces() {
     if (data.divider_pos != null) {
       _wsDividerPos = data.divider_pos;
     }
-    // Initialize activity timestamps and titles from server-reported tmux data
+    // Update busy state, activity timestamps, and titles from server
     for (const ws of workspaces) {
       if (ws.agent_activity != null && !_wsLastOutput[ws.id]) {
-        _wsLastOutput[ws.id] = ws.agent_activity * 1000; // seconds → ms
+        _wsLastOutput[ws.id] = ws.agent_activity * 1000;
       }
       if (ws.agent_title && !_wsTitles[ws.id]) {
         _wsTitles[ws.id] = ws.agent_title;
+      }
+      if (ws.agent_io != null) {
+        _wsBusy[ws.id] = ws.agent_io;
       }
     }
     renderWorkspaces();
   } catch {}
 }
 
+
+// Dot state machine:
+//   gray     = unused workspace (initial / user selected it while green)
+//   busy     = bright yellow (active I/O or terminal output)
+//   slowing  = dim yellow (no activity for 5s)
+//   done     = green (no activity for 10s → notify)
+//
+// _wsDotState[id] = '' | 'busy' | 'slowing' | 'done'
+// _wsIdleSince[id] = timestamp when activity last stopped
+const _wsIdleSince = {};
+
+function isWsBusy(wsId) {
+  const io = _wsBusy[wsId];
+  const now = Date.now();
+  const outputAge = _wsLastOutput[wsId] ? now - _wsLastOutput[wsId] : Infinity;
+  return (io !== undefined && io > 768000) || outputAge < 5000;
+}
+
 function updateActivityDots() {
   const now = Date.now();
   for (const ws of _workspaces) {
-    const ts = _wsLastOutput[ws.id];
-    if (!ts) continue;
-    const age = now - ts;
-    const cls = age >= 10000 ? 'idle' : age >= 5000 ? 'recent' : '';
     const prev = _wsDotState[ws.id] || '';
+    const busy = isWsBusy(ws.id);
+    let cls = prev;
+
+    if (prev === '') {
+      // Gray: only transition to busy after user submits input
+      // (text output alone isn't enough — avoids sporadic I/O false positives)
+      if (busy && _wsLastInput[ws.id]) cls = 'busy';
+    } else if (prev === 'busy') {
+      // Bright yellow: dim after 5s idle
+      if (!busy) {
+        if (!_wsIdleSince[ws.id]) _wsIdleSince[ws.id] = now;
+        if (now - _wsIdleSince[ws.id] >= 5000) cls = 'slowing';
+      } else {
+        _wsIdleSince[ws.id] = 0;
+      }
+    } else if (prev === 'slowing') {
+      // Dim yellow: back to busy on activity, green after 10s total idle
+      if (busy) {
+        cls = 'busy';
+        _wsIdleSince[ws.id] = 0;
+      } else if (_wsIdleSince[ws.id] && now - _wsIdleSince[ws.id] >= 10000) {
+        notifyIdle(ws.name);
+        // If user is viewing this workspace, go straight to gray (acknowledged)
+        if (_selectedWsId === ws.id) {
+          cls = '';
+          _wsIdleSince[ws.id] = 0;
+        } else {
+          cls = 'done';
+        }
+      }
+    } else if (prev === 'done') {
+      // Green: back to busy on activity
+      if (busy) {
+        cls = 'busy';
+        _wsIdleSince[ws.id] = 0;
+      }
+    }
+
     _wsDotState[ws.id] = cls;
     const sidebar = document.getElementById('activity-ws-' + ws.id);
     if (sidebar) sidebar.className = 'activity-dot' + (cls ? ' ' + cls : '');
     const tab = document.getElementById('activity-tab-' + ws.id);
     if (tab) tab.className = 'activity-dot' + (cls ? ' ' + cls : '');
-    // Notify when a workspace transitions to idle (was active, now green)
-    if (cls !== prev) {
-      console.log(`[activity] ${ws.name}: ${prev || 'active'} -> ${cls || 'active'} (age=${Math.round(age/1000)}s)`);
-    }
-    if (cls === 'idle' && prev === 'recent') {
-      console.log(`[activity] ${ws.name}: firing notification`);
-      notifyIdle(ws.name);
-    }
   }
 }
 
@@ -602,6 +651,11 @@ function renderWorkspaces() {
 }
 
 function selectWorkspace(id) {
+  // Green → gray when user acknowledges by selecting
+  if (_wsDotState[id] === 'done') {
+    _wsDotState[id] = '';
+    _wsIdleSince[id] = 0;
+  }
   _selectedWsId = id;
   const ws = _workspaces.find(w => w.id === id);
   _selectedWsSubtab = normalizeWsSubtab(ws, _wsSubtabs[id] || getDefaultWsSubtab(ws));
@@ -1075,6 +1129,7 @@ function initTerminal(key, paneEl, opts) {
 
   term.onData((data) => {
     if (term.hasSelection()) term.clearSelection();
+    if (opts.workspaceId != null) _wsLastInput[opts.workspaceId] = Date.now();
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) { entry.ws.send(data); }
   });
 
@@ -1514,6 +1569,23 @@ if (typeof document !== 'undefined') {
 
   // Activity dot updater — green = idle (Claude done), gray = active
   setInterval(updateActivityDots, 1000);
+
+  // Poll lightweight workspace status every 3 seconds
+  setInterval(async () => {
+    try {
+      const res = await fetch('/api/workspace-status');
+      const statuses = await res.json();
+      for (const s of statuses) {
+        _wsBusy[s.id] = s.io || 0;
+        // Update title
+        if (s.title) {
+          _wsTitles[s.id] = s.title;
+          const sideEl = document.getElementById('title-ws-' + s.id);
+          if (sideEl) sideEl.textContent = s.title;
+        }
+      }
+    } catch {}
+  }, 3000);
 }
 
 /* Node.js exports for testing */

@@ -239,32 +239,95 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
-/// Info about an agent pane: activity timestamp and title.
+/// Info about an agent pane: activity timestamp, title, and I/O rate.
 pub struct AgentPaneInfo {
     pub activity: u64,
     pub title: String,
+    pub io_bytes_per_sec: u64, // I/O rate across the process tree
+}
+
+/// Previous I/O snapshot for delta computation.
+static IO_SNAPSHOTS: std::sync::Mutex<Option<std::collections::HashMap<i64, (u64, std::time::Instant)>>> =
+    std::sync::Mutex::new(None);
+
+/// Build a map of pid → children by scanning /proc/*/stat for PPid.
+fn build_child_map() -> std::collections::HashMap<u32, Vec<u32>> {
+    let mut map: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if let Ok(pid) = name.parse::<u32>() {
+                let stat_path = format!("/proc/{pid}/stat");
+                if let Ok(stat) = std::fs::read_to_string(&stat_path) {
+                    // PPid is the 4th field after (comm)
+                    if let Some(rest) = stat.rfind(')').map(|i| &stat[i + 2..]) {
+                        let fields: Vec<&str> = rest.split_whitespace().collect();
+                        if fields.len() > 2 {
+                            if let Ok(ppid) = fields[1].parse::<u32>() {
+                                map.entry(ppid).or_default().push(pid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Sum rchar + wchar from /proc/{pid}/io across a process tree.
+fn process_tree_io(pid: u32, child_map: &std::collections::HashMap<u32, Vec<u32>>) -> u64 {
+    let mut pids = vec![pid];
+    let mut i = 0;
+    while i < pids.len() {
+        if let Some(children) = child_map.get(&pids[i]) {
+            pids.extend(children);
+        }
+        i += 1;
+    }
+
+    let mut total = 0u64;
+    for p in &pids {
+        let io_path = format!("/proc/{p}/io");
+        if let Ok(content) = std::fs::read_to_string(&io_path) {
+            for line in content.lines() {
+                if let Some(val) = line.strip_prefix("rchar: ").or_else(|| line.strip_prefix("wchar: ")) {
+                    total += val.trim().parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+    }
+    total
 }
 
 /// Query activity and title for all agent panes.
 /// Returns a map of workspace ID → AgentPaneInfo.
 pub fn agent_pane_activities() -> std::collections::HashMap<i64, AgentPaneInfo> {
     let mut result = std::collections::HashMap::new();
+    let mut io_current = std::collections::HashMap::new();
+    let now = std::time::Instant::now();
+    let child_map = build_child_map();
+
     let output = tmux_base()
-        .args(["list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_title}"])
+        .args(["list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_title}\t#{pane_pid}"])
         .output();
     if let Ok(o) = output {
         if o.status.success() {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let parts: Vec<&str> = line.trim().splitn(4, '\t').collect();
-                if parts.len() == 4 && parts[1] == "agent" {
+                let parts: Vec<&str> = line.trim().splitn(5, '\t').collect();
+                if parts.len() == 5 && parts[1] == "agent" {
                     if let Some(id_str) = parts[0].strip_prefix("ws-") {
                         if let Ok(id) = id_str.parse::<i64>() {
-                            // Skip linked sessions (ws-N--window-M)
                             if id_str.contains('-') && id_str.contains("--") { continue; }
                             let ts = parts[2].parse::<u64>().unwrap_or(0);
+                            let pid = parts[4].parse::<u32>().unwrap_or(0);
+                            let io_now = if pid > 0 { process_tree_io(pid, &child_map) } else { 0 };
+                            io_current.insert(id, io_now);
                             result.insert(id, AgentPaneInfo {
                                 activity: ts,
                                 title: parts[3].to_string(),
+                                io_bytes_per_sec: 0,
                             });
                         }
                     }
@@ -272,6 +335,26 @@ pub fn agent_pane_activities() -> std::collections::HashMap<i64, AgentPaneInfo> 
             }
         }
     }
+
+    // Compute I/O rate from delta with previous snapshot
+    {
+        let mut snapshots = IO_SNAPSHOTS.lock().unwrap();
+        if let Some(ref prev) = *snapshots {
+            for (id, info) in result.iter_mut() {
+                if let (Some(&io_now), Some(&(io_prev, prev_time))) =
+                    (io_current.get(id), prev.get(id))
+                {
+                    let elapsed = now.duration_since(prev_time).as_secs_f64();
+                    if elapsed > 0.1 {
+                        let delta = io_now.saturating_sub(io_prev);
+                        info.io_bytes_per_sec = (delta as f64 / elapsed) as u64;
+                    }
+                }
+            }
+        }
+        *snapshots = Some(io_current.into_iter().map(|(id, io)| (id, (io, now))).collect());
+    }
+
     result
 }
 

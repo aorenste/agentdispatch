@@ -431,10 +431,11 @@
     background: #3a3f4b;
     margin-right: 6px;
     flex-shrink: 0;
-    transition: background 0.3s;
+    transition: background 0.3s, opacity 0.3s;
   }
-  .activity-dot.recent { background: var(--green); opacity: 0.45; }
-  .activity-dot.idle { background: var(--green); opacity: 1; }
+  .activity-dot.busy { background: #facc15; opacity: 1; }
+  .activity-dot.slowing { background: #facc15; opacity: 0.4; }
+  .activity-dot.done { background: var(--green); opacity: 1; }
 
   .altscreen-badge {
     font-size: 9px;
