@@ -12,6 +12,7 @@ let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, contain
 const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
+const _wsTitles = {}; // workspace id -> pane title string
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -418,10 +419,13 @@ async function fetchWorkspaces() {
     if (data.divider_pos != null) {
       _wsDividerPos = data.divider_pos;
     }
-    // Initialize activity timestamps from server-reported tmux pane activity
+    // Initialize activity timestamps and titles from server-reported tmux data
     for (const ws of workspaces) {
       if (ws.agent_activity != null && !_wsLastOutput[ws.id]) {
         _wsLastOutput[ws.id] = ws.agent_activity * 1000; // seconds → ms
+      }
+      if (ws.agent_title && !_wsTitles[ws.id]) {
+        _wsTitles[ws.id] = ws.agent_title;
       }
     }
     renderWorkspaces();
@@ -503,6 +507,7 @@ function renderWorkspaces() {
       <div class="ws-sidebar-info">
         <div class="ws-name" ondblclick="event.stopPropagation(); renameWorkspace(${ws.id})">${esc(ws.name)}</div>
         <div class="ws-project">${esc(ws.project)}</div>
+        <div id="title-ws-${ws.id}" class="ws-title">${esc(_wsTitles[ws.id] || '')}</div>
       </div>
       <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleWsMenu(${ws.id})">\u2026</button>
       <div class="ws-popover" id="ws-menu-${ws.id}">
@@ -1072,6 +1077,15 @@ function initTerminal(key, paneEl, opts) {
     if (term.hasSelection()) term.clearSelection();
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) { entry.ws.send(data); }
   });
+
+  // Track pane title changes (OSC 0/2)
+  if (opts.workspaceId != null) {
+    term.onTitleChange((title) => {
+      _wsTitles[opts.workspaceId] = title;
+      const sideEl = document.getElementById('title-ws-' + opts.workspaceId);
+      if (sideEl) sideEl.textContent = title;
+    });
+  }
 
   // Copy-on-select: copy to clipboard whenever text is selected (like iTerm2)
   term.onSelectionChange(() => {

@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const { startServer, stopServer } = require('./helpers');
+const { startServer, stopServer, parseWorkspaces } = require('./helpers');
 let server;
 
 test.beforeAll(async () => {
@@ -9,7 +9,7 @@ test.beforeAll(async () => {
 });
 test.afterAll(async ({ request }) => {
   const wsRes = await request.get(`${server.base}/api/workspaces`);
-  for (const ws of await wsRes.json()) {
+  for (const ws of await parseWorkspaces(wsRes)) {
     if (ws.project === 'e2e-launch' || ws.project === 'e2e-nongit') {
       await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
@@ -114,7 +114,7 @@ test('Launch button works when git branch listing fails', async ({ page, request
 
   // Clean up
   const wsRes = await request.get(`${server.base}/api/workspaces`);
-  for (const ws of await wsRes.json()) {
+  for (const ws of await parseWorkspaces(wsRes)) {
     if (ws.project === 'e2e-nongit') {
       await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }

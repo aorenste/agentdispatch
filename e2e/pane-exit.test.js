@@ -35,7 +35,8 @@ test('Shell tab auto-closes when shell exits', async ({ page }) => {
 
   // Verify via API that the tab was deleted
   const wsRes = await page.request.get(`${server.base}/api/workspaces`);
-  const workspaces = await wsRes.json();
+  const wsData = await wsRes.json();
+  const workspaces = wsData.workspaces || wsData;
   const ws = workspaces.find(w => w.id === wsId);
   if (ws) {
     const shellTabs = ws.tabs.filter(t => t.id === tabId);

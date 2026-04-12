@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const { startServer, stopServer } = require('./helpers');
+const { startServer, stopServer, parseWorkspaces } = require('./helpers');
 let server;
 
 // Test that viewport scroll position is preserved when switching between
@@ -17,7 +17,7 @@ test.beforeAll(async ({ request }) => {
   server = await startServer();
   // Clean up
   const wsRes = await request.get(`${server.base}/api/workspaces`);
-  for (const ws of await wsRes.json()) {
+  for (const ws of await parseWorkspaces(wsRes)) {
     if (ws.project === 'e2e-viewport') {
       await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }

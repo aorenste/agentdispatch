@@ -239,21 +239,33 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
-/// Query the last activity timestamp for all agent panes.
-/// Returns a map of workspace ID → Unix timestamp (seconds).
-pub fn agent_pane_activities() -> std::collections::HashMap<i64, u64> {
+/// Info about an agent pane: activity timestamp and title.
+pub struct AgentPaneInfo {
+    pub activity: u64,
+    pub title: String,
+}
+
+/// Query activity and title for all agent panes.
+/// Returns a map of workspace ID → AgentPaneInfo.
+pub fn agent_pane_activities() -> std::collections::HashMap<i64, AgentPaneInfo> {
     let mut result = std::collections::HashMap::new();
     let output = tmux_base()
-        .args(["list-windows", "-a", "-F", "#{session_name} #{window_name} #{window_activity}"])
+        .args(["list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{window_activity}\t#{pane_title}"])
         .output();
     if let Ok(o) = output {
         if o.status.success() {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let parts: Vec<&str> = line.trim().splitn(3, ' ').collect();
-                if parts.len() == 3 && parts[1] == "agent" {
+                let parts: Vec<&str> = line.trim().splitn(4, '\t').collect();
+                if parts.len() == 4 && parts[1] == "agent" {
                     if let Some(id_str) = parts[0].strip_prefix("ws-") {
-                        if let (Ok(id), Ok(ts)) = (id_str.parse::<i64>(), parts[2].parse::<u64>()) {
-                            result.insert(id, ts);
+                        if let Ok(id) = id_str.parse::<i64>() {
+                            // Skip linked sessions (ws-N--window-M)
+                            if id_str.contains('-') && id_str.contains("--") { continue; }
+                            let ts = parts[2].parse::<u64>().unwrap_or(0);
+                            result.insert(id, AgentPaneInfo {
+                                activity: ts,
+                                title: parts[3].to_string(),
+                            });
                         }
                     }
                 }

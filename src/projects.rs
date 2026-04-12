@@ -363,12 +363,15 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
         if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
         return HttpResponse::Ok().json(resp);
     }
-    // Annotate with agent pane activity timestamps
+    // Annotate with agent pane activity timestamps and titles
     let activities = tmux::agent_pane_activities();
     let annotated: Vec<serde_json::Value> = workspaces.into_iter().map(|ws| {
         let mut v = serde_json::to_value(&ws).unwrap();
-        if let Some(&ts) = activities.get(&ws.id) {
-            v["agent_activity"] = serde_json::json!(ts);
+        if let Some(info) = activities.get(&ws.id) {
+            v["agent_activity"] = serde_json::json!(info.activity);
+            if !info.title.is_empty() {
+                v["agent_title"] = serde_json::json!(info.title);
+            }
         }
         v
     }).collect();

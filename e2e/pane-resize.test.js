@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const { startServer, stopServer } = require('./helpers');
+const { startServer, stopServer, parseWorkspaces } = require('./helpers');
 let server;
 
 // Test that terminal dimensions are correct after switching between panes.
@@ -15,7 +15,7 @@ let tab2Id = null;
 test.beforeAll(async ({ request }) => {
   server = await startServer();
   const wsRes = await request.get(`${server.base}/api/workspaces`);
-  for (const ws of await wsRes.json()) {
+  for (const ws of await parseWorkspaces(wsRes)) {
     if (ws.project === 'e2e-pane-resize') {
       await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }

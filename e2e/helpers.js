@@ -102,7 +102,8 @@ function stopServer(server) {
 /** Create a project + workspace + shell tab, return { wsId, tabId } */
 async function setupWorkspace(request, base, projectName) {
   const wsRes = await request.get(`${base}/api/workspaces`);
-  for (const ws of await wsRes.json()) {
+  const wsData = await wsRes.json();
+  for (const ws of (wsData.workspaces || wsData)) {
     if (ws.project === projectName) {
       await request.delete(`${base}/api/workspaces/${ws.id}`);
     }
@@ -187,4 +188,10 @@ function makeHelpers(getTabId, getBase, projectName) {
   return { connectToTerminal, waitForAltScreen, waitForContent, typeCmd, startLess, quitLess };
 }
 
-module.exports = { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers };
+/** Extract workspace array from /api/workspaces response (object or array) */
+async function parseWorkspaces(res) {
+  const data = await res.json();
+  return data.workspaces || data;
+}
+
+module.exports = { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers, parseWorkspaces };
