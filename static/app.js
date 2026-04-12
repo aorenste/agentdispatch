@@ -474,8 +474,13 @@ function renderWorkspaces() {
     renderSelectedWorkspace();
     return;
   }
-  sidebar.innerHTML = _workspaces.map(ws => `
-    <div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
+  const dividerPos = parseInt(localStorage.getItem('ws-divider-pos') || _workspaces.length);
+  const wsHtml = _workspaces.map((ws, i) => {
+    let html = '';
+    if (i === dividerPos) {
+      html += '<div class="ws-divider" draggable="true" data-divider="true"><span>\u2015\u2015\u2015</span></div>';
+    }
+    html += `<div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
          draggable="true" data-ws-id="${ws.id}"
          onclick="selectWorkspace(${ws.id})">
       <span id="activity-ws-${ws.id}" class="activity-dot"></span>
@@ -489,43 +494,93 @@ function renderWorkspaces() {
         <div class="ws-popover-item" onclick="event.stopPropagation(); showWsInfo(${ws.id})">Info</div>
         <div class="ws-popover-item danger" onclick="event.stopPropagation(); destroyWorkspace(${ws.id})">Destroy</div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+    return html;
+  }).join('');
+  // Divider at the end if position is past all workspaces
+  sidebar.innerHTML = wsHtml + (dividerPos >= _workspaces.length
+    ? '<div class="ws-divider" draggable="true" data-divider="true"><span>\u2015\u2015\u2015</span></div>'
+    : '');
 
-  // Drag-and-drop reordering
-  let dragId = null;
-  sidebar.querySelectorAll('.ws-sidebar-item').forEach(el => {
+  // Drag-and-drop reordering (workspaces + divider)
+  let dragType = null; // 'ws' or 'divider'
+  let dragWsId = null;
+  const clearDragOver = () => sidebar.querySelectorAll('.drag-over').forEach(x => x.classList.remove('drag-over'));
+
+  sidebar.querySelectorAll('.ws-sidebar-item, .ws-divider').forEach(el => {
+    const isDivider = el.dataset.divider === 'true';
+
     el.addEventListener('dragstart', (e) => {
-      dragId = parseInt(el.dataset.wsId);
+      if (isDivider) {
+        dragType = 'divider';
+        dragWsId = null;
+      } else {
+        dragType = 'ws';
+        dragWsId = parseInt(el.dataset.wsId);
+      }
       e.dataTransfer.effectAllowed = 'move';
       el.classList.add('dragging');
     });
     el.addEventListener('dragend', () => {
       el.classList.remove('dragging');
-      sidebar.querySelectorAll('.ws-sidebar-item').forEach(x => x.classList.remove('drag-over'));
+      clearDragOver();
     });
     el.addEventListener('dragover', (e) => {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      sidebar.querySelectorAll('.ws-sidebar-item').forEach(x => x.classList.remove('drag-over'));
-      if (parseInt(el.dataset.wsId) !== dragId) el.classList.add('drag-over');
+      clearDragOver();
+      el.classList.add('drag-over');
     });
     el.addEventListener('drop', (e) => {
       e.preventDefault();
-      el.classList.remove('drag-over');
-      const targetId = parseInt(el.dataset.wsId);
-      if (dragId == null || dragId === targetId) return;
-      const fromIdx = _workspaces.findIndex(w => w.id === dragId);
-      const toIdx = _workspaces.findIndex(w => w.id === targetId);
-      if (fromIdx < 0 || toIdx < 0) return;
-      const [moved] = _workspaces.splice(fromIdx, 1);
-      _workspaces.splice(toIdx, 0, moved);
-      renderWorkspaces();
-      fetch('/api/workspaces/reorder', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ids: _workspaces.map(w => w.id)}),
-      });
+      clearDragOver();
+
+      if (dragType === 'divider' && !isDivider) {
+        // Divider dropped on a workspace — move divider to that position
+        const targetIdx = _workspaces.findIndex(w => w.id === parseInt(el.dataset.wsId));
+        if (targetIdx >= 0) {
+          localStorage.setItem('ws-divider-pos', targetIdx);
+          renderWorkspaces();
+        }
+      } else if (dragType === 'ws') {
+        if (isDivider) {
+          // Workspace dropped on divider — move it to the divider position
+          const fromIdx = _workspaces.findIndex(w => w.id === dragWsId);
+          if (fromIdx >= 0) {
+            let dp = parseInt(localStorage.getItem('ws-divider-pos') || _workspaces.length);
+            const [moved] = _workspaces.splice(fromIdx, 1);
+            // Adjust divider pos if we removed from above it
+            if (fromIdx < dp) dp--;
+            _workspaces.splice(dp, 0, moved);
+            renderWorkspaces();
+            fetch('/api/workspaces/reorder', {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ids: _workspaces.map(w => w.id)}),
+            });
+          }
+        } else {
+          // Workspace dropped on workspace — reorder
+          const targetId = parseInt(el.dataset.wsId);
+          if (dragWsId == null || dragWsId === targetId) return;
+          const fromIdx = _workspaces.findIndex(w => w.id === dragWsId);
+          const toIdx = _workspaces.findIndex(w => w.id === targetId);
+          if (fromIdx < 0 || toIdx < 0) return;
+          // Adjust divider position if items moved across it
+          let dp = parseInt(localStorage.getItem('ws-divider-pos') || _workspaces.length);
+          if (fromIdx < dp && toIdx >= dp) dp--;
+          else if (fromIdx >= dp && toIdx < dp) dp++;
+          localStorage.setItem('ws-divider-pos', dp);
+          const [moved] = _workspaces.splice(fromIdx, 1);
+          _workspaces.splice(toIdx, 0, moved);
+          renderWorkspaces();
+          fetch('/api/workspaces/reorder', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ids: _workspaces.map(w => w.id)}),
+          });
+        }
+      }
     });
   });
 
