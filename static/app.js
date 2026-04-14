@@ -213,12 +213,10 @@ async function checkIsGitDir(path) {
 }
 
 async function showAddProject() {
-  const condaEnvs = await fetchCondaEnvs();
   showForm('Add Project', [
     {id: 'proj-name', placeholder: 'Project name'},
     {id: 'proj-dir', placeholder: 'Root directory'},
     {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: false, disabled: true},
-    {id: 'proj-conda', type: 'select', label: 'Conda environment', options: ['none', ...condaEnvs], value: 'none'},
     {id: 'proj-agent', type: 'select', label: 'Agent', options: ['Claude', 'Codex', 'None'], value: 'Claude'},
     {id: 'proj-agent-options-heading', type: 'heading', label: 'Claude Options'},
     {id: 'proj-claude-internet', type: 'checkbox', label: '--dangerously-enable-internet-mode', checked: false, section: 'agent-options'},
@@ -235,12 +233,10 @@ async function showAddProject() {
     if (!dir) {
       return 'Root directory is required.';
     }
-    const conda = values['proj-conda'] === 'none' ? '' : values['proj-conda'];
     const projectBody = {
       name, root_dir: dir,
       git: values['proj-git'],
       agent: values['proj-agent'],
-      conda_env: conda,
       claude_internet: values['proj-claude-internet'],
       claude_skip_permissions: values['proj-claude-skip-perms'],
     };
@@ -304,8 +300,6 @@ async function showAddProject() {
 async function showProjectInfo(name) {
   const p = _projects.find(proj => proj.name === name);
   if (!p) return;
-  const condaEnvs = await fetchCondaEnvs();
-  const condaVal = p.conda_env || 'none';
   const agentVal = getProjectAgent(p);
   const isGit = await checkIsGitDir(p.root_dir);
   // Fetch branches for the default branch combobox (best-effort)
@@ -328,7 +322,6 @@ async function showProjectInfo(name) {
     {id: 'proj-dir', placeholder: 'Root directory', value: p.root_dir},
     {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: isGit && p.git, disabled: !isGit},
     {id: 'proj-default-branch', type: 'combobox', label: 'Default branch', options: branchOptions, value: p.default_branch || 'HEAD'},
-    {id: 'proj-conda', type: 'select', label: 'Conda environment', options: ['none', ...condaEnvs], value: condaVal},
     {id: 'proj-agent', type: 'select', label: 'Agent', options: ['Claude', 'Codex', 'None'], value: agentVal},
     {id: 'proj-agent-options-heading', type: 'heading', label: 'Claude Options'},
     {id: 'proj-claude-internet', type: 'checkbox', label: '--dangerously-enable-internet-mode', checked: p.claude_internet, section: 'agent-options'},
@@ -343,7 +336,6 @@ async function showProjectInfo(name) {
     if (!dir) {
       return 'Root directory is required.';
     }
-    const conda = values['proj-conda'] === 'none' ? '' : values['proj-conda'];
     const branch = values['proj-default-branch'];
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, {
@@ -353,7 +345,6 @@ async function showProjectInfo(name) {
           name: newName, root_dir: dir,
           git: values['proj-git'],
           agent: values['proj-agent'],
-          conda_env: conda,
           claude_internet: values['proj-claude-internet'],
           claude_skip_permissions: values['proj-claude-skip-perms'],
           default_branch: (branch && branch !== 'HEAD') ? branch : '',
@@ -422,6 +413,21 @@ async function launchProject(name) {
     const defaultBranch = p.default_branch || 'HEAD';
     fields.push({id: 'ws-revision', type: 'combobox', label: 'Start revision', options, value: defaultBranch});
     fields.push({id: 'ws-fetch', type: 'checkbox', label: 'Fetch latest before creating', checked: true});
+    // Fetch available build variants
+    let builds = [];
+    try {
+      const controller2 = new AbortController();
+      const timer2 = setTimeout(() => controller2.abort(), 5000);
+      const res2 = await fetch(`/api/projects/${encodeURIComponent(name)}/builds`, { signal: controller2.signal });
+      clearTimeout(timer2);
+      if (res2.ok) {
+        const data2 = await res2.json();
+        if (Array.isArray(data2)) builds = data2;
+      }
+    } catch {}
+    if (builds.length > 0) {
+      fields.push({id: 'ws-build', type: 'select', label: 'Build', options: builds, value: builds[0]});
+    }
   }
   showForm('Launch Workspace', fields, async (values) => {
     const body = {};
@@ -429,6 +435,9 @@ async function launchProject(name) {
     const rev = values['ws-revision'];
     if (rev && rev !== 'HEAD') body.revision = rev;
     if (values['ws-fetch']) body.fetch = true;
+    const build = values['ws-build'];
+    if (build != null && !build) return 'Build variant is required.';
+    if (build) body.build = build;
     const res = await fetch(`/api/projects/${encodeURIComponent(name)}/launch`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -1305,8 +1314,10 @@ async function destroyWorkspace(id) {
     _historyTerminals[id].term.dispose();
     delete _historyTerminals[id];
   }
-  await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
+  _workspaces = _workspaces.filter(w => w.id !== id);
   if (_selectedWsId === id) _selectedWsId = null;
+  renderWorkspaces();
+  await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
   fetchWorkspaces();
 }
 

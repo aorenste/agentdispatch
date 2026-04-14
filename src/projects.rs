@@ -145,6 +145,8 @@ pub struct LaunchRequest {
     revision: Option<String>,
     #[serde(default)]
     fetch: bool,
+    #[serde(default)]
+    build: Option<String>,
 }
 
 #[post("/api/projects/{name}/launch")]
@@ -179,7 +181,8 @@ pub async fn launch_project(
     // Insert workspace into DB immediately
     let ws = {
         let conn = db.lock().unwrap();
-        db::add_workspace(&conn, &ws_name, &project_name, None, status)
+        let variant = body.build.as_deref().unwrap_or("");
+        db::add_workspace(&conn, &ws_name, &project_name, None, status, variant)
     };
 
     // Spawn worktree creation in background
@@ -195,11 +198,14 @@ pub async fn launch_project(
         let wt_path_str = wt_path.to_string_lossy().to_string();
         let revision = body.revision.clone().unwrap_or_default();
         let do_fetch = body.fetch;
+        let build_variant = body.build.clone();
         let ws_id = ws.id;
         let db = db.clone();
 
         actix_web::rt::spawn(async move {
             let db2 = db.clone();
+            let root_dir_for_bash = root_dir.clone();
+            let variant_for_bash = build_variant.clone();
             let result = web::block(move || {
                 let set_phase = |phase: &str| {
                     let conn = db2.lock().unwrap();
@@ -231,8 +237,7 @@ pub async fn launch_project(
                 let mut args = vec![
                     "worktree".to_string(),
                     "add".to_string(),
-                    "-b".to_string(),
-                    wt_name,
+                    "--detach".to_string(),
                     wt_path_str.clone(),
                 ];
                 if !revision.is_empty() {
@@ -247,9 +252,11 @@ pub async fn launch_project(
                     return Err(std::io::Error::new(std::io::ErrorKind::Other, stderr.to_string()));
                 }
                 // Init submodules if the project uses them (best-effort).
+                // Skip if there's a build.sh — the build script handles setup.
                 // If any submodule fails (e.g. inaccessible URL), clean up broken
                 // .git references so they don't poison the whole worktree.
-                if std::path::Path::new(&wt_path_str).join(".gitmodules").exists() {
+                let has_build_script = find_build_script(&root_dir).is_some();
+                if !has_build_script && std::path::Path::new(&wt_path_str).join(".gitmodules").exists() {
                     set_phase("init_submodules");
                     let sub = std::process::Command::new("git")
                         .args(["submodule", "update", "--init", "--recursive"])
@@ -286,11 +293,19 @@ pub async fn launch_project(
                     // Create tmux session in the worktree directory
                     if use_tmux_val {
                         let tmux_session = format!("ws-{ws_id}");
+                        let variant = variant_for_bash.as_deref().unwrap_or("");
                         let agent = normalize_agent(&agent_str).unwrap_or("Claude");
-                        let agent_cmd = build_agent_command(agent, &project_clone);
+                        let default_cmd = build_agent_command(agent, &project_clone);
+                        let agent_cmd = if let Some(script) = find_bash_script(&root_dir_for_bash) {
+                            Some(bash_script_cmd(&script, "claude", variant, &default_cmd))
+                        } else {
+                            if agent != "None" { Some(default_cmd) } else { None }
+                        };
+                        let full_cmd = agent_cmd.map(|c| prepend_build(&c, &root_dir_for_bash, variant, &path));
+                        tlog!("tmux cmd for ws-{ws_id}: {:?}", full_cmd);
                         if let Err(e) = tmux::new_session(
                             &tmux_session, "agent", &path,
-                            if agent != "None" { Some(&agent_cmd) } else { None },
+                            full_cmd.as_deref(),
                         ) {
                             tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
                         }
@@ -312,12 +327,17 @@ pub async fn launch_project(
     if **use_tmux && !needs_worktree {
         let tmux_session = format!("ws-{}", ws.id);
         let cwd = &project.root_dir;
+        let variant = body.build.as_deref().unwrap_or("");
         let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-        let agent_cmd = build_agent_command(agent, &project);
-
+        let default_cmd = build_agent_command(agent, &project);
+        let agent_cmd = if let Some(script) = find_bash_script(cwd) {
+            Some(bash_script_cmd(&script, "claude", variant, &default_cmd))
+        } else {
+            if agent != "None" { Some(default_cmd) } else { None }
+        };
         if let Err(e) = tmux::new_session(
             &tmux_session, "agent", cwd,
-            if agent != "None" { Some(&agent_cmd) } else { None },
+            agent_cmd.as_deref(),
         ) {
             tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
         }
@@ -384,6 +404,54 @@ pub async fn list_branches(
     }
 }
 
+#[get("/api/projects/{name}/builds")]
+pub async fn list_builds(
+    db: Db,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let project_name = path.into_inner();
+    let root_dir = {
+        let conn = db.lock().unwrap();
+        db::list_projects(&conn)
+            .into_iter()
+            .find(|p| p.name == project_name)
+            .map(|p| p.root_dir)
+    };
+    let root_dir = match root_dir {
+        Some(d) => d,
+        None => return HttpResponse::NotFound().json(serde_json::json!({"error": "project not found"})),
+    };
+
+    let script = match find_build_script(&root_dir) {
+        Some(s) => s,
+        None => return HttpResponse::Ok().json(Vec::<String>::new()),
+    };
+
+    let result = web::block(move || -> Result<Vec<String>, std::io::Error> {
+        let script_str = script.to_string_lossy().to_string();
+        let output = std::process::Command::new("timeout")
+            .args(["5", &script_str, "--list"])
+            .current_dir(&root_dir)
+            .output()?;
+        if !output.status.success() {
+            return Ok(Vec::new());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let builds: Vec<String> = stdout
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        Ok(builds)
+    })
+    .await;
+
+    match result {
+        Ok(Ok(builds)) => HttpResponse::Ok().json(builds),
+        _ => HttpResponse::Ok().json(Vec::<String>::new()),
+    }
+}
+
 #[get("/api/workspaces")]
 pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     let conn = db.lock().unwrap();
@@ -432,9 +500,6 @@ pub async fn delete_workspace(
     if let Some(wt_path) = worktree_dir {
         let rd = root_dir.clone();
         let wt = wt_path.clone();
-        let branch_name = std::path::Path::new(&wt_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string());
         let _ = web::block(move || {
             // Try git worktree remove first
             if let Some(ref root) = rd {
@@ -444,13 +509,6 @@ pub async fn delete_workspace(
                     .output();
                 if let Ok(o) = output {
                     if o.status.success() {
-                        // Delete the branch now that the worktree is gone
-                        if let Some(ref branch) = branch_name {
-                            let _ = std::process::Command::new("git")
-                                .args(["branch", "-D", branch])
-                                .current_dir(root)
-                                .output();
-                        }
                         return;
                     }
                 }
@@ -503,19 +561,19 @@ pub async fn create_tab(
     use_tmux: UseTmux,
 ) -> HttpResponse {
     let ws_id = path.into_inner();
-    let (tab, cwd) = {
+    let (tab, cwd, root_dir, variant) = {
         let conn = db.lock().unwrap();
         let tab = db::add_workspace_tab(&conn, ws_id, &body.name, &body.tab_type);
-        let cwd = db::get_workspace(&conn, ws_id)
-            .and_then(|ws| {
-                ws.worktree_dir.or_else(|| {
-                    db::list_projects(&conn).into_iter()
-                        .find(|p| p.name == ws.project)
-                        .map(|p| p.root_dir)
-                })
-            })
+        let ws = db::get_workspace(&conn, ws_id);
+        let variant = ws.as_ref().map(|w| w.build_variant.clone()).unwrap_or_default();
+        let project = ws.as_ref().and_then(|w| {
+            db::list_projects(&conn).into_iter().find(|p| p.name == w.project)
+        });
+        let root_dir = project.as_ref().map(|p| p.root_dir.clone()).unwrap_or_default();
+        let cwd = ws.and_then(|w| w.worktree_dir)
+            .or_else(|| project.map(|p| p.root_dir))
             .unwrap_or_else(|| "/tmp".to_string());
-        (tab, cwd)
+        (tab, cwd, root_dir, variant)
     };
 
     // Create tmux window for the new tab (outside DB lock)
@@ -523,7 +581,10 @@ pub async fn create_tab(
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = format!("tab-{}", tab.id);
         if tmux::has_session(&tmux_session) {
-            if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &cwd, None) {
+            let shell_cmd = if !root_dir.is_empty() {
+                find_bash_script(&root_dir).map(|s| bash_script_cmd(&s, "shell", &variant, ""))
+            } else { None };
+            if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &cwd, shell_cmd.as_deref()) {
                 tlog!("Failed to create tmux window tab-{}: {e}", tab.id);
             }
         }
@@ -570,12 +631,20 @@ pub async fn recreate_workspace(
     tmux::kill_session(&tmux_session);
 
     let cwd = ws.worktree_dir.as_deref().unwrap_or(&project.root_dir);
+    let variant = &ws.build_variant;
+    let bash_script = find_bash_script(&project.root_dir);
+
     let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-    let agent_cmd = build_agent_command(agent, &project);
+    let default_cmd = build_agent_command(agent, &project);
+    let agent_cmd = if let Some(ref script) = bash_script {
+        Some(bash_script_cmd(script, "claude", variant, &default_cmd))
+    } else {
+        if agent != "None" { Some(default_cmd) } else { None }
+    };
 
     if let Err(e) = tmux::new_session(
         &tmux_session, "agent", cwd,
-        if agent != "None" { Some(&agent_cmd) } else { None },
+        agent_cmd.as_deref(),
     ) {
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": format!("Failed to create tmux session: {e}")}));
@@ -586,9 +655,10 @@ pub async fn recreate_workspace(
         let conn = db.lock().unwrap();
         db::list_workspace_tabs(&conn, ws_id)
     };
+    let shell_cmd = bash_script.as_ref().map(|s| bash_script_cmd(s, "shell", variant, ""));
     for tab in &tabs {
         let tmux_window = format!("tab-{}", tab.id);
-        if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, None) {
+        if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, shell_cmd.as_deref()) {
             tlog!("Failed to recreate tmux window tab-{}: {e}", tab.id);
         }
     }
@@ -704,6 +774,70 @@ fn generate_worktree_name() -> String {
     format!("{adj}-{noun}")
 }
 
+/// Find the build script for a project. Checks two locations:
+/// 1. {root_dir}/.agentdispatch/build.sh
+/// 2. {root_dir}/../.agentdispatch/{basename(root_dir)}/build.sh
+/// Find a file in the .agentdispatch directory. Checks two locations:
+/// 1. {root_dir}/.agentdispatch/{filename}
+/// 2. {root_dir}/../.agentdispatch/{basename(root_dir)}/{filename}
+fn find_agentdispatch_file(root_dir: &str, filename: &str) -> Option<std::path::PathBuf> {
+    let root = std::path::Path::new(root_dir);
+    // Location 1: in-tree
+    let in_tree = root.join(".agentdispatch").join(filename);
+    if in_tree.is_file() {
+        return std::fs::canonicalize(&in_tree).ok();
+    }
+    // Location 2: sibling directory
+    let basename = root.file_name()?;
+    let sibling = root.parent()?.join(".agentdispatch").join(basename).join(filename);
+    if sibling.is_file() {
+        return std::fs::canonicalize(&sibling).ok();
+    }
+    None
+}
+
+fn find_build_script(root_dir: &str) -> Option<std::path::PathBuf> {
+    find_agentdispatch_file(root_dir, "build.sh")
+}
+
+fn find_bash_script(root_dir: &str) -> Option<std::path::PathBuf> {
+    find_agentdispatch_file(root_dir, "bash.sh")
+}
+
+/// Build the command string for launching bash with bash.sh as rcfile.
+/// Sets AGENTDISPATCH_ACTION, AGENTDISPATCH_VARIANT, and AGENTDISPATCH_AGENT_CMD as env vars.
+/// Prepend a build.sh invocation to a tmux command if a build variant is selected.
+/// Returns: "build.sh <variant> <wt_path> && <cmd>" or just <cmd> if no build.
+fn prepend_build(cmd: &str, root_dir: &str, variant: &str, wt_path: &str) -> String {
+    if variant.is_empty() {
+        return cmd.to_string();
+    }
+    if let Some(script) = find_build_script(root_dir) {
+        let s = script.to_string_lossy().replace('\'', "'\\''");
+        let v = variant.replace('\'', "'\\''");
+        let p = wt_path.replace('\'', "'\\''");
+        format!("'{s}' '{v}' '{p}' && {cmd}")
+    } else {
+        cmd.to_string()
+    }
+}
+
+fn bash_script_cmd(script: &std::path::Path, action: &str, variant: &str, agent_cmd: &str) -> String {
+    let s = script.to_string_lossy().replace('\'', "'\\''");
+    let mut parts = Vec::new();
+    parts.push(format!("AGENTDISPATCH_ACTION={action}"));
+    if !variant.is_empty() {
+        let v = variant.replace('\'', "'\\''");
+        parts.push(format!("AGENTDISPATCH_VARIANT='{v}'"));
+    }
+    if !agent_cmd.is_empty() {
+        let c = agent_cmd.replace('\'', "'\\''");
+        parts.push(format!("AGENTDISPATCH_AGENT_CMD='{c}'"));
+    }
+    parts.push(format!("exec bash --rcfile '{s}'"));
+    parts.join(" ")
+}
+
 fn get_conda_envs() -> Vec<String> {
     let output = std::process::Command::new("conda")
         .args(["env", "list", "--json"])
@@ -776,6 +910,135 @@ mod tests {
         assert_eq!(normalize_agent("claude"), None); // case-sensitive
         assert_eq!(normalize_agent(""), None);
         assert_eq!(normalize_agent("GPT"), None);
+    }
+
+    fn make_temp_dir() -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("agentdispatch-test-{}", std::process::id()));
+        path.push(format!("{}", rand::random::<u32>()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_find_build_script_in_tree() {
+        let root = make_temp_dir();
+        let script = root.join(".agentdispatch/build.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/bash\n").unwrap();
+        let result = find_build_script(root.to_str().unwrap());
+        assert!(result.is_some());
+        assert!(result.unwrap().to_str().unwrap().ends_with("build.sh"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_find_build_script_sibling() {
+        let base = make_temp_dir();
+        let root = base.join("myproject");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = base.join(".agentdispatch/myproject/build.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/bash\n").unwrap();
+        let result = find_build_script(root.to_str().unwrap());
+        assert!(result.is_some());
+        assert!(result.unwrap().to_str().unwrap().ends_with("build.sh"));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_find_build_script_in_tree_takes_priority() {
+        let base = make_temp_dir();
+        let root = base.join("myproject");
+        std::fs::create_dir_all(&root).unwrap();
+        let in_tree = root.join(".agentdispatch/build.sh");
+        std::fs::create_dir_all(in_tree.parent().unwrap()).unwrap();
+        std::fs::write(&in_tree, "#!/bin/bash\necho intree\n").unwrap();
+        let sibling = base.join(".agentdispatch/myproject/build.sh");
+        std::fs::create_dir_all(sibling.parent().unwrap()).unwrap();
+        std::fs::write(&sibling, "#!/bin/bash\necho sibling\n").unwrap();
+        let result = find_build_script(root.to_str().unwrap());
+        assert!(result.is_some());
+        let path = result.unwrap();
+        assert!(path.starts_with(std::fs::canonicalize(&root).unwrap()));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_find_build_script_none() {
+        let dir = make_temp_dir();
+        let result = find_build_script(dir.to_str().unwrap());
+        assert!(result.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_find_bash_script_in_tree() {
+        let root = make_temp_dir();
+        let script = root.join(".agentdispatch/bash.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/bash\n").unwrap();
+        let result = find_bash_script(root.to_str().unwrap());
+        assert!(result.is_some());
+        assert!(result.unwrap().to_str().unwrap().ends_with("bash.sh"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn test_find_bash_script_sibling() {
+        let base = make_temp_dir();
+        let root = base.join("myproject");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = base.join(".agentdispatch/myproject/bash.sh");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, "#!/bin/bash\n").unwrap();
+        let result = find_bash_script(root.to_str().unwrap());
+        assert!(result.is_some());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_find_bash_script_none() {
+        let dir = make_temp_dir();
+        assert!(find_bash_script(dir.to_str().unwrap()).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_bash_script_cmd_no_variant() {
+        let path = std::path::Path::new("/tmp/test/bash.sh");
+        assert_eq!(
+            bash_script_cmd(path, "claude", "", "claude"),
+            "AGENTDISPATCH_ACTION=claude AGENTDISPATCH_AGENT_CMD='claude' exec bash --rcfile '/tmp/test/bash.sh'"
+        );
+    }
+
+    #[test]
+    fn test_bash_script_cmd_with_variant() {
+        let path = std::path::Path::new("/tmp/test/bash.sh");
+        assert_eq!(
+            bash_script_cmd(path, "shell", "py310", ""),
+            "AGENTDISPATCH_ACTION=shell AGENTDISPATCH_VARIANT='py310' exec bash --rcfile '/tmp/test/bash.sh'"
+        );
+    }
+
+    #[test]
+    fn test_bash_script_cmd_with_agent_flags() {
+        let path = std::path::Path::new("/tmp/test/bash.sh");
+        assert_eq!(
+            bash_script_cmd(path, "claude", "py310", "claude --dangerously-skip-permissions"),
+            "AGENTDISPATCH_ACTION=claude AGENTDISPATCH_VARIANT='py310' AGENTDISPATCH_AGENT_CMD='claude --dangerously-skip-permissions' exec bash --rcfile '/tmp/test/bash.sh'"
+        );
+    }
+
+    #[test]
+    fn test_bash_script_cmd_quotes_path() {
+        let path = std::path::Path::new("/tmp/it's a test/bash.sh");
+        let cmd = bash_script_cmd(path, "claude", "", "claude");
+        assert_eq!(
+            cmd,
+            "AGENTDISPATCH_ACTION=claude AGENTDISPATCH_AGENT_CMD='claude' exec bash --rcfile '/tmp/it'\\''s a test/bash.sh'"
+        );
     }
 
     // -- API integration tests --
@@ -1057,7 +1320,7 @@ mod tests {
             let conn = db.lock().unwrap();
             crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
-            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready").id
+            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready", "").id
         };
 
         let req = actix_web::test::TestRequest::get()
@@ -1099,7 +1362,7 @@ mod tests {
             let conn = db.lock().unwrap();
             crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
-            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready").id
+            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready", "").id
         };
 
         // Create tab

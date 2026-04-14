@@ -80,25 +80,15 @@ async fn main() -> std::io::Result<()> {
     let conn = db::init_db(&args.db);
     let db_arc = Arc::new(Mutex::new(conn));
 
-    // Reconcile tmux sessions on startup
+    // Clean up stale linked sessions (ws-N--window-M) from previous server runs.
+    // These are control-mode clients that get recreated on WebSocket reconnect.
+    // Never kill main sessions (ws-N) — they contain the user's work.
     if use_tmux {
-        let conn = db_arc.lock().unwrap();
-        let workspaces = db::list_workspaces(&conn);
-        let ws_ids: std::collections::HashSet<i64> = workspaces.iter().map(|w| w.id).collect();
         for session_name in tmux::list_sessions() {
             if let Some(id_str) = session_name.strip_prefix("ws-") {
-                // Kill stale linked sessions (ws-N--window-M) from previous server runs
                 if id_str.contains("--") {
                     tlog!("Killing stale linked session: {session_name}");
                     tmux::kill_session(&session_name);
-                    continue;
-                }
-                // Kill orphan main sessions not in the DB
-                if let Ok(id) = id_str.parse::<i64>() {
-                    if !ws_ids.contains(&id) {
-                        tlog!("Killing orphan tmux session: {session_name}");
-                        tmux::kill_session(&session_name);
-                    }
                 }
             }
         }
@@ -131,6 +121,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::update_project)
             .service(projects::launch_project)
             .service(projects::list_branches)
+            .service(projects::list_builds)
             .service(projects::delete_project)
             .service(projects::list_workspaces)
             .service(projects::reorder_workspaces)
