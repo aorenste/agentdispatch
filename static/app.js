@@ -811,7 +811,20 @@ function renderSelectedWorkspace() {
     main.innerHTML = '<div class="ws-empty" style="padding:16px;color:var(--red)">Workspace setup failed</div>';
     return;
   }
+  // Show build output in a read-only terminal pane
+  if (ws.status === 'building' || ws.status === 'build_failed') {
+    const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
+    main.innerHTML = '<div class="ws-pane active" id="ws-build-pane" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>';
+    const paneEl = document.getElementById('ws-build-pane');
+    initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init', readOnly: true});
+    if (ws.status === 'building') startSetupPoll();
+    return;
+  }
   stopSetupPoll();
+  // Clean up init terminal from build phase if it exists
+  if (_tabTerminals['init-' + ws.id]) {
+    disposeTerminal('init-' + ws.id);
+  }
 
   // Stash terminal containers in a hidden div before rebuilding innerHTML.
   // This keeps them in the DOM so xterm.js viewport scroll state is preserved.
@@ -984,7 +997,9 @@ function initTerminal(key, paneEl, opts) {
   paneEl.innerHTML = '';
   paneEl.appendChild(container);
 
-  const term = new Terminal(getTerminalConfig());
+  const termConfig = getTerminalConfig();
+  if (opts.readOnly) termConfig.disableStdin = true;
+  const term = new Terminal(termConfig);
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);

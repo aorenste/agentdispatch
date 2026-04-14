@@ -289,25 +289,73 @@ pub async fn launch_project(
             let conn = db.lock().unwrap();
             match result {
                 Ok(Ok(path)) => {
-                    db::update_workspace_status(&conn, ws_id, "ready", Some(&path));
-                    // Create tmux session in the worktree directory
-                    if use_tmux_val {
+                    if !use_tmux_val {
+                        db::update_workspace_status(&conn, ws_id, "ready", Some(&path));
+                    } else {
                         let tmux_session = format!("ws-{ws_id}");
                         let variant = variant_for_bash.as_deref().unwrap_or("");
                         let agent = normalize_agent(&agent_str).unwrap_or("Claude");
-                        let default_cmd = build_agent_command(agent, &project_clone);
                         let agent_cmd = if let Some(script) = find_bash_script(&root_dir_for_bash) {
-                            Some(bash_script_cmd(&script, "claude", variant, &default_cmd))
+                            let bare_cmd = build_bare_agent_command(agent, &project_clone);
+                            Some(bash_script_cmd(&script, "claude", variant, &bare_cmd))
                         } else {
-                            if agent != "None" { Some(default_cmd) } else { None }
+                            if agent != "None" { Some(build_agent_command(agent, &project_clone)) } else { None }
                         };
-                        let full_cmd = agent_cmd.map(|c| prepend_build(&c, &root_dir_for_bash, variant, &path));
-                        tlog!("tmux cmd for ws-{ws_id}: {:?}", full_cmd);
-                        if let Err(e) = tmux::new_session(
-                            &tmux_session, "agent", &path,
-                            full_cmd.as_deref(),
-                        ) {
-                            tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
+
+                        // If there's a build, run it in an init window first
+                        let has_build = !variant.is_empty() && find_build_script(&root_dir_for_bash).is_some();
+                        if has_build {
+                            let build_script = find_build_script(&root_dir_for_bash).unwrap();
+                            let bs = build_script.to_string_lossy().replace('\'', "'\\''");
+                            let bv = variant.replace('\'', "'\\''");
+                            let bp = path.replace('\'', "'\\''");
+                            let channel = format!("ws-{ws_id}-init");
+                            let init_cmd = format!("'{bs}' '{bv}' '{bp}'; tmux wait-for -S {channel}");
+
+                            if let Err(e) = tmux::new_session(
+                                &tmux_session, "init", &path, Some(&init_cmd),
+                            ) {
+                                tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
+                                db::update_workspace_status(&conn, ws_id, "error", Some(&path));
+                            } else {
+                                tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
+                                db::update_workspace_status(&conn, ws_id, "building", Some(&path));
+                                // Spawn async task to wait for build completion
+                                let db3 = db.clone();
+                                let agent_cmd_clone = agent_cmd.clone();
+                                let path_clone = path.clone();
+                                let tmux_session_clone = tmux_session.clone();
+                                actix_web::rt::spawn(async move {
+                                    let channel = format!("ws-{ws_id}-init");
+                                    let sess = tmux_session_clone.clone();
+                                    let ok = web::block(move || {
+                                        tmux::wait_for(&channel);
+                                        tmux::pane_exit_status(&sess, "init").unwrap_or(-1)
+                                    }).await.unwrap_or(-1);
+
+                                    let conn = db3.lock().unwrap();
+                                    if ok == 0 {
+                                        tlog!("Build succeeded for workspace {ws_id}, creating agent window");
+                                        if let Some(ref cmd) = agent_cmd_clone {
+                                            let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, Some(cmd));
+                                        } else {
+                                            let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, None);
+                                        }
+                                        db::update_workspace_status(&conn, ws_id, "ready", Some(&path_clone));
+                                    } else {
+                                        tlog!("Build failed for workspace {ws_id} (exit code {ok})");
+                                        db::update_workspace_status(&conn, ws_id, "build_failed", Some(&path_clone));
+                                    }
+                                });
+                            }
+                        } else {
+                            // No build — create agent window directly
+                            if let Err(e) = tmux::new_session(
+                                &tmux_session, "agent", &path, agent_cmd.as_deref(),
+                            ) {
+                                tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
+                            }
+                            db::update_workspace_status(&conn, ws_id, "ready", Some(&path));
                         }
                     }
                 }
@@ -329,11 +377,11 @@ pub async fn launch_project(
         let cwd = &project.root_dir;
         let variant = body.build.as_deref().unwrap_or("");
         let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-        let default_cmd = build_agent_command(agent, &project);
         let agent_cmd = if let Some(script) = find_bash_script(cwd) {
-            Some(bash_script_cmd(&script, "claude", variant, &default_cmd))
+            let bare_cmd = build_bare_agent_command(agent, &project);
+            Some(bash_script_cmd(&script, "claude", variant, &bare_cmd))
         } else {
-            if agent != "None" { Some(default_cmd) } else { None }
+            if agent != "None" { Some(build_agent_command(agent, &project)) } else { None }
         };
         if let Err(e) = tmux::new_session(
             &tmux_session, "agent", cwd,
@@ -538,15 +586,23 @@ pub struct CreateTabRequest {
 }
 
 fn build_agent_command(agent: &str, project: &db::Project) -> String {
+    let cmd = build_bare_agent_command(agent, project);
+    if !project.conda_env.is_empty() {
+        format!("conda activate {} && {}", project.conda_env, cmd)
+    } else {
+        cmd
+    }
+}
+
+/// Agent command without conda prefix — used for AGENTDISPATCH_AGENT_CMD
+/// when bash.sh handles env setup itself.
+fn build_bare_agent_command(agent: &str, project: &db::Project) -> String {
     let mut cmd = if agent == "Codex" { "codex".to_string() } else { "claude".to_string() };
     if (agent == "Claude" || agent == "Codex") && project.claude_internet {
         cmd.push_str(" --dangerously-enable-internet-mode");
     }
     if agent == "Claude" && project.claude_skip_permissions {
         cmd.push_str(" --dangerously-skip-permissions");
-    }
-    if !project.conda_env.is_empty() {
-        cmd = format!("conda activate {} && {}", project.conda_env, cmd);
     }
     cmd
 }
@@ -635,11 +691,11 @@ pub async fn recreate_workspace(
     let bash_script = find_bash_script(&project.root_dir);
 
     let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-    let default_cmd = build_agent_command(agent, &project);
     let agent_cmd = if let Some(ref script) = bash_script {
-        Some(bash_script_cmd(script, "claude", variant, &default_cmd))
+        let bare_cmd = build_bare_agent_command(agent, &project);
+        Some(bash_script_cmd(script, "claude", variant, &bare_cmd))
     } else {
-        if agent != "None" { Some(default_cmd) } else { None }
+        if agent != "None" { Some(build_agent_command(agent, &project)) } else { None }
     };
 
     if let Err(e) = tmux::new_session(
@@ -806,21 +862,6 @@ fn find_bash_script(root_dir: &str) -> Option<std::path::PathBuf> {
 
 /// Build the command string for launching bash with bash.sh as rcfile.
 /// Sets AGENTDISPATCH_ACTION, AGENTDISPATCH_VARIANT, and AGENTDISPATCH_AGENT_CMD as env vars.
-/// Prepend a build.sh invocation to a tmux command if a build variant is selected.
-/// Returns: "build.sh <variant> <wt_path> && <cmd>" or just <cmd> if no build.
-fn prepend_build(cmd: &str, root_dir: &str, variant: &str, wt_path: &str) -> String {
-    if variant.is_empty() {
-        return cmd.to_string();
-    }
-    if let Some(script) = find_build_script(root_dir) {
-        let s = script.to_string_lossy().replace('\'', "'\\''");
-        let v = variant.replace('\'', "'\\''");
-        let p = wt_path.replace('\'', "'\\''");
-        format!("'{s}' '{v}' '{p}' && {cmd}")
-    } else {
-        cmd.to_string()
-    }
-}
 
 fn bash_script_cmd(script: &std::path::Path, action: &str, variant: &str, agent_cmd: &str) -> String {
     let s = script.to_string_lossy().replace('\'', "'\\''");

@@ -144,6 +144,32 @@ pub fn kill_window(session: &str, window: &str) {
         .output();
 }
 
+pub fn set_window_option(session: &str, window: &str, option: &str, value: &str) {
+    let target = format!("{session}:{window}");
+    let _ = tmux_base()
+        .args(["set-option", "-t", &target, option, value])
+        .output();
+}
+
+/// Block until a tmux wait-for channel is signaled. Returns true if successful.
+pub fn wait_for(channel: &str) -> bool {
+    tmux_base()
+        .args(["wait-for", channel])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Get the exit status of a dead pane (after remain-on-exit).
+pub fn pane_exit_status(session: &str, window: &str) -> Option<i32> {
+    let target = format!("{session}:{window}");
+    let output = tmux_base()
+        .args(["display-message", "-t", &target, "-p", "#{pane_dead_status}"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 /// Query the pane ID and window ID for a given session:window.
 fn get_pane_and_window_id(session: &str, window: &str) -> Result<(String, String), String> {
     let target = format!("{session}:{window}");
