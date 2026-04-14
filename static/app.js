@@ -1088,7 +1088,7 @@ function initTerminal(key, paneEl, opts) {
       // Track agent output for activity dot.
       // Skip the first 2s after connection — that's capture-pane replay, not live output.
       // Don't record while user is watching or during the grace period after leaving.
-      if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null
+      if (typeof key === 'string' && (key.startsWith('agent-') || key.startsWith('init-')) && opts.workspaceId != null
           && entry.connectedAt && Date.now() - entry.connectedAt > 2000
           && shouldRecordOutput(
               isAgentPaneSelected(_selectedWsId, _selectedWsSubtab, opts.workspaceId),
