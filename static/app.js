@@ -837,12 +837,15 @@ function renderSelectedWorkspace() {
     main.innerHTML = '<div class="ws-empty" style="padding:16px;color:var(--red)">Workspace setup failed</div>';
     return;
   }
-  // Show build output in a read-only terminal pane
+  // Show build output in a terminal pane
   if (ws.status === 'building' || ws.status === 'build_failed') {
-    const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
-    main.innerHTML = '<div class="ws-pane active" id="ws-build-pane" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>';
-    const paneEl = document.getElementById('ws-build-pane');
-    initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
+    // Don't rebuild if the init terminal is already showing
+    if (!document.getElementById('ws-build-pane')) {
+      const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
+      main.innerHTML = '<div class="ws-pane active" id="ws-build-pane" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>';
+      const paneEl = document.getElementById('ws-build-pane');
+      initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
+    }
     if (ws.status === 'building') startSetupPoll();
     return;
   }
