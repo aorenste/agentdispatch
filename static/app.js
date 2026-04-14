@@ -635,7 +635,8 @@ function renderWorkspaces() {
           else if (fromIdx >= dp && toIdx < dp) dp++;
           _wsDividerPos = dp;
           const [moved] = _workspaces.splice(fromIdx, 1);
-          _workspaces.splice(toIdx, 0, moved);
+          const insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
+          _workspaces.splice(insertIdx, 0, moved);
           saveWorkspaceOrder();
           renderWorkspaces();
         }
