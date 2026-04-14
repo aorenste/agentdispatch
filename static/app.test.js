@@ -535,3 +535,30 @@ describe('isAgentPaneSelected', () => {
     assert.equal(isSel(99, 'agent', 42), false); // not selected → record
   });
 });
+
+describe('morphdomShouldUpdate', () => {
+  const shouldUpdate = app.morphdomShouldUpdate;
+
+  // Simulate DOM elements as plain objects with className
+  const el = (className) => ({ className, classList: { contains: (c) => className.split(' ').includes(c) } });
+
+  test('returns true for normal elements', () => {
+    assert.equal(shouldUpdate(el('ws-popover'), el('ws-popover')), true);
+  });
+
+  test('returns false when existing popover has open class', () => {
+    assert.equal(shouldUpdate(el('ws-popover open'), el('ws-popover')), false);
+  });
+
+  test('returns true when popover is not open', () => {
+    assert.equal(shouldUpdate(el('ws-popover'), el('ws-popover')), true);
+  });
+
+  test('returns true for non-popover elements even with open class', () => {
+    assert.equal(shouldUpdate(el('something open'), el('something')), true);
+  });
+
+  test('returns true when both have open', () => {
+    assert.equal(shouldUpdate(el('ws-popover open'), el('ws-popover open')), true);
+  });
+});

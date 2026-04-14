@@ -20,6 +20,16 @@ let _dialogFields = [];
 
 /* -- Pure logic (testable without DOM) -- */
 
+// morphdom callback: skip updating popover elements that are currently open
+// (the "open" class is runtime state, not in the template HTML)
+function morphdomShouldUpdate(fromEl, toEl) {
+  if (fromEl.classList.contains('ws-popover') && fromEl.classList.contains('open')
+      && !toEl.classList.contains('open')) {
+    return false; // preserve the open menu
+  }
+  return true;
+}
+
 function getProjectAgent(proj) {
   if (!proj) return 'Claude';
   if (proj.agent === 'Claude' || proj.agent === 'Codex' || proj.agent === 'None') {
@@ -610,88 +620,104 @@ function renderWorkspaces() {
     </div>`;
     return html;
   }).join('');
-  // Divider at the end if position is past all workspaces
-  sidebar.innerHTML = wsHtml + (dividerPos >= _workspaces.length
+  const fullHtml = wsHtml + (dividerPos >= _workspaces.length
     ? '<div class="ws-divider" draggable="true" data-divider="true"><span>\u2015\u2015\u2015</span></div>'
     : '');
 
-  // Drag-and-drop reordering (workspaces + divider)
-  let dragType = null; // 'ws' or 'divider'
-  let dragWsId = null;
-  const clearDragOver = () => sidebar.querySelectorAll('.drag-over').forEach(x => x.classList.remove('drag-over'));
-
-  sidebar.querySelectorAll('.ws-sidebar-item, .ws-divider').forEach(el => {
-    const isDivider = el.dataset.divider === 'true';
-
-    el.addEventListener('dragstart', (e) => {
-      if (isDivider) {
-        dragType = 'divider';
-        dragWsId = null;
-      } else {
-        dragType = 'ws';
-        dragWsId = parseInt(el.dataset.wsId);
-      }
-      e.dataTransfer.effectAllowed = 'move';
-      el.classList.add('dragging');
+  // Use morphdom to patch the sidebar — preserves open menus, scroll, focus
+  const tmp = document.createElement('div');
+  tmp.innerHTML = fullHtml;
+  if (typeof morphdom !== 'undefined') {
+    morphdom(sidebar, tmp, {
+      childrenOnly: true,
+      onBeforeElUpdated: morphdomShouldUpdate,
     });
-    el.addEventListener('dragend', () => {
-      el.classList.remove('dragging');
-      clearDragOver();
-    });
-    el.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      clearDragOver();
-      el.classList.add('drag-over');
-    });
-    el.addEventListener('drop', (e) => {
-      e.preventDefault();
-      clearDragOver();
-
-      if (dragType === 'divider' && !isDivider) {
-        // Divider dropped on a workspace — move divider to that position
-        const targetIdx = _workspaces.findIndex(w => w.id === parseInt(el.dataset.wsId));
-        if (targetIdx >= 0) {
-          _wsDividerPos = targetIdx;
-          saveWorkspaceOrder();
-          renderWorkspaces();
-        }
-      } else if (dragType === 'ws') {
-        if (isDivider) {
-          // Workspace dropped on divider — move it to the divider position
-          const fromIdx = _workspaces.findIndex(w => w.id === dragWsId);
-          if (fromIdx >= 0) {
-            let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-            const [moved] = _workspaces.splice(fromIdx, 1);
-            if (fromIdx < dp) dp--;
-            _workspaces.splice(dp, 0, moved);
-            _wsDividerPos = dp;
-            saveWorkspaceOrder();
-            renderWorkspaces();
-          }
-        } else {
-          // Workspace dropped on workspace — reorder
-          const targetId = parseInt(el.dataset.wsId);
-          if (dragWsId == null || dragWsId === targetId) return;
-          const fromIdx = _workspaces.findIndex(w => w.id === dragWsId);
-          const toIdx = _workspaces.findIndex(w => w.id === targetId);
-          if (fromIdx < 0 || toIdx < 0) return;
-          let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-          if (fromIdx < dp && toIdx >= dp) dp--;
-          else if (fromIdx >= dp && toIdx < dp) dp++;
-          _wsDividerPos = dp;
-          const [moved] = _workspaces.splice(fromIdx, 1);
-          const insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
-          _workspaces.splice(insertIdx, 0, moved);
-          saveWorkspaceOrder();
-          renderWorkspaces();
-        }
-      }
-    });
-  });
+  } else {
+    sidebar.innerHTML = fullHtml;
+  }
 
   renderSelectedWorkspace();
   updateActivityDots();
+}
+
+// Drag-and-drop: use event delegation on the sidebar (survives morphdom patches)
+let _dragType = null;
+let _dragWsId = null;
+function initSidebarDragDrop() {
+  const sidebar = document.getElementById('ws-sidebar');
+  const clearDragOver = () => sidebar.querySelectorAll('.drag-over').forEach(x => x.classList.remove('drag-over'));
+  const findItem = (e) => e.target.closest('.ws-sidebar-item, .ws-divider');
+
+  sidebar.addEventListener('dragstart', (e) => {
+    const el = findItem(e);
+    if (!el) return;
+    if (el.dataset.divider === 'true') {
+      _dragType = 'divider';
+      _dragWsId = null;
+    } else {
+      _dragType = 'ws';
+      _dragWsId = parseInt(el.dataset.wsId);
+    }
+    e.dataTransfer.effectAllowed = 'move';
+    el.classList.add('dragging');
+  });
+  sidebar.addEventListener('dragend', (e) => {
+    const el = findItem(e);
+    if (el) el.classList.remove('dragging');
+    clearDragOver();
+  });
+  sidebar.addEventListener('dragover', (e) => {
+    const el = findItem(e);
+    if (!el) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    clearDragOver();
+    el.classList.add('drag-over');
+  });
+  sidebar.addEventListener('drop', (e) => {
+    const el = findItem(e);
+    if (!el) return;
+    e.preventDefault();
+    clearDragOver();
+    const isDivider = el.dataset.divider === 'true';
+
+    if (_dragType === 'divider' && !isDivider) {
+      const targetIdx = _workspaces.findIndex(w => w.id === parseInt(el.dataset.wsId));
+      if (targetIdx >= 0) {
+        _wsDividerPos = targetIdx;
+        saveWorkspaceOrder();
+        renderWorkspaces();
+      }
+    } else if (_dragType === 'ws') {
+      if (isDivider) {
+        const fromIdx = _workspaces.findIndex(w => w.id === _dragWsId);
+        if (fromIdx >= 0) {
+          let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
+          const [moved] = _workspaces.splice(fromIdx, 1);
+          if (fromIdx < dp) dp--;
+          _workspaces.splice(dp, 0, moved);
+          _wsDividerPos = dp;
+          saveWorkspaceOrder();
+          renderWorkspaces();
+        }
+      } else {
+        const targetId = parseInt(el.dataset.wsId);
+        if (_dragWsId == null || _dragWsId === targetId) return;
+        const fromIdx = _workspaces.findIndex(w => w.id === _dragWsId);
+        const toIdx = _workspaces.findIndex(w => w.id === targetId);
+        if (fromIdx < 0 || toIdx < 0) return;
+        let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
+        if (fromIdx < dp && toIdx >= dp) dp--;
+        else if (fromIdx >= dp && toIdx < dp) dp++;
+        _wsDividerPos = dp;
+        const [moved] = _workspaces.splice(fromIdx, 1);
+        const insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
+        _workspaces.splice(insertIdx, 0, moved);
+        saveWorkspaceOrder();
+        renderWorkspaces();
+      }
+    }
+  });
 }
 
 function selectWorkspace(id) {
@@ -816,7 +842,7 @@ function renderSelectedWorkspace() {
     const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
     main.innerHTML = '<div class="ws-pane active" id="ws-build-pane" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>';
     const paneEl = document.getElementById('ws-build-pane');
-    initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init', readOnly: true});
+    initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
     if (ws.status === 'building') startSetupPoll();
     return;
   }
@@ -1631,6 +1657,7 @@ if (typeof document !== 'undefined') {
   });
   connectSSE();
   fetchProjects();
+  initSidebarDragDrop();
 
   // Activity dot updater
   setInterval(updateActivityDots, 1000);
@@ -1650,6 +1677,7 @@ if (typeof module !== 'undefined' && module.exports) {
     tickDot,
     isAgentPaneSelected,
     shouldRecordOutput,
+    morphdomShouldUpdate,
     _setProjects: (p) => { _projects = p; },
   };
 }
