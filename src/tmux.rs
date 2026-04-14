@@ -151,12 +151,15 @@ pub fn set_window_option(session: &str, window: &str, option: &str, value: &str)
         .output();
 }
 
-/// Block until a tmux wait-for channel is signaled. Returns true if successful.
-pub fn wait_for(channel: &str) -> bool {
+/// Check if a pane's process has exited (with remain-on-exit, the pane stays visible).
+pub fn pane_is_dead(session: &str, window: &str) -> bool {
+    let target = format!("{session}:{window}");
     tmux_base()
-        .args(["wait-for", channel])
+        .args(["display-message", "-t", &target, "-p", "#{pane_dead}"])
         .output()
-        .is_ok_and(|o| o.status.success())
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+        .unwrap_or(true) // if we can't check, assume dead (don't block forever)
 }
 
 /// Get the exit status of a dead pane (after remain-on-exit).

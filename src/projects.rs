@@ -302,8 +302,7 @@ pub async fn launch_project(
                             let bs = shell_escape(&build_script.to_string_lossy());
                             let bv = shell_escape(variant);
                             let bp = shell_escape(&path);
-                            let channel = format!("ws-{ws_id}-init");
-                            let init_cmd = format!("'{bs}' '{bv}' '{bp}'; tmux wait-for -S {channel}");
+                            let init_cmd = format!("'{bs}' '{bv}' '{bp}'");
 
                             if let Err(e) = tmux::new_session(
                                 &tmux_session, "init", &path, Some(&init_cmd),
@@ -317,12 +316,13 @@ pub async fn launch_project(
                                 let path_clone = path.clone();
                                 let tmux_session_clone = tmux_session.clone();
                                 actix_web::rt::spawn(async move {
-                                    let channel = format!("ws-{ws_id}-init");
                                     let sess = tmux_session_clone.clone();
-                                    let ok = web::block(move || {
-                                        tmux::wait_for(&channel);
-                                        tmux::pane_exit_status(&sess, "init").unwrap_or(-1)
-                                    }).await.unwrap_or(-1);
+                                    // Poll until the init pane's process exits (remain-on-exit keeps it visible)
+                                    loop {
+                                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                        if tmux::pane_is_dead(&sess, "init") { break; }
+                                    }
+                                    let ok = tmux::pane_exit_status(&sess, "init").unwrap_or(-1);
 
                                     let conn = db3.lock().unwrap();
                                     if ok == 0 {
