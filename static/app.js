@@ -308,16 +308,33 @@ async function showProjectInfo(name) {
   const condaVal = p.conda_env || 'none';
   const agentVal = getProjectAgent(p);
   const isGit = await checkIsGitDir(p.root_dir);
-  showForm('Edit Project', [
+  // Fetch branches for the default branch combobox (best-effort)
+  let branches = [];
+  if (isGit) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`/api/projects/${encodeURIComponent(name)}/branches`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) branches = data;
+      }
+    } catch {}
+  }
+  const branchOptions = ['HEAD', ...branches.filter(b => b !== 'HEAD')];
+  const fields = [
     {id: 'proj-name', placeholder: 'Project name', value: p.name},
     {id: 'proj-dir', placeholder: 'Root directory', value: p.root_dir},
     {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: isGit && p.git, disabled: !isGit},
+    {id: 'proj-default-branch', type: 'combobox', label: 'Default branch', options: branchOptions, value: p.default_branch || 'HEAD'},
     {id: 'proj-conda', type: 'select', label: 'Conda environment', options: ['none', ...condaEnvs], value: condaVal},
     {id: 'proj-agent', type: 'select', label: 'Agent', options: ['Claude', 'Codex', 'None'], value: agentVal},
     {id: 'proj-agent-options-heading', type: 'heading', label: 'Claude Options'},
     {id: 'proj-claude-internet', type: 'checkbox', label: '--dangerously-enable-internet-mode', checked: p.claude_internet, section: 'agent-options'},
     {id: 'proj-claude-skip-perms', type: 'checkbox', label: '--dangerously-skip-permissions', checked: p.claude_skip_permissions, section: 'agent-options'},
-  ], async (values) => {
+  ];
+  showForm('Edit Project', fields, async (values) => {
     const newName = values['proj-name'];
     const dir = values['proj-dir'];
     if (!newName) {
@@ -327,6 +344,7 @@ async function showProjectInfo(name) {
       return 'Root directory is required.';
     }
     const conda = values['proj-conda'] === 'none' ? '' : values['proj-conda'];
+    const branch = values['proj-default-branch'];
     try {
       const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, {
         method: 'PUT',
@@ -338,6 +356,7 @@ async function showProjectInfo(name) {
           conda_env: conda,
           claude_internet: values['proj-claude-internet'],
           claude_skip_permissions: values['proj-claude-skip-perms'],
+          default_branch: (branch && branch !== 'HEAD') ? branch : '',
         }),
       });
       if (!res.ok) {
@@ -348,20 +367,35 @@ async function showProjectInfo(name) {
       return 'Failed to update project. Check that the server is reachable and try again.';
     }
   });
+  // Show/hide default branch combobox based on git checkbox
+  const gitCb = document.getElementById('dlg-proj-git');
+  const branchField = document.getElementById('dlg-proj-default-branch');
+  const branchRow = branchField ? branchField.closest('.combobox') : null;
+  const branchLabel = branchRow ? branchRow.previousElementSibling : null;
+  const updateBranchVisibility = () => {
+    const show = gitCb && gitCb.checked;
+    if (branchRow) branchRow.style.display = show ? '' : 'none';
+    if (branchLabel && branchLabel.classList.contains('dialog-heading')) branchLabel.style.display = show ? '' : 'none';
+  };
+  if (gitCb) {
+    gitCb.addEventListener('change', updateBranchVisibility);
+    updateBranchVisibility();
+  }
   // Wire up auto-detect for directory changes
   const dirInput = document.getElementById('dlg-proj-dir');
-  const gitCb = document.getElementById('dlg-proj-git');
   if (dirInput && gitCb) {
     dirInput.addEventListener('blur', async () => {
       const path = dirInput.value.trim();
       if (!path) {
         gitCb.checked = false;
         gitCb.disabled = true;
+        updateBranchVisibility();
         return;
       }
       const isGit = await checkIsGitDir(path);
       gitCb.checked = isGit;
       gitCb.disabled = !isGit;
+      updateBranchVisibility();
     });
   }
 }
@@ -385,13 +419,16 @@ async function launchProject(name) {
       }
     } catch {}
     const options = ['HEAD', ...branches.filter(b => b !== 'HEAD')];
-    fields.push({id: 'ws-revision', type: 'combobox', label: 'Start revision', options, value: 'HEAD'});
+    const defaultBranch = p.default_branch || 'HEAD';
+    fields.push({id: 'ws-revision', type: 'combobox', label: 'Start revision', options, value: defaultBranch});
+    fields.push({id: 'ws-fetch', type: 'checkbox', label: 'Fetch latest before creating', checked: true});
   }
   showForm('Launch Workspace', fields, async (values) => {
     const body = {};
     if (values['ws-name']) body.name = values['ws-name'];
     const rev = values['ws-revision'];
     if (rev && rev !== 'HEAD') body.revision = rev;
+    if (values['ws-fetch']) body.fetch = true;
     const res = await fetch(`/api/projects/${encodeURIComponent(name)}/launch`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -750,8 +787,14 @@ function renderSelectedWorkspace() {
   }
 
   // Show setup message while workspace is being prepared
-  if (ws.status === 'setting_up') {
-    main.innerHTML = '<div class="ws-empty" style="padding:16px">Setting up workspace\u2026</div>';
+  const setupPhases = {
+    'setting_up': 'Setting up workspace\u2026',
+    'fetching': 'Fetching latest from remote\u2026',
+    'creating_worktree': 'Creating worktree\u2026',
+    'init_submodules': 'Initializing submodules\u2026',
+  };
+  if (setupPhases[ws.status]) {
+    main.innerHTML = '<div class="ws-empty" style="padding:16px">' + setupPhases[ws.status] + '</div>';
     startSetupPoll();
     return;
   }

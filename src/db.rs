@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 10;
+const CURRENT_VERSION: i64 = 11;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -51,6 +51,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE workspaces ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0; UPDATE workspaces SET sort_order = id;",
     // 9 -> 10: settings table
     "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    // 10 -> 11: add default_branch to projects
+    "ALTER TABLE projects ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -77,11 +79,12 @@ pub struct Project {
     pub claude_internet: bool,
     pub claude_skip_permissions: bool,
     pub conda_env: String,
+    pub default_branch: String,
 }
 
 pub fn list_projects(conn: &Connection) -> Vec<Project> {
     let mut stmt = conn
-        .prepare("SELECT name, root_dir, git, agent, claude_internet, claude_skip_permissions, conda_env FROM projects ORDER BY name")
+        .prepare("SELECT name, root_dir, git, agent, claude_internet, claude_skip_permissions, conda_env, default_branch FROM projects ORDER BY name")
         .unwrap();
     stmt.query_map([], |row| {
         Ok(Project {
@@ -92,6 +95,7 @@ pub fn list_projects(conn: &Connection) -> Vec<Project> {
             claude_internet: row.get::<_, i64>(4)? != 0,
             claude_skip_permissions: row.get::<_, i64>(5)? != 0,
             conda_env: row.get(6)?,
+            default_branch: row.get(7)?,
         })
     })
     .unwrap()
@@ -108,10 +112,11 @@ pub fn add_project(
     claude_internet: bool,
     claude_skip_permissions: bool,
     conda_env: &str,
+    default_branch: &str,
 ) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO projects (name, root_dir, git, agent, claude_internet, claude_skip_permissions, conda_env) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![name, root_dir, git as i64, agent, claude_internet as i64, claude_skip_permissions as i64, conda_env],
+        "INSERT INTO projects (name, root_dir, git, agent, claude_internet, claude_skip_permissions, conda_env, default_branch) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        rusqlite::params![name, root_dir, git as i64, agent, claude_internet as i64, claude_skip_permissions as i64, conda_env, default_branch],
     )
     .map_err(|e| match e {
         rusqlite::Error::SqliteFailure(ref err, _)
@@ -134,10 +139,11 @@ pub fn update_project(
     claude_internet: bool,
     claude_skip_permissions: bool,
     conda_env: &str,
+    default_branch: &str,
 ) -> Result<(), String> {
     conn.execute(
-        "UPDATE projects SET name = ?1, root_dir = ?2, git = ?3, agent = ?4, claude_internet = ?5, claude_skip_permissions = ?6, conda_env = ?7 WHERE name = ?8",
-        rusqlite::params![name, root_dir, git as i64, agent, claude_internet as i64, claude_skip_permissions as i64, conda_env, old_name],
+        "UPDATE projects SET name = ?1, root_dir = ?2, git = ?3, agent = ?4, claude_internet = ?5, claude_skip_permissions = ?6, conda_env = ?7, default_branch = ?8 WHERE name = ?9",
+        rusqlite::params![name, root_dir, git as i64, agent, claude_internet as i64, claude_skip_permissions as i64, conda_env, default_branch, old_name],
     )
     .map_err(|e| format!("Failed to update project: {e}"))?;
     // Update workspace references if name changed
@@ -419,7 +425,7 @@ mod tests {
         let conn = test_db();
         assert!(list_projects(&conn).is_empty());
 
-        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let projects = list_projects(&conn);
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].name, "test");
@@ -434,7 +440,7 @@ mod tests {
     #[test]
     fn test_add_project_all_fields() {
         let conn = test_db();
-        add_project(&conn, "full", "/var", false, "Codex", true, true, "py310").unwrap();
+        add_project(&conn, "full", "/var", false, "Codex", true, true, "py310", "").unwrap();
         let p = &list_projects(&conn)[0];
         assert_eq!(p.name, "full");
         assert_eq!(p.root_dir, "/var");
@@ -448,8 +454,8 @@ mod tests {
     #[test]
     fn test_add_project_duplicate_name() {
         let conn = test_db();
-        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "").unwrap();
-        let result = add_project(&conn, "test", "/tmp", true, "Claude", false, false, "");
+        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        let result = add_project(&conn, "test", "/tmp", true, "Claude", false, false, "", "");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("already exists"));
     }
@@ -457,8 +463,8 @@ mod tests {
     #[test]
     fn test_update_project() {
         let conn = test_db();
-        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "").unwrap();
-        update_project(&conn, "test", "renamed", "/var", false, "Codex", true, true, "py310").unwrap();
+        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        update_project(&conn, "test", "renamed", "/var", false, "Codex", true, true, "py310", "main").unwrap();
 
         let projects = list_projects(&conn);
         assert_eq!(projects.len(), 1);
@@ -474,10 +480,10 @@ mod tests {
     #[test]
     fn test_update_project_cascades_to_workspaces() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         add_workspace(&conn, "ws1", "proj", None, "ready");
 
-        update_project(&conn, "proj", "newproj", "/tmp", true, "Claude", false, false, "").unwrap();
+        update_project(&conn, "proj", "newproj", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
         let workspaces = list_workspaces(&conn);
         assert_eq!(workspaces.len(), 1);
@@ -487,11 +493,11 @@ mod tests {
     #[test]
     fn test_update_project_same_name_no_cascade() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         add_workspace(&conn, "ws1", "proj", None, "ready");
 
         // Update with same name — should not break
-        update_project(&conn, "proj", "proj", "/var", false, "Claude", false, false, "").unwrap();
+        update_project(&conn, "proj", "proj", "/var", false, "Claude", false, false, "", "").unwrap();
         let ws = list_workspaces(&conn);
         assert_eq!(ws[0].project, "proj");
     }
@@ -499,7 +505,7 @@ mod tests {
     #[test]
     fn test_remove_project() {
         let conn = test_db();
-        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "test", "/tmp", true, "Claude", false, false, "", "").unwrap();
         assert_eq!(list_projects(&conn).len(), 1);
         remove_project(&conn, "test");
         assert!(list_projects(&conn).is_empty());
@@ -515,9 +521,9 @@ mod tests {
     #[test]
     fn test_multiple_projects_sorted() {
         let conn = test_db();
-        add_project(&conn, "zebra", "/tmp", true, "Claude", false, false, "").unwrap();
-        add_project(&conn, "alpha", "/tmp", true, "Claude", false, false, "").unwrap();
-        add_project(&conn, "mid", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "zebra", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        add_project(&conn, "alpha", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        add_project(&conn, "mid", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
         let projects = list_projects(&conn);
         assert_eq!(projects[0].name, "alpha");
@@ -530,7 +536,7 @@ mod tests {
     #[test]
     fn test_add_and_list_workspaces() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
         assert_eq!(ws.name, "ws1");
@@ -547,7 +553,7 @@ mod tests {
     #[test]
     fn test_get_workspace() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
 
         let fetched = get_workspace(&conn, ws.id).unwrap();
@@ -560,7 +566,7 @@ mod tests {
     #[test]
     fn test_workspace_with_worktree() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", Some("/tmp/wt"), "setting_up");
         assert_eq!(ws.worktree_dir.as_deref(), Some("/tmp/wt"));
         assert_eq!(ws.status, "setting_up");
@@ -569,7 +575,7 @@ mod tests {
     #[test]
     fn test_rename_workspace() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "old", "proj", None, "ready");
 
         rename_workspace(&conn, ws.id, "new");
@@ -580,7 +586,7 @@ mod tests {
     #[test]
     fn test_update_workspace_status() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "setting_up");
 
         update_workspace_status(&conn, ws.id, "ready", Some("/tmp/wt"));
@@ -592,7 +598,7 @@ mod tests {
     #[test]
     fn test_remove_workspace_cascades_tabs() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
         add_workspace_tab(&conn, ws.id, "shell", "shell");
         add_workspace_tab(&conn, ws.id, "agent", "claude");
@@ -605,7 +611,7 @@ mod tests {
     #[test]
     fn test_workspaces_ordered_by_id() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws1 = add_workspace(&conn, "second", "proj", None, "ready");
         let ws2 = add_workspace(&conn, "first", "proj", None, "ready");
 
@@ -621,7 +627,7 @@ mod tests {
     #[test]
     fn test_workspace_tabs() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
 
         let t1 = add_workspace_tab(&conn, ws.id, "shell", "shell");
@@ -644,7 +650,7 @@ mod tests {
     #[test]
     fn test_update_workspace_tab() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
         let tab = add_workspace_tab(&conn, ws.id, "old", "shell");
 
@@ -656,7 +662,7 @@ mod tests {
     #[test]
     fn test_remove_workspace_tab() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
         let tab = add_workspace_tab(&conn, ws.id, "shell", "shell");
 
@@ -667,7 +673,7 @@ mod tests {
     #[test]
     fn test_get_workspace_id_for_tab() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
         let tab = add_workspace_tab(&conn, ws.id, "shell", "shell");
 
@@ -678,7 +684,7 @@ mod tests {
     #[test]
     fn test_tab_sort_order_after_removal() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         let ws = add_workspace(&conn, "ws1", "proj", None, "ready");
         let t1 = add_workspace_tab(&conn, ws.id, "first", "shell");
         let _t2 = add_workspace_tab(&conn, ws.id, "second", "shell");
@@ -695,14 +701,14 @@ mod tests {
     #[test]
     fn test_next_workspace_name_empty() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         assert_eq!(next_workspace_name(&conn, "proj"), "proj-1");
     }
 
     #[test]
     fn test_next_workspace_name_increments() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
         add_workspace(&conn, "proj-1", "proj", None, "ready");
         assert_eq!(next_workspace_name(&conn, "proj"), "proj-2");
@@ -714,7 +720,7 @@ mod tests {
     #[test]
     fn test_next_workspace_name_ignores_non_numeric() {
         let conn = test_db();
-        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
         add_workspace(&conn, "proj-custom", "proj", None, "ready");
         assert_eq!(next_workspace_name(&conn, "proj"), "proj-1");
     }
@@ -722,8 +728,8 @@ mod tests {
     #[test]
     fn test_next_workspace_name_different_projects() {
         let conn = test_db();
-        add_project(&conn, "a", "/tmp", true, "Claude", false, false, "").unwrap();
-        add_project(&conn, "b", "/tmp", true, "Claude", false, false, "").unwrap();
+        add_project(&conn, "a", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        add_project(&conn, "b", "/tmp", true, "Claude", false, false, "", "").unwrap();
         add_workspace(&conn, "a-3", "a", None, "ready");
 
         assert_eq!(next_workspace_name(&conn, "a"), "a-4");

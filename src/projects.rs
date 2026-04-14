@@ -32,6 +32,8 @@ pub struct CreateProjectRequest {
     #[serde(default)]
     conda_env: String,
     #[serde(default)]
+    default_branch: String,
+    #[serde(default)]
     create_dir: bool,
 }
 
@@ -99,7 +101,7 @@ pub async fn create_project(
     };
 
     let conn = db.lock().unwrap();
-    match db::add_project(&conn, &body.name, &root_dir, body.git, agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env) {
+    match db::add_project(&conn, &body.name, &root_dir, body.git, agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env, &body.default_branch) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "created"})),
         Err(msg) => HttpResponse::BadRequest().json(serde_json::json!({"error": msg})),
     }
@@ -128,7 +130,7 @@ pub async fn update_project(
     let conn = db.lock().unwrap();
     match db::update_project(
         &conn, &old_name, &body.name, &root_dir,
-        body.git, agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env,
+        body.git, agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env, &body.default_branch,
     ) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "updated"})),
         Err(msg) => HttpResponse::BadRequest().json(serde_json::json!({"error": msg})),
@@ -141,6 +143,8 @@ pub struct LaunchRequest {
     name: Option<String>,
     #[serde(default)]
     revision: Option<String>,
+    #[serde(default)]
+    fetch: bool,
 }
 
 #[post("/api/projects/{name}/launch")]
@@ -190,11 +194,39 @@ pub async fn launch_project(
         let wt_path = base.join(&wt_name);
         let wt_path_str = wt_path.to_string_lossy().to_string();
         let revision = body.revision.clone().unwrap_or_default();
+        let do_fetch = body.fetch;
         let ws_id = ws.id;
         let db = db.clone();
 
         actix_web::rt::spawn(async move {
+            let db2 = db.clone();
             let result = web::block(move || {
+                let set_phase = |phase: &str| {
+                    let conn = db2.lock().unwrap();
+                    db::update_workspace_status(&conn, ws_id, phase, None);
+                };
+                // Fetch latest from remotes if requested (best-effort, 30s timeout)
+                if do_fetch {
+                    set_phase("fetching");
+                    tlog!("Fetching latest for workspace {ws_id}...");
+                    let fetch_result = std::process::Command::new("timeout")
+                        .args(["30", "git", "fetch", "--all"])
+                        .current_dir(&root_dir)
+                        .output();
+                    match fetch_result {
+                        Ok(o) if o.status.success() => {
+                            tlog!("Fetch succeeded for workspace {ws_id}");
+                        }
+                        Ok(o) => {
+                            let stderr = String::from_utf8_lossy(&o.stderr);
+                            tlog!("Warning: git fetch failed for workspace {ws_id}: {}", stderr.trim());
+                        }
+                        Err(e) => {
+                            tlog!("Warning: git fetch failed for workspace {ws_id}: {e}");
+                        }
+                    }
+                }
+                set_phase("creating_worktree");
                 std::fs::create_dir_all(&base)?;
                 let mut args = vec![
                     "worktree".to_string(),
@@ -218,6 +250,7 @@ pub async fn launch_project(
                 // If any submodule fails (e.g. inaccessible URL), clean up broken
                 // .git references so they don't poison the whole worktree.
                 if std::path::Path::new(&wt_path_str).join(".gitmodules").exists() {
+                    set_phase("init_submodules");
                     let sub = std::process::Command::new("git")
                         .args(["submodule", "update", "--init", "--recursive"])
                         .current_dir(&wt_path_str)
@@ -1022,7 +1055,7 @@ mod tests {
 
         let ws_id = {
             let conn = db.lock().unwrap();
-            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "")
+            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
             crate::db::add_workspace(&conn, "ws1", "proj", None, "ready").id
         };
@@ -1064,7 +1097,7 @@ mod tests {
 
         let ws_id = {
             let conn = db.lock().unwrap();
-            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "")
+            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
             crate::db::add_workspace(&conn, "ws1", "proj", None, "ready").id
         };
@@ -1131,7 +1164,7 @@ mod tests {
 
         {
             let conn = db.lock().unwrap();
-            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "")
+            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
         }
 
@@ -1160,7 +1193,7 @@ mod tests {
 
         {
             let conn = db.lock().unwrap();
-            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "")
+            crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
         }
 
