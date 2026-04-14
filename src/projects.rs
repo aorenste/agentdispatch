@@ -188,7 +188,6 @@ pub async fn launch_project(
     // Spawn worktree creation in background
     if needs_worktree {
         let root_dir = project.root_dir.clone();
-        let agent_str = project.agent.clone();
         let project_clone = project.clone();
         let use_tmux_val = **use_tmux;
         let wt_name = generate_worktree_name();
@@ -294,21 +293,15 @@ pub async fn launch_project(
                     } else {
                         let tmux_session = format!("ws-{ws_id}");
                         let variant = variant_for_bash.as_deref().unwrap_or("");
-                        let agent = normalize_agent(&agent_str).unwrap_or("Claude");
-                        let agent_cmd = if let Some(script) = find_bash_script(&root_dir_for_bash) {
-                            let bare_cmd = build_bare_agent_command(agent, &project_clone);
-                            Some(bash_script_cmd(&script, "claude", variant, &bare_cmd))
-                        } else {
-                            if agent != "None" { Some(build_agent_command(agent, &project_clone)) } else { None }
-                        };
+                        let agent_cmd = bash_script_cmd("claude", &project_clone, variant, &path);
 
                         // If there's a build, run it in an init window first
                         let has_build = !variant.is_empty() && find_build_script(&root_dir_for_bash).is_some();
                         if has_build {
-                            let build_script = find_build_script(&root_dir_for_bash).unwrap();
-                            let bs = build_script.to_string_lossy().replace('\'', "'\\''");
-                            let bv = variant.replace('\'', "'\\''");
-                            let bp = path.replace('\'', "'\\''");
+                            let build_script = resolve_build_script(&root_dir_for_bash);
+                            let bs = shell_escape(&build_script.to_string_lossy());
+                            let bv = shell_escape(variant);
+                            let bp = shell_escape(&path);
                             let channel = format!("ws-{ws_id}-init");
                             let init_cmd = format!("'{bs}' '{bv}' '{bp}'; tmux wait-for -S {channel}");
 
@@ -320,9 +313,7 @@ pub async fn launch_project(
                             } else {
                                 tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
                                 db::update_workspace_status(&conn, ws_id, "building", Some(&path));
-                                // Spawn async task to wait for build completion
                                 let db3 = db.clone();
-                                let agent_cmd_clone = agent_cmd.clone();
                                 let path_clone = path.clone();
                                 let tmux_session_clone = tmux_session.clone();
                                 actix_web::rt::spawn(async move {
@@ -336,11 +327,7 @@ pub async fn launch_project(
                                     let conn = db3.lock().unwrap();
                                     if ok == 0 {
                                         tlog!("Build succeeded for workspace {ws_id}, creating agent window");
-                                        if let Some(ref cmd) = agent_cmd_clone {
-                                            let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, Some(cmd));
-                                        } else {
-                                            let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, None);
-                                        }
+                                        let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, Some(&agent_cmd));
                                         db::update_workspace_status(&conn, ws_id, "ready", Some(&path_clone));
                                     } else {
                                         tlog!("Build failed for workspace {ws_id} (exit code {ok})");
@@ -349,9 +336,8 @@ pub async fn launch_project(
                                 });
                             }
                         } else {
-                            // No build — create agent window directly
                             if let Err(e) = tmux::new_session(
-                                &tmux_session, "agent", &path, agent_cmd.as_deref(),
+                                &tmux_session, "agent", &path, Some(&agent_cmd),
                             ) {
                                 tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
                             }
@@ -371,21 +357,14 @@ pub async fn launch_project(
         });
     }
 
-    // Create tmux session with agent window (if tmux is enabled and agent is not None)
+    // Create tmux session with agent window (if tmux is enabled)
     if **use_tmux && !needs_worktree {
         let tmux_session = format!("ws-{}", ws.id);
         let cwd = &project.root_dir;
         let variant = body.build.as_deref().unwrap_or("");
-        let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-        let agent_cmd = if let Some(script) = find_bash_script(cwd) {
-            let bare_cmd = build_bare_agent_command(agent, &project);
-            Some(bash_script_cmd(&script, "claude", variant, &bare_cmd))
-        } else {
-            if agent != "None" { Some(build_agent_command(agent, &project)) } else { None }
-        };
+        let agent_cmd = bash_script_cmd("claude", &project, variant, "");
         if let Err(e) = tmux::new_session(
-            &tmux_session, "agent", cwd,
-            agent_cmd.as_deref(),
+            &tmux_session, "agent", cwd, Some(&agent_cmd),
         ) {
             tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
         }
@@ -470,10 +449,7 @@ pub async fn list_builds(
         None => return HttpResponse::NotFound().json(serde_json::json!({"error": "project not found"})),
     };
 
-    let script = match find_build_script(&root_dir) {
-        Some(s) => s,
-        None => return HttpResponse::Ok().json(Vec::<String>::new()),
-    };
+    let script = resolve_build_script(&root_dir);
 
     let result = web::block(move || -> Result<Vec<String>, std::io::Error> {
         let script_str = script.to_string_lossy().to_string();
@@ -585,16 +561,7 @@ pub struct CreateTabRequest {
     tab_type: String,
 }
 
-fn build_agent_command(agent: &str, project: &db::Project) -> String {
-    let cmd = build_bare_agent_command(agent, project);
-    if !project.conda_env.is_empty() {
-        format!("conda activate {} && {}", project.conda_env, cmd)
-    } else {
-        cmd
-    }
-}
-
-/// Agent command without conda prefix — used for AGENTDISPATCH_AGENT_CMD
+/// Agent command without conda prefix — conda is handled by default bash.sh
 /// when bash.sh handles env setup itself.
 fn build_bare_agent_command(agent: &str, project: &db::Project) -> String {
     let mut cmd = if agent == "Codex" { "codex".to_string() } else { "claude".to_string() };
@@ -617,19 +584,18 @@ pub async fn create_tab(
     use_tmux: UseTmux,
 ) -> HttpResponse {
     let ws_id = path.into_inner();
-    let (tab, cwd, root_dir, variant) = {
+    let (tab, cwd, project, variant) = {
         let conn = db.lock().unwrap();
         let tab = db::add_workspace_tab(&conn, ws_id, &body.name, &body.tab_type);
         let ws = db::get_workspace(&conn, ws_id);
         let variant = ws.as_ref().map(|w| w.build_variant.clone()).unwrap_or_default();
+        let wt = ws.as_ref().and_then(|w| w.worktree_dir.clone());
         let project = ws.as_ref().and_then(|w| {
             db::list_projects(&conn).into_iter().find(|p| p.name == w.project)
         });
-        let root_dir = project.as_ref().map(|p| p.root_dir.clone()).unwrap_or_default();
-        let cwd = ws.and_then(|w| w.worktree_dir)
-            .or_else(|| project.map(|p| p.root_dir))
+        let cwd = wt.or_else(|| project.as_ref().map(|p| p.root_dir.clone()))
             .unwrap_or_else(|| "/tmp".to_string());
-        (tab, cwd, root_dir, variant)
+        (tab, cwd, project, variant)
     };
 
     // Create tmux window for the new tab (outside DB lock)
@@ -637,8 +603,9 @@ pub async fn create_tab(
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = format!("tab-{}", tab.id);
         if tmux::has_session(&tmux_session) {
-            let shell_cmd = if !root_dir.is_empty() {
-                find_bash_script(&root_dir).map(|s| bash_script_cmd(&s, "shell", &variant, ""))
+            let shell_cmd = if let Some(ref proj) = project {
+                let wt = if cwd != proj.root_dir { &cwd } else { "" };
+                Some(bash_script_cmd("shell", proj, &variant, wt))
             } else { None };
             if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &cwd, shell_cmd.as_deref()) {
                 tlog!("Failed to create tmux window tab-{}: {e}", tab.id);
@@ -687,20 +654,12 @@ pub async fn recreate_workspace(
     tmux::kill_session(&tmux_session);
 
     let cwd = ws.worktree_dir.as_deref().unwrap_or(&project.root_dir);
+    let wt = ws.worktree_dir.as_deref().unwrap_or("");
     let variant = &ws.build_variant;
-    let bash_script = find_bash_script(&project.root_dir);
 
-    let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-    let agent_cmd = if let Some(ref script) = bash_script {
-        let bare_cmd = build_bare_agent_command(agent, &project);
-        Some(bash_script_cmd(script, "claude", variant, &bare_cmd))
-    } else {
-        if agent != "None" { Some(build_agent_command(agent, &project)) } else { None }
-    };
-
+    let agent_cmd = bash_script_cmd("claude", &project, variant, wt);
     if let Err(e) = tmux::new_session(
-        &tmux_session, "agent", cwd,
-        agent_cmd.as_deref(),
+        &tmux_session, "agent", cwd, Some(&agent_cmd),
     ) {
         return HttpResponse::InternalServerError()
             .json(serde_json::json!({"error": format!("Failed to create tmux session: {e}")}));
@@ -711,10 +670,10 @@ pub async fn recreate_workspace(
         let conn = db.lock().unwrap();
         db::list_workspace_tabs(&conn, ws_id)
     };
-    let shell_cmd = bash_script.as_ref().map(|s| bash_script_cmd(s, "shell", variant, ""));
+    let shell_cmd = bash_script_cmd("shell", &project, variant, wt);
     for tab in &tabs {
         let tmux_window = format!("tab-{}", tab.id);
-        if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, shell_cmd.as_deref()) {
+        if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, Some(&shell_cmd)) {
             tlog!("Failed to recreate tmux window tab-{}: {e}", tab.id);
         }
     }
@@ -860,20 +819,76 @@ fn find_bash_script(root_dir: &str) -> Option<std::path::PathBuf> {
     find_agentdispatch_file(root_dir, "bash.sh")
 }
 
-/// Build the command string for launching bash with bash.sh as rcfile.
-/// Sets AGENTDISPATCH_ACTION, AGENTDISPATCH_VARIANT, and AGENTDISPATCH_AGENT_CMD as env vars.
+/// Config directory for agentdispatch defaults (~/.config/agentdispatch).
+fn config_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(home).join(".config/agentdispatch")
+}
 
-fn bash_script_cmd(script: &std::path::Path, action: &str, variant: &str, agent_cmd: &str) -> String {
-    let s = script.to_string_lossy().replace('\'', "'\\''");
+const DEFAULT_BASH_SH: &str = include_str!("../static/default-bash.sh");
+const DEFAULT_BUILD_SH: &str = include_str!("../static/default-build.sh");
+
+/// Ensure a default config file exists, writing it from embedded content if missing.
+fn ensure_config_file(name: &str, content: &str) -> std::path::PathBuf {
+    let path = config_dir().join(name);
+    if !path.is_file() {
+        std::fs::create_dir_all(config_dir()).ok();
+        std::fs::write(&path, content).ok();
+    }
+    path
+}
+
+fn default_bash_sh_path() -> std::path::PathBuf {
+    ensure_config_file("default-bash.sh", DEFAULT_BASH_SH)
+}
+
+/// Path to the build script for a project. Checks project-specific locations first,
+/// then falls back to the default in ~/.config/agentdispatch.
+fn resolve_build_script(root_dir: &str) -> std::path::PathBuf {
+    if let Some(p) = find_build_script(root_dir) {
+        return p;
+    }
+    ensure_config_file("default-build.sh", DEFAULT_BUILD_SH)
+}
+
+fn shell_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+/// Build the tmux command string for a pane. Always uses the default bash.sh,
+/// passing all config as env vars.
+fn bash_script_cmd(action: &str, project: &db::Project, variant: &str, worktree: &str) -> String {
+    let default_script = default_bash_sh_path();
+    let s = shell_escape(&default_script.to_string_lossy());
+
+    let agent = normalize_agent(&project.agent).unwrap_or("Claude");
+    let agent_cmd = if action == "claude" && agent != "None" {
+        build_bare_agent_command(agent, project)
+    } else {
+        String::new()
+    };
+
+    let project_bash = find_bash_script(&project.root_dir)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
     let mut parts = Vec::new();
     parts.push(format!("AGENTDISPATCH_ACTION={action}"));
-    if !variant.is_empty() {
-        let v = variant.replace('\'', "'\\''");
-        parts.push(format!("AGENTDISPATCH_VARIANT='{v}'"));
-    }
     if !agent_cmd.is_empty() {
-        let c = agent_cmd.replace('\'', "'\\''");
-        parts.push(format!("AGENTDISPATCH_AGENT_CMD='{c}'"));
+        parts.push(format!("AGENTDISPATCH_AGENT_CMD='{}'", shell_escape(&agent_cmd)));
+    }
+    if !variant.is_empty() {
+        parts.push(format!("AGENTDISPATCH_VARIANT='{}'", shell_escape(variant)));
+    }
+    if !project.conda_env.is_empty() {
+        parts.push(format!("AGENTDISPATCH_CONDA_ENV='{}'", shell_escape(&project.conda_env)));
+    }
+    if !project_bash.is_empty() {
+        parts.push(format!("AGENTDISPATCH_PROJECT_BASH='{}'", shell_escape(&project_bash)));
+    }
+    parts.push(format!("AGENTDISPATCH_ROOT_DIR='{}'", shell_escape(&project.root_dir)));
+    if !worktree.is_empty() {
+        parts.push(format!("AGENTDISPATCH_WORKTREE='{}'", shell_escape(worktree)));
     }
     parts.push(format!("exec bash --rcfile '{s}'"));
     parts.join(" ")
@@ -1045,41 +1060,65 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn test_bash_script_cmd_no_variant() {
-        let path = std::path::Path::new("/tmp/test/bash.sh");
-        assert_eq!(
-            bash_script_cmd(path, "claude", "", "claude"),
-            "AGENTDISPATCH_ACTION=claude AGENTDISPATCH_AGENT_CMD='claude' exec bash --rcfile '/tmp/test/bash.sh'"
-        );
+    fn test_project(agent: &str, skip_perms: bool, conda: &str) -> db::Project {
+        db::Project {
+            name: "test".to_string(),
+            root_dir: "/tmp/test".to_string(),
+            git: false,
+            agent: agent.to_string(),
+            claude_internet: false,
+            claude_skip_permissions: skip_perms,
+            conda_env: conda.to_string(),
+            default_branch: String::new(),
+        }
     }
 
     #[test]
-    fn test_bash_script_cmd_with_variant() {
-        let path = std::path::Path::new("/tmp/test/bash.sh");
-        assert_eq!(
-            bash_script_cmd(path, "shell", "py310", ""),
-            "AGENTDISPATCH_ACTION=shell AGENTDISPATCH_VARIANT='py310' exec bash --rcfile '/tmp/test/bash.sh'"
-        );
+    fn test_bash_script_cmd_claude_basic() {
+        let proj = test_project("Claude", false, "");
+        let cmd = bash_script_cmd("claude", &proj, "", "");
+        assert!(cmd.starts_with("AGENTDISPATCH_ACTION=claude"));
+        assert!(cmd.contains("AGENTDISPATCH_AGENT_CMD='claude'"));
+        assert!(cmd.contains("AGENTDISPATCH_ROOT_DIR='/tmp/test'"));
+        assert!(cmd.contains("exec bash --rcfile"));
     }
 
     #[test]
-    fn test_bash_script_cmd_with_agent_flags() {
-        let path = std::path::Path::new("/tmp/test/bash.sh");
-        assert_eq!(
-            bash_script_cmd(path, "claude", "py310", "claude --dangerously-skip-permissions"),
-            "AGENTDISPATCH_ACTION=claude AGENTDISPATCH_VARIANT='py310' AGENTDISPATCH_AGENT_CMD='claude --dangerously-skip-permissions' exec bash --rcfile '/tmp/test/bash.sh'"
-        );
+    fn test_bash_script_cmd_shell_with_variant() {
+        let proj = test_project("Claude", false, "");
+        let cmd = bash_script_cmd("shell", &proj, "py310", "");
+        assert!(cmd.starts_with("AGENTDISPATCH_ACTION=shell"));
+        assert!(cmd.contains("AGENTDISPATCH_VARIANT='py310'"));
+        assert!(!cmd.contains("AGENTDISPATCH_AGENT_CMD")); // shell action, no agent cmd
     }
 
     #[test]
-    fn test_bash_script_cmd_quotes_path() {
-        let path = std::path::Path::new("/tmp/it's a test/bash.sh");
-        let cmd = bash_script_cmd(path, "claude", "", "claude");
-        assert_eq!(
-            cmd,
-            "AGENTDISPATCH_ACTION=claude AGENTDISPATCH_AGENT_CMD='claude' exec bash --rcfile '/tmp/it'\\''s a test/bash.sh'"
-        );
+    fn test_bash_script_cmd_with_conda() {
+        let proj = test_project("Claude", false, "myenv");
+        let cmd = bash_script_cmd("claude", &proj, "", "");
+        assert!(cmd.contains("AGENTDISPATCH_CONDA_ENV='myenv'"));
+    }
+
+    #[test]
+    fn test_bash_script_cmd_with_flags() {
+        let proj = test_project("Claude", true, "");
+        let cmd = bash_script_cmd("claude", &proj, "", "");
+        assert!(cmd.contains("AGENTDISPATCH_AGENT_CMD='claude --dangerously-skip-permissions'"));
+    }
+
+    #[test]
+    fn test_bash_script_cmd_agent_none() {
+        let proj = test_project("None", false, "");
+        let cmd = bash_script_cmd("claude", &proj, "", "");
+        // Agent=None: no AGENTDISPATCH_AGENT_CMD
+        assert!(!cmd.contains("AGENTDISPATCH_AGENT_CMD"));
+    }
+
+    #[test]
+    fn test_bash_script_cmd_with_worktree() {
+        let proj = test_project("Claude", false, "");
+        let cmd = bash_script_cmd("claude", &proj, "", "/tmp/wt");
+        assert!(cmd.contains("AGENTDISPATCH_WORKTREE='/tmp/wt'"));
     }
 
     // -- API integration tests --
