@@ -82,13 +82,21 @@ pub fn ensure_server_config() {
 }
 
 pub fn new_session(session: &str, window: &str, cwd: &str, cmd: Option<&str>) -> Result<(), String> {
+    new_session_ex(session, window, cwd, cmd, true)
+}
+
+pub fn new_session_ex(session: &str, window: &str, cwd: &str, cmd: Option<&str>, keep_shell: bool) -> Result<(), String> {
     let mut args = vec![
         "new-session", "-d", "-s", session, "-n", window, "-c", cwd,
     ];
     let shell_cmd;
     if let Some(c) = cmd {
         let escaped = c.replace("'", "'\\''");
-        shell_cmd = format!("bash -lc '{escaped}; exec bash -l'");
+        shell_cmd = if keep_shell {
+            format!("bash -lc '{escaped}; exec bash -l'")
+        } else {
+            format!("bash -lc '{escaped}'")
+        };
         args.push(&shell_cmd);
     }
     let output = tmux_base()

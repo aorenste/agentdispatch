@@ -99,6 +99,19 @@ function stopServer(server) {
   }
 }
 
+/** Poll until a workspace reaches "ready" status */
+async function waitForReady(request, base, wsId) {
+  for (let i = 0; i < 30; i++) {
+    const res = await request.get(`${base}/api/workspaces`);
+    const data = await res.json();
+    const list = data.workspaces || data;
+    const current = list.find(w => w.id === wsId);
+    if (current && current.status === 'ready') return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error(`Workspace ${wsId} did not become ready`);
+}
+
 /** Create a project + workspace + shell tab, return { wsId, tabId } */
 async function setupWorkspace(request, base, projectName) {
   const wsRes = await request.get(`${base}/api/workspaces`);
@@ -116,6 +129,7 @@ async function setupWorkspace(request, base, projectName) {
   const launchRes = await request.post(`${base}/api/projects/${projectName}/launch`, { data: {} });
   if (!launchRes.ok()) throw new Error(`Failed to launch ${projectName}: ${launchRes.status()}`);
   const ws = await launchRes.json();
+  await waitForReady(request, base, ws.id);
   const tabRes = await request.post(`${base}/api/workspaces/${ws.id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
@@ -194,4 +208,4 @@ async function parseWorkspaces(res) {
   return data.workspaces || data;
 }
 
-module.exports = { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers, parseWorkspaces };
+module.exports = { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers, parseWorkspaces, waitForReady };

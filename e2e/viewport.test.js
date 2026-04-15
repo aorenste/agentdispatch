@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const { startServer, stopServer, parseWorkspaces } = require('./helpers');
+const { startServer, stopServer, parseWorkspaces, waitForReady } = require('./helpers');
 let server;
 
 // Test that viewport scroll position is preserved when switching between
@@ -32,6 +32,7 @@ test.beforeAll(async ({ request }) => {
   let res = await request.post(`${server.base}/api/projects/e2e-viewport/launch`, { data: { name: 'ws-A' } });
   const ws1 = await res.json();
   ws1Id = ws1.id;
+  await waitForReady(request, server.base, ws1Id);
   res = await request.post(`${server.base}/api/workspaces/${ws1Id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
@@ -40,6 +41,7 @@ test.beforeAll(async ({ request }) => {
   res = await request.post(`${server.base}/api/projects/e2e-viewport/launch`, { data: { name: 'ws-B' } });
   const ws2 = await res.json();
   ws2Id = ws2.id;
+  await waitForReady(request, server.base, ws2Id);
   res = await request.post(`${server.base}/api/workspaces/${ws2Id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });

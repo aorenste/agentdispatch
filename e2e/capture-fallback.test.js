@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const { startServer, stopServer } = require('./helpers');
+const { startServer, stopServer, waitForReady } = require('./helpers');
 let server;
 
 // Tests that terminal content is restored via capture-pane when output
@@ -33,6 +33,7 @@ test('shell content restored via capture-pane fallback', async ({ page, request 
   const launchRes = await request.post(`${server.base}/api/projects/e2e-capture/launch`, { data: {} });
   const ws = await launchRes.json();
   wsId = ws.id;
+  await waitForReady(request, server.base, wsId);
   const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });

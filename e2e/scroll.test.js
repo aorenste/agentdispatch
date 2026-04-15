@@ -1,7 +1,7 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
 
-const { startServer, stopServer, parseWorkspaces } = require('./helpers');
+const { startServer, stopServer, parseWorkspaces, waitForReady } = require('./helpers');
 let server;
 
 let wsId = null;
@@ -31,6 +31,7 @@ test.beforeAll(async ({ request }) => {
   expect(launchRes.ok()).toBeTruthy();
   const ws = await launchRes.json();
   wsId = ws.id;
+  await waitForReady(request, server.base, wsId);
 
   // Create a shell tab
   const tabRes = await request.post(`${server.base}/api/workspaces/${wsId}/tabs`, {

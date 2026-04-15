@@ -841,7 +841,8 @@ function renderSelectedWorkspace() {
   if (ws.status === 'building' || ws.status === 'build_failed') {
     // Don't rebuild if the init terminal is already showing
     if (!document.getElementById('ws-build-pane')) {
-      const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
+      const buildProj = _projects.find(p => p.name === ws.project);
+      const cwd = ws.worktree_dir || (buildProj ? buildProj.root_dir : null);
       main.innerHTML = '<div class="ws-pane active" id="ws-build-pane" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>';
       const paneEl = document.getElementById('ws-build-pane');
       initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});

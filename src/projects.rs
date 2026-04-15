@@ -176,7 +176,7 @@ pub async fn launch_project(
         .unwrap_or(default_name);
 
     let needs_worktree = project.git;
-    let status = if needs_worktree { "setting_up" } else { "ready" };
+    let status = if needs_worktree { "setting_up" } else if **use_tmux { "building" } else { "ready" };
 
     // Insert workspace into DB immediately
     let ws = {
@@ -295,53 +295,51 @@ pub async fn launch_project(
                         let variant = variant_for_bash.as_deref().unwrap_or("");
                         let agent_cmd = bash_script_cmd("claude", &project_clone, variant, &path);
 
-                        // If there's a build, run it in an init window first
-                        let has_build = !variant.is_empty() && find_build_script(&root_dir_for_bash).is_some();
-                        if has_build {
-                            let build_script = resolve_build_script(&root_dir_for_bash);
-                            let bs = shell_escape(&build_script.to_string_lossy());
-                            let bv = shell_escape(variant);
-                            let bp = shell_escape(&path);
-                            let init_cmd = format!("'{bs}' '{bv}' '{bp}'");
+                        // Always run init window first (build script, then agent)
+                        let build_script = resolve_build_script(&root_dir_for_bash);
+                        tlog!("Workspace {ws_id} init: build_script={} worktree={path}", build_script.display());
+                        let bs = shell_escape(&build_script.to_string_lossy());
+                        let bv = shell_escape(variant);
+                        let bp = shell_escape(&path);
+                        let init_cmd = format!("bash '{bs}' '{bv}' '{bp}'");
+                        tlog!("Workspace {ws_id} init cmd: {init_cmd}");
 
-                            if let Err(e) = tmux::new_session(
-                                &tmux_session, "init", &path, Some(&init_cmd),
-                            ) {
-                                tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
-                                db::update_workspace_status(&conn, ws_id, "error", Some(&path));
-                            } else {
-                                tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
-                                db::update_workspace_status(&conn, ws_id, "building", Some(&path));
-                                let db3 = db.clone();
-                                let path_clone = path.clone();
-                                let tmux_session_clone = tmux_session.clone();
-                                actix_web::rt::spawn(async move {
-                                    let sess = tmux_session_clone.clone();
-                                    // Poll until the init pane's process exits (remain-on-exit keeps it visible)
-                                    loop {
-                                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                        if tmux::pane_is_dead(&sess, "init") { break; }
-                                    }
-                                    let ok = tmux::pane_exit_status(&sess, "init").unwrap_or(-1);
-
-                                    let conn = db3.lock().unwrap();
-                                    if ok == 0 {
-                                        tlog!("Build succeeded for workspace {ws_id}, creating agent window");
-                                        let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, Some(&agent_cmd));
-                                        db::update_workspace_status(&conn, ws_id, "ready", Some(&path_clone));
-                                    } else {
-                                        tlog!("Build failed for workspace {ws_id} (exit code {ok})");
-                                        db::update_workspace_status(&conn, ws_id, "build_failed", Some(&path_clone));
-                                    }
-                                });
-                            }
+                        if let Err(e) = tmux::new_session_ex(
+                            &tmux_session, "init", &path, Some(&init_cmd), false,
+                        ) {
+                            tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
+                            db::update_workspace_status(&conn, ws_id, "error", Some(&path));
                         } else {
-                            if let Err(e) = tmux::new_session(
-                                &tmux_session, "agent", &path, Some(&agent_cmd),
-                            ) {
-                                tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
-                            }
-                            db::update_workspace_status(&conn, ws_id, "ready", Some(&path));
+                            tlog!("Workspace {ws_id} tmux session {tmux_session} created, polling init pane");
+                            tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
+                            db::update_workspace_status(&conn, ws_id, "building", Some(&path));
+                            let db3 = db.clone();
+                            let path_clone = path.clone();
+                            let tmux_session_clone = tmux_session.clone();
+                            actix_web::rt::spawn(async move {
+                                let sess = tmux_session_clone.clone();
+                                let mut polls = 0u32;
+                                loop {
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                                    polls += 1;
+                                    let dead = tmux::pane_is_dead(&sess, "init");
+                                    if polls <= 3 || polls % 10 == 0 {
+                                        tlog!("Workspace {ws_id} init poll #{polls}: pane_dead={dead}");
+                                    }
+                                    if dead { break; }
+                                }
+                                let ok = tmux::pane_exit_status(&sess, "init").unwrap_or(-1);
+                                if ok == 0 {
+                                    tlog!("Build succeeded for workspace {ws_id} (after {polls}s), creating agent window");
+                                    let _ = tmux::new_window(&tmux_session_clone, "agent", &path_clone, Some(&agent_cmd));
+                                    let conn = db3.lock().unwrap();
+                                    db::update_workspace_status(&conn, ws_id, "ready", Some(&path_clone));
+                                } else {
+                                    tlog!("Build failed for workspace {ws_id} (exit code {ok} after {polls}s)");
+                                    let conn = db3.lock().unwrap();
+                                    db::update_workspace_status(&conn, ws_id, "build_failed", Some(&path_clone));
+                                }
+                            });
                         }
                     }
                 }
@@ -357,16 +355,55 @@ pub async fn launch_project(
         });
     }
 
-    // Create tmux session with agent window (if tmux is enabled)
+    // Create tmux session for non-worktree projects (if tmux is enabled)
     if **use_tmux && !needs_worktree {
         let tmux_session = format!("ws-{}", ws.id);
         let cwd = &project.root_dir;
         let variant = body.build.as_deref().unwrap_or("");
         let agent_cmd = bash_script_cmd("claude", &project, variant, "");
-        if let Err(e) = tmux::new_session(
-            &tmux_session, "agent", cwd, Some(&agent_cmd),
+
+        let build_script = resolve_build_script(&project.root_dir);
+        tlog!("Workspace {} init: build_script={} cwd={}", ws.id, build_script.display(), cwd);
+        let bs = shell_escape(&build_script.to_string_lossy());
+        let bv = shell_escape(variant);
+        let bp = shell_escape(cwd);
+        let init_cmd = format!("bash '{bs}' '{bv}' '{bp}'");
+        tlog!("Workspace {} init cmd: {init_cmd}", ws.id);
+
+        if let Err(e) = tmux::new_session_ex(
+            &tmux_session, "init", cwd, Some(&init_cmd), false,
         ) {
             tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
+        } else {
+            tlog!("Workspace {} tmux session {tmux_session} created, polling init pane", ws.id);
+            tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
+            let db2 = db.clone();
+            let ws_id = ws.id;
+            let cwd = cwd.to_string();
+            let tmux_session_clone = tmux_session.clone();
+            actix_web::rt::spawn(async move {
+                let mut polls = 0u32;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    polls += 1;
+                    let dead = tmux::pane_is_dead(&tmux_session_clone, "init");
+                    if polls <= 3 || polls % 10 == 0 {
+                        tlog!("Workspace {ws_id} init poll #{polls}: pane_dead={dead}");
+                    }
+                    if dead { break; }
+                }
+                let ok = tmux::pane_exit_status(&tmux_session_clone, "init").unwrap_or(-1);
+                if ok == 0 {
+                    tlog!("Build succeeded for workspace {ws_id} (after {polls}s), creating agent window");
+                    let _ = tmux::new_window(&tmux_session_clone, "agent", &cwd, Some(&agent_cmd));
+                    let conn = db2.lock().unwrap();
+                    db::update_workspace_status(&conn, ws_id, "ready", None);
+                } else {
+                    tlog!("Build failed for workspace {ws_id} (exit code {ok} after {polls}s)");
+                    let conn = db2.lock().unwrap();
+                    db::update_workspace_status(&conn, ws_id, "build_failed", None);
+                }
+            });
         }
     }
     // For git worktree projects, tmux session is created after worktree setup (below)
@@ -834,6 +871,11 @@ fn ensure_config_file(name: &str, content: &str) -> std::path::PathBuf {
     if !path.is_file() {
         std::fs::create_dir_all(config_dir()).ok();
         std::fs::write(&path, content).ok();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).ok();
+        }
     }
     path
 }

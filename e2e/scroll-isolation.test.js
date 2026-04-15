@@ -1,7 +1,7 @@
 // @ts-check
 // Tests for output isolation between tabs and reconnect content persistence
 const { test, expect } = require('@playwright/test');
-const { startServer, stopServer, setupWorkspace, teardownWorkspace } = require('./helpers');
+const { startServer, stopServer, setupWorkspace, teardownWorkspace, waitForReady } = require('./helpers');
 
 let server, wsId, tabId;
 const proj = 'e2e-scrolliso';
@@ -112,6 +112,7 @@ test('prior output is visible after reconnect', async ({ page, request }) => {
   const launchRes = await request.post(`${server.base}/api/projects/${proj}/launch`, { data: {} });
   expect(launchRes.ok()).toBeTruthy();
   const ws2 = await launchRes.json();
+  await waitForReady(request, server.base, ws2.id);
   const tabRes = await request.post(`${server.base}/api/workspaces/${ws2.id}/tabs`, {
     data: { name: 'Shell', tab_type: 'shell' },
   });
