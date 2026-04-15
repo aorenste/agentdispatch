@@ -15,6 +15,7 @@ const _wsWasSelected = {}; // workspace id -> was agent pane selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
 const _wsTitles = {}; // workspace id -> pane title string
+const _initClosed = new Set(); // workspace ids where user closed the init tab
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -52,6 +53,9 @@ function normalizeWsSubtab(ws, subtab) {
   if (subtab === 'history') {
     const proj = ws ? _projects.find(p => p.name === ws.project) : null;
     return getProjectAgent(proj) !== 'None' ? 'history' : getDefaultWsSubtab(ws);
+  }
+  if (subtab === 'init') {
+    return (ws.has_init && !_initClosed.has(ws.id)) ? 'init' : getDefaultWsSubtab(ws);
   }
   if (subtab && subtab.startsWith('tab-')) {
     return ws.tabs.some(t => 'tab-' + t.id === subtab) ? subtab : getDefaultWsSubtab(ws);
@@ -773,6 +777,18 @@ async function closeTab(tabId) {
   renderSelectedWorkspace();
 }
 
+function closeInitTab(wsId) {
+  disposeTerminal('init-' + wsId);
+  _initClosed.add(wsId);
+  if (_selectedWsSubtab === 'init') {
+    const ws = _workspaces.find(w => w.id === wsId);
+    _selectedWsSubtab = getDefaultWsSubtab(ws);
+  }
+  renderSelectedWorkspace();
+  // Kill the tmux init window server-side
+  fetch(`/api/workspaces/${wsId}/kill-init`, { method: 'POST' });
+}
+
 async function renameWorkspace(wsId) {
   closeAllWsMenus();
   const ws = _workspaces.find(w => w.id === wsId);
@@ -851,10 +867,7 @@ function renderSelectedWorkspace() {
     return;
   }
   stopSetupPoll();
-  // Clean up init terminal from build phase if it exists
-  if (_tabTerminals['init-' + ws.id]) {
-    disposeTerminal('init-' + ws.id);
-  }
+  const hasInitTerminal = ws.has_init && !_initClosed.has(ws.id);
 
   // Stash terminal containers in a hidden div before rebuilding innerHTML.
   // This keeps them in the DOM so xterm.js viewport scroll state is preserved.
@@ -890,6 +903,7 @@ function renderSelectedWorkspace() {
 
   main.innerHTML = `
     <div class="ws-subtabs">
+      ${hasInitTerminal ? `<button class="ws-subtab ${_selectedWsSubtab === 'init' ? 'active' : ''}" onclick="switchWsSubtab('init')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); closeInitTab(${ws.id})">\u2715</span><span class="ws-subtab-label">Init</span></span></button>` : ''}
       ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span id="activity-tab-${ws.id}" class="activity-dot"></span><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
       ${tabButtons}
       <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
@@ -910,6 +924,8 @@ function renderSelectedWorkspace() {
     const histEntry = getOrCreateHistoryTerminal(ws.id);
     paneEl.appendChild(histEntry.container);
     requestAnimationFrame(() => { histEntry.fitAddon.fit(); });
+  } else if (_selectedWsSubtab === 'init' && hasInitTerminal) {
+    initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
   } else if (!_selectedWsSubtab) {
     disposeTerminal('agent-' + ws.id);
     paneEl.innerHTML = '<div class="ws-empty" style="padding:16px">No panes open</div>';

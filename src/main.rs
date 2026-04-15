@@ -127,6 +127,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::reorder_workspaces)
             .service(projects::rename_workspace)
             .service(projects::recreate_workspace)
+            .service(projects::kill_init_window)
             .service(projects::delete_workspace)
             .service(projects::create_tab)
             .service(projects::update_tab)

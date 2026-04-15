@@ -4,6 +4,9 @@ const { startServer, stopServer, parseWorkspaces, waitForReady } = require('./he
 const fs = require('fs');
 const path = require('path');
 
+// Build sleeps 10s; give tests plenty of room under parallel load
+test.setTimeout(60000);
+
 const PROJECT = 'e2e-build-transition';
 const PROJECT2 = 'e2e-build-other';
 let server;
@@ -22,7 +25,7 @@ if [ "$1" = "--list" ]; then
     echo "slow"
     exit 0
 fi
-sleep 8
+sleep 10
 `);
   fs.chmodSync(path.join(adDir, 'build.sh'), 0o755);
 
@@ -76,7 +79,38 @@ test('workspace shows build pane during building phase', async ({ page, request 
   await page.locator('.ws-sidebar-item').filter({ hasText: PROJECT }).first().click();
 
   // Should show the build terminal (init pane)
-  await page.waitForSelector('#ws-build-pane', { timeout: 5000 });
+  await page.waitForSelector('#ws-build-pane', { timeout: 10000 });
+});
+
+test('init tab persists after build completes and can be closed', async ({ page, request }) => {
+  await waitForReady(request, server.base, wsId);
+
+  await page.goto(server.base + '/');
+  await page.click('text=Workspaces');
+  await page.waitForSelector('.ws-sidebar-item');
+  await page.locator('.ws-sidebar-item').filter({ hasText: PROJECT }).first().click();
+
+  // Workspace is ready — the init tab should still be visible in the tab bar
+  await page.waitForSelector('.ws-subtabs');
+  const initTab = page.locator('.ws-subtab').filter({ hasText: 'Init' });
+  await expect(initTab).toBeVisible({ timeout: 5000 });
+
+  // Click the init tab to see its content
+  await initTab.click();
+  await page.waitForFunction(
+    (wsId) => {
+      const e = _tabTerminals['init-' + wsId];
+      return e && e.connected;
+    },
+    wsId,
+    { timeout: 5000 },
+  );
+
+  // Close the init tab via the x button
+  await initTab.locator('.ws-subtab-close').click();
+
+  // Init tab should be gone
+  await expect(initTab).not.toBeVisible();
 });
 
 test('switching away and back shows correct workspace after build completes', async ({ page, request }) => {

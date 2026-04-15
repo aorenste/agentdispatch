@@ -58,7 +58,7 @@ pub fn has_session(session: &str) -> bool {
 pub fn has_window(session: &str, window: &str) -> bool {
     let target = format!("{session}:{window}");
     tmux_base()
-        .args(["select-window", "-t", &target])
+        .args(["display-message", "-t", &target, "-p", "#{window_id}"])
         .output()
         .is_ok_and(|o| o.status.success())
 }
