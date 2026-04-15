@@ -649,7 +649,7 @@ let _dragType = null;
 let _dragWsId = null;
 function initSidebarDragDrop() {
   const sidebar = document.getElementById('ws-sidebar');
-  const clearDragOver = () => sidebar.querySelectorAll('.drag-over').forEach(x => x.classList.remove('drag-over'));
+  const clearDragOver = () => sidebar.querySelectorAll('.drag-over-above, .drag-over-below').forEach(x => { x.classList.remove('drag-over-above', 'drag-over-below'); });
   const findItem = (e) => e.target.closest('.ws-sidebar-item, .ws-divider');
 
   sidebar.addEventListener('dragstart', (e) => {
@@ -676,31 +676,43 @@ function initSidebarDragDrop() {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     clearDragOver();
-    el.classList.add('drag-over');
+    // Show insert indicator above or below based on cursor position
+    const rect = el.getBoundingClientRect();
+    const inLowerHalf = (e.clientY - rect.top) > rect.height / 2;
+    el.classList.add(inLowerHalf ? 'drag-over-below' : 'drag-over-above');
   });
   sidebar.addEventListener('drop', (e) => {
     const el = findItem(e);
     if (!el) return;
     e.preventDefault();
+    const rect = el.getBoundingClientRect();
+    const inLowerHalf = (e.clientY - rect.top) > rect.height / 2;
     clearDragOver();
     const isDivider = el.dataset.divider === 'true';
 
     if (_dragType === 'divider' && !isDivider) {
       const targetIdx = _workspaces.findIndex(w => w.id === parseInt(el.dataset.wsId));
       if (targetIdx >= 0) {
-        _wsDividerPos = targetIdx;
+        _wsDividerPos = inLowerHalf ? targetIdx + 1 : targetIdx;
         saveWorkspaceOrder();
         renderWorkspaces();
       }
     } else if (_dragType === 'ws') {
       if (isDivider) {
+        // Drop on divider: place just above or below divider
         const fromIdx = _workspaces.findIndex(w => w.id === _dragWsId);
         if (fromIdx >= 0) {
           let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
           const [moved] = _workspaces.splice(fromIdx, 1);
           if (fromIdx < dp) dp--;
-          _workspaces.splice(dp, 0, moved);
-          _wsDividerPos = dp;
+          const insertAt = inLowerHalf ? dp : (dp > 0 ? dp - 1 : 0);
+          _workspaces.splice(insertAt, 0, moved);
+          // Divider stays between same groups
+          if (inLowerHalf) {
+            _wsDividerPos = dp;
+          } else {
+            _wsDividerPos = dp;
+          }
           saveWorkspaceOrder();
           renderWorkspaces();
         }
@@ -708,14 +720,17 @@ function initSidebarDragDrop() {
         const targetId = parseInt(el.dataset.wsId);
         if (_dragWsId == null || _dragWsId === targetId) return;
         const fromIdx = _workspaces.findIndex(w => w.id === _dragWsId);
-        const toIdx = _workspaces.findIndex(w => w.id === targetId);
+        let toIdx = _workspaces.findIndex(w => w.id === targetId);
         if (fromIdx < 0 || toIdx < 0) return;
         let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
+        // Adjust divider when crossing it
         if (fromIdx < dp && toIdx >= dp) dp--;
         else if (fromIdx >= dp && toIdx < dp) dp++;
         _wsDividerPos = dp;
         const [moved] = _workspaces.splice(fromIdx, 1);
-        const insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
+        // inLowerHalf: insert after target, otherwise insert before
+        let insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
+        if (inLowerHalf) insertIdx++;
         _workspaces.splice(insertIdx, 0, moved);
         saveWorkspaceOrder();
         renderWorkspaces();
@@ -1375,7 +1390,11 @@ async function destroyWorkspace(id) {
     _historyTerminals[id].term.dispose();
     delete _historyTerminals[id];
   }
+  const removeIdx = _workspaces.findIndex(w => w.id === id);
   _workspaces = _workspaces.filter(w => w.id !== id);
+  if (removeIdx >= 0) {
+    _wsDividerPos = adjustDividerAfterRemove(_wsDividerPos, removeIdx, _workspaces.length);
+  }
   if (_selectedWsId === id) _selectedWsId = null;
   renderWorkspaces();
   await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
@@ -1683,6 +1702,15 @@ if (typeof document !== 'undefined') {
   setInterval(updateActivityDots, 1000);
 }
 
+/// Adjust divider position after a workspace is removed from the list.
+/// `removedIdx` is the index of the workspace that was removed.
+/// Returns the new divider position.
+function adjustDividerAfterRemove(dividerPos, removedIdx, newListLength) {
+  if (dividerPos == null) return null;
+  if (removedIdx < dividerPos) return dividerPos - 1;
+  return dividerPos;
+}
+
 /* Node.js exports for testing */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -1698,6 +1726,7 @@ if (typeof module !== 'undefined' && module.exports) {
     isAgentPaneSelected,
     shouldRecordOutput,
     morphdomShouldUpdate,
+    adjustDividerAfterRemove,
     _setProjects: (p) => { _projects = p; },
   };
 }

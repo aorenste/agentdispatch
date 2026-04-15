@@ -229,6 +229,7 @@ mod tests {
     e2e_file_test!(test_e2e_git_checkbox, "git-checkbox");
     e2e_file_test!(test_e2e_build_transition, "build-transition");
     e2e_file_test!(test_e2e_launch, "launch");
+    e2e_file_test!(test_e2e_workspace_reorder, "workspace-reorder");
     e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_title, "pane-title");
     e2e_file_test!(test_e2e_reconnect_scroll, "reconnect-scroll");

@@ -543,9 +543,20 @@ pub async fn delete_workspace(
     // Kill tmux session
     tmux::kill_session(&format!("ws-{id}"));
 
-    // Delete from DB
+    // Delete from DB, adjusting divider if workspace was above it
     let conn = db.lock().unwrap();
+    let workspaces = db::list_workspaces(&conn);
+    let removed_idx = workspaces.iter().position(|w| w.id == id);
     db::remove_workspace(&conn, id);
+    if let Some(idx) = removed_idx {
+        let divider_pos = db::get_setting(&conn, "ws_divider_pos")
+            .and_then(|v| v.parse::<usize>().ok());
+        if let Some(dp) = divider_pos {
+            if idx < dp {
+                db::set_setting(&conn, "ws_divider_pos", &(dp - 1).to_string());
+            }
+        }
+    }
     HttpResponse::Ok().json(serde_json::json!({"status": "removed"}))
 }
 

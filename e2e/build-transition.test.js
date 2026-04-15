@@ -25,7 +25,7 @@ if [ "$1" = "--list" ]; then
     echo "slow"
     exit 0
 fi
-sleep 10
+sleep 15
 `);
   fs.chmodSync(path.join(adDir, 'build.sh'), 0o755);
 
@@ -83,7 +83,7 @@ test('workspace shows build pane during building phase', async ({ page, request 
 });
 
 test('init tab persists after build completes and can be closed', async ({ page, request }) => {
-  await waitForReady(request, server.base, wsId);
+  await waitForReady(request, server.base, wsId, 100);
 
   await page.goto(server.base + '/');
   await page.click('text=Workspaces');
@@ -115,7 +115,7 @@ test('init tab persists after build completes and can be closed', async ({ page,
 
 test('switching away and back shows correct workspace after build completes', async ({ page, request }) => {
   // Wait for both workspaces to be ready
-  await waitForReady(request, server.base, wsId);
+  await waitForReady(request, server.base, wsId, 100);
   await waitForReady(request, server.base, wsId2);
 
   // Create a shell tab on ws2 so we can identify its content

@@ -100,8 +100,8 @@ function stopServer(server) {
 }
 
 /** Poll until a workspace reaches "ready" status */
-async function waitForReady(request, base, wsId) {
-  for (let i = 0; i < 30; i++) {
+async function waitForReady(request, base, wsId, maxPolls = 30) {
+  for (let i = 0; i < maxPolls; i++) {
     const res = await request.get(`${base}/api/workspaces`);
     const data = await res.json();
     const list = data.workspaces || data;

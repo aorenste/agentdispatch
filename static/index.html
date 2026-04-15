@@ -270,7 +270,8 @@
   .ws-sidebar-item:last-child { border-bottom: none; }
   .ws-sidebar-item:hover { background: rgba(99, 102, 241, 0.08); }
   .ws-sidebar-item.dragging { opacity: 0.4; }
-  .ws-sidebar-item.drag-over { border-top: 2px solid var(--accent); }
+  .ws-sidebar-item.drag-over-above { border-top: 2px solid var(--accent); }
+  .ws-sidebar-item.drag-over-below { border-bottom: 2px solid var(--accent); }
   .ws-divider {
     padding: 4px 12px;
     text-align: center;
@@ -282,7 +283,8 @@
     border-bottom: 1px solid var(--border);
   }
   .ws-divider.dragging { opacity: 0.2; }
-  .ws-divider.drag-over { border-top: 2px solid var(--accent); }
+  .ws-divider.drag-over-above { border-top: 2px solid var(--accent); }
+  .ws-divider.drag-over-below { border-bottom: 2px solid var(--accent); }
   .ws-sidebar-item.active { background: var(--accent-bg); }
   .ws-sidebar-info { flex: 1; min-width: 0; }
   .ws-sidebar-item .ws-name { font-weight: 600; color: var(--text-bright); font-size: 13px; }

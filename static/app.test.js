@@ -562,3 +562,42 @@ describe('morphdomShouldUpdate', () => {
     assert.equal(shouldUpdate(el('ws-popover open'), el('ws-popover open')), true);
   });
 });
+
+describe('adjustDividerAfterRemove', () => {
+  const adjust = app.adjustDividerAfterRemove;
+
+  // Workspaces: [A, B, --- divider at 2 ---, C, D]
+  // Removing A (idx 0, above divider) should shift divider from 2 to 1
+  test('removing workspace above divider shifts divider down', () => {
+    assert.equal(adjust(2, 0, 3), 1);
+  });
+
+  // Removing C (idx 2, below divider at 2) should not change divider
+  test('removing workspace below divider keeps divider', () => {
+    assert.equal(adjust(2, 2, 3), 2);
+  });
+
+  test('removing workspace at end keeps divider', () => {
+    assert.equal(adjust(2, 3, 3), 2);
+  });
+
+  // Removing B (idx 1, above divider at 2) should shift divider from 2 to 1
+  test('removing second workspace above divider shifts divider', () => {
+    assert.equal(adjust(2, 1, 3), 1);
+  });
+
+  // Divider at 0 (top), removing workspace below
+  test('divider at top, removing below keeps divider at 0', () => {
+    assert.equal(adjust(0, 1, 2), 0);
+  });
+
+  // Divider at end (all workspaces above)
+  test('divider at end, removing workspace above shifts divider', () => {
+    assert.equal(adjust(3, 1, 2), 2);
+  });
+
+  // Null divider
+  test('null divider stays null', () => {
+    assert.equal(adjust(null, 0, 2), null);
+  });
+});
