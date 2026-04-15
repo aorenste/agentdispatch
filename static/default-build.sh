@@ -8,4 +8,23 @@ if [ "$1" = "--list" ]; then
     exit 0
 fi
 
-# No-op build — override with a project-specific build.sh
+WORKTREE="${2:-.}"
+cd "$WORKTREE"
+
+# Init submodules if the project uses them (best-effort)
+if [ -f .gitmodules ]; then
+    echo "Initializing submodules..."
+    if ! git submodule update --init --recursive 2>/tmp/submodule-err-$$.log; then
+        echo "Warning: submodule init failed (cleaning up broken refs)"
+        cat /tmp/submodule-err-$$.log
+        # Clean up broken .git files pointing to incomplete gitdirs
+        find . -name .git -type f | while read f; do
+            dir=$(sed 's/gitdir: //' "$f")
+            if [ ! -f "$(dirname "$f")/$dir/HEAD" ]; then
+                echo "Removing broken submodule ref: $f"
+                rm -f "$f"
+            fi
+        done
+        rm -f /tmp/submodule-err-$$.log
+    fi
+fi
