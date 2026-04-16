@@ -159,26 +159,22 @@ pub fn set_window_option(session: &str, window: &str, option: &str, value: &str)
         .output();
 }
 
-/// Check if a pane's process has exited (with remain-on-exit, the pane stays visible).
-pub fn pane_is_dead(session: &str, window: &str) -> bool {
-    let target = format!("{session}:{window}");
-    tmux_base()
-        .args(["display-message", "-t", &target, "-p", "#{pane_dead}"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
-        .unwrap_or(true) // if we can't check, assume dead (don't block forever)
-}
-
-/// Get the exit status of a dead pane (after remain-on-exit).
-pub fn pane_exit_status(session: &str, window: &str) -> Option<i32> {
-    let target = format!("{session}:{window}");
+/// Check init pane status in a single tmux command.
+/// Returns None if the window doesn't exist or the command fails.
+/// Returns Some((dead, exit_status)) if successful.
+pub fn init_pane_status(session: &str) -> Option<(bool, Option<i32>)> {
+    let target = format!("{session}:init");
     let output = tmux_base()
-        .args(["display-message", "-t", &target, "-p", "#{pane_dead_status}"])
+        .args(["display-message", "-t", &target, "-p", "#{pane_dead} #{pane_dead_status}"])
         .output()
         .ok()?;
     if !output.status.success() { return None; }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    let s = String::from_utf8_lossy(&output.stdout);
+    let s = s.trim();
+    let mut parts = s.splitn(2, ' ');
+    let dead = parts.next()? == "1";
+    let status = parts.next().and_then(|v| v.parse::<i32>().ok());
+    Some((dead, status))
 }
 
 /// Query the pane ID and window ID for a given session:window.

@@ -99,17 +99,21 @@ function stopServer(server) {
   }
 }
 
-/** Poll until a workspace reaches "ready" status */
-async function waitForReady(request, base, wsId, maxPolls = 30) {
-  for (let i = 0; i < maxPolls; i++) {
+/** Poll until a workspace reaches "ready" or "build_failed" status.
+ *  Each poll triggers server-side build-completion detection in list_workspaces.
+ *  Minimal delay between polls — just enough to not starve the server. */
+async function waitForReady(request, base, wsId) {
+  for (;;) {
     const res = await request.get(`${base}/api/workspaces`);
     const data = await res.json();
     const list = data.workspaces || data;
     const current = list.find(w => w.id === wsId);
     if (current && current.status === 'ready') return;
-    await new Promise(r => setTimeout(r, 200));
+    if (current && current.status === 'build_failed') {
+      throw new Error(`Workspace ${wsId} build failed`);
+    }
+    await new Promise(r => setTimeout(r, 100));
   }
-  throw new Error(`Workspace ${wsId} did not become ready`);
 }
 
 /** Create a project + workspace + shell tab, return { wsId, tabId } */

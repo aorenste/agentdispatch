@@ -31,7 +31,9 @@ test.beforeAll(async ({ request }) => {
     });
     const ws = await res.json();
     wsIds.push(ws.id);
-    await waitForReady(request, server.base, ws.id, 50);
+  }
+  for (const id of wsIds) {
+    await waitForReady(request, server.base, id);
   }
 });
 
@@ -122,7 +124,7 @@ test('deleting workspace above divider shifts divider', async ({ page, request }
   });
   const ws = await res.json();
   wsIds[0] = ws.id;
-  await waitForReady(request, server.base, ws.id, 50);
+  await waitForReady(request, server.base, ws.id);
 });
 
 test('drag-drop reorder via JS: insert before', async ({ page, request }) => {

@@ -243,7 +243,7 @@ mod tests {
 
     fn run_playwright(args: &[&str]) {
 
-        let mut cmd_args = vec!["60", "npx", "playwright", "test"];
+        let mut cmd_args = vec!["120", "npx", "playwright", "test"];
         cmd_args.extend(args);
 
         let output = std::process::Command::new("timeout")

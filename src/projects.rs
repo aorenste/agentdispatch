@@ -264,14 +264,11 @@ pub async fn launch_project(
                         let tmux_session = format!("ws-{ws_id}");
                         let variant = variant_for_bash.as_deref().unwrap_or("");
 
-                        // Run init window (build script); agent window created by list_workspaces poll
                         let build_script = resolve_build_script(&root_dir_for_bash);
-                        tlog!("Workspace {ws_id} init: build_script={} worktree={path}", build_script.display());
                         let bs = shell_escape(&build_script.to_string_lossy());
                         let bv = shell_escape(variant);
                         let bp = shell_escape(&path);
                         let init_cmd = format!("bash '{bs}' '{bv}' '{bp}'");
-                        tlog!("Workspace {ws_id} init cmd: {init_cmd}");
 
                         if let Err(e) = tmux::new_session_ex(
                             &tmux_session, "init", &path, Some(&init_cmd), false,
@@ -279,7 +276,7 @@ pub async fn launch_project(
                             tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
                             db::update_workspace_status(&conn, ws_id, "error", Some(&path));
                         } else {
-                            tlog!("Workspace {ws_id} tmux session {tmux_session} created");
+                            tlog!("Workspace {ws_id} tmux session {tmux_session} created (building)");
                             tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
                             db::update_workspace_status(&conn, ws_id, "building", Some(&path));
                         }
@@ -304,19 +301,17 @@ pub async fn launch_project(
         let variant = body.build.as_deref().unwrap_or("");
 
         let build_script = resolve_build_script(&project.root_dir);
-        tlog!("Workspace {} init: build_script={} cwd={}", ws.id, build_script.display(), cwd);
         let bs = shell_escape(&build_script.to_string_lossy());
         let bv = shell_escape(variant);
         let bp = shell_escape(cwd);
         let init_cmd = format!("bash '{bs}' '{bv}' '{bp}'");
-        tlog!("Workspace {} init cmd: {init_cmd}", ws.id);
 
         if let Err(e) = tmux::new_session_ex(
             &tmux_session, "init", cwd, Some(&init_cmd), false,
         ) {
             tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
         } else {
-            tlog!("Workspace {} tmux session {tmux_session} created", ws.id);
+            tlog!("Workspace {} tmux session {tmux_session} created (building)", ws.id);
             tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
         }
     }
@@ -446,13 +441,13 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     for ws in &workspaces {
         if ws.status != "building" { continue; }
         let session = format!("ws-{}", ws.id);
-        if !tmux::has_session(&session) || !tmux::has_window(&session, "init") {
-            continue;
-        }
-        if !tmux::pane_is_dead(&session, "init") {
-            continue;
-        }
-        let ok = tmux::pane_exit_status(&session, "init").unwrap_or(-1);
+        // Single tmux command to check init pane status — avoids spawning
+        // multiple subprocesses per workspace per poll.
+        let Some((dead, exit_status)) = tmux::init_pane_status(&session) else {
+            continue; // window doesn't exist or command failed — skip
+        };
+        if !dead { continue; }
+        let Some(ok) = exit_status else { continue; }; // can't read status yet — retry next poll
         let cwd = ws.worktree_dir.as_deref().unwrap_or("");
         if ok == 0 {
             if let Some(proj) = projects.iter().find(|p| p.name == ws.project) {
@@ -479,7 +474,7 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
             v["agent_title"] = serde_json::json!(title);
         }
         let session = format!("ws-{}", ws.id);
-        if tmux::has_window(&session, "init") && tmux::pane_is_dead(&session, "init") {
+        if let Some((true, _)) = tmux::init_pane_status(&session) {
             v["has_init"] = serde_json::json!(true);
         }
         v
