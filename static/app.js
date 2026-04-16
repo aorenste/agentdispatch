@@ -868,21 +868,13 @@ function renderSelectedWorkspace() {
     main.innerHTML = '<div class="ws-empty" style="padding:16px;color:var(--red)">Workspace setup failed</div>';
     return;
   }
-  // Show build output in a terminal pane
-  if (ws.status === 'building' || ws.status === 'build_failed') {
-    // Don't rebuild if the init terminal is already showing
-    if (!document.getElementById('ws-build-pane')) {
-      const buildProj = _projects.find(p => p.name === ws.project);
-      const cwd = ws.worktree_dir || (buildProj ? buildProj.root_dir : null);
-      main.innerHTML = '<div class="ws-pane active" id="ws-build-pane" style="display:flex;flex-direction:column;flex:1;min-height:0"></div>';
-      const paneEl = document.getElementById('ws-build-pane');
-      initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
-    }
-    if (ws.status === 'building') startSetupPoll();
-    return;
+  const isBuilding = ws.status === 'building' || ws.status === 'build_failed';
+  if (isBuilding) {
+    startSetupPoll();
+  } else {
+    stopSetupPoll();
   }
-  stopSetupPoll();
-  const hasInitTerminal = ws.has_init && !_initClosed.has(ws.id);
+  const hasInitTerminal = isBuilding || (ws.has_init && !_initClosed.has(ws.id));
 
   // Stash terminal containers in a hidden div before rebuilding innerHTML.
   // This keeps them in the DOM so xterm.js viewport scroll state is preserved.
@@ -908,7 +900,7 @@ function renderSelectedWorkspace() {
   const proj = _projects.find(p => p.name === ws.project);
   const agent = getProjectAgent(proj);
   const agentEnabled = agent !== 'None';
-  _selectedWsSubtab = normalizeWsSubtab(ws, _selectedWsSubtab);
+  _selectedWsSubtab = isBuilding ? 'init' : normalizeWsSubtab(ws, _selectedWsSubtab);
   _wsSubtabs[ws.id] = _selectedWsSubtab;
 
   const tabButtons = ws.tabs.map(t => {
