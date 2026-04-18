@@ -27,8 +27,14 @@ if [ "$1" = "--list" ]; then
     echo "slow"
     exit 0
 fi
-# Wait for signal file — test creates it when ready for build to finish
-while [ ! -f "${signalFile}" ]; do sleep 0.1; done
+# Wait for signal file — test creates it when ready for build to finish.
+# Safety timeout: exit after 60s so we don't hang forever if the test fails.
+WAITED=0
+while [ ! -f "${signalFile}" ]; do
+    sleep 0.1
+    WAITED=$((WAITED + 1))
+    if [ $WAITED -ge 600 ]; then exit 1; fi
+done
 `);
   fs.chmodSync(path.join(adDir, 'build.sh'), 0o755);
 
@@ -86,8 +92,8 @@ test('workspace shows build pane during building phase', async ({ page, request 
   await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: PROJECT }).first().click();
 
-  // Should show the build terminal (init pane)
-  await page.waitForSelector('#ws-build-pane');
+  // Should show the build terminal (init pane) in the active pane
+  await page.waitForSelector('#ws-active-pane .xterm-screen');
 });
 
 test('init tab persists after build completes and can be closed', async ({ page, request }) => {

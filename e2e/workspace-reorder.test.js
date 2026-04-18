@@ -6,8 +6,6 @@ const PROJECT = 'e2e-reorder';
 let server;
 let wsIds = [];
 
-test.setTimeout(60000);
-
 test.beforeAll(async ({ request }) => {
   server = await startServer();
 

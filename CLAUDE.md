@@ -18,10 +18,13 @@ this I WILL FUCKING KILL YOU.
 
 ## Testing
 
-- `CARGO_TARGET_DIR=target/test cargo test` for Rust + JS unit tests
+- `CARGO_TARGET_DIR=target/test cargo test -- --test-threads=2` for Rust + JS unit tests.
+  E2E tests each spawn a server + Chromium + tmux, so limit parallelism to avoid
+  resource contention on shared machines. With unlimited threads on a 192-CPU machine,
+  22 simultaneous Chromium instances cause timeouts.
 - Playwright E2E tests use `target/test` automatically (configured in playwright.config.js)
-- The E2E test runner (`test_e2e_playwright`) wraps npx in `timeout 60` because
-  Playwright can hang on exit due to tmux child processes
+- The E2E test runner wraps npx in `timeout 180` because Playwright can hang
+  on exit due to tmux child processes
 - E2E tests run in parallel (4 workers). Each test file MUST use a unique project
   name and MUST only clean up its own workspaces (filter by project name). Never
   delete all workspaces — that nukes other tests running in parallel.

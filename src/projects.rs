@@ -268,7 +268,12 @@ pub async fn launch_project(
                         let bs = shell_escape(&build_script.to_string_lossy());
                         let bv = shell_escape(variant);
                         let bp = shell_escape(&path);
-                        let init_cmd = format!("bash '{bs}' '{bv}' '{bp}'");
+                        let status_file = format!("/tmp/agentdispatch-init-{ws_id}.status");
+                        let sf = shell_escape(&status_file);
+                        let init_cmd = format!("_sf='{sf}'; trap 'echo $? > \"$_sf\"' EXIT HUP; bash '{bs}' '{bv}' '{bp}'");
+
+                        // Remove stale status file
+                        let _ = std::fs::remove_file(&status_file);
 
                         if let Err(e) = tmux::new_session_ex(
                             &tmux_session, "init", &path, Some(&init_cmd), false,
@@ -277,7 +282,6 @@ pub async fn launch_project(
                             db::update_workspace_status(&conn, ws_id, "error", Some(&path));
                         } else {
                             tlog!("Workspace {ws_id} tmux session {tmux_session} created (building)");
-                            tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
                             db::update_workspace_status(&conn, ws_id, "building", Some(&path));
                         }
                     }
@@ -304,7 +308,12 @@ pub async fn launch_project(
         let bs = shell_escape(&build_script.to_string_lossy());
         let bv = shell_escape(variant);
         let bp = shell_escape(cwd);
-        let init_cmd = format!("bash '{bs}' '{bv}' '{bp}'");
+        let status_file = format!("/tmp/agentdispatch-init-{}.status", ws.id);
+        let sf = shell_escape(&status_file);
+        let init_cmd = format!("_sf='{sf}'; trap 'echo $? > \"$_sf\"' EXIT HUP; bash '{bs}' '{bv}' '{bp}'");
+
+        // Remove stale status file
+        let _ = std::fs::remove_file(&status_file);
 
         if let Err(e) = tmux::new_session_ex(
             &tmux_session, "init", cwd, Some(&init_cmd), false,
@@ -312,7 +321,6 @@ pub async fn launch_project(
             tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
         } else {
             tlog!("Workspace {} tmux session {tmux_session} created (building)", ws.id);
-            tmux::set_window_option(&tmux_session, "init", "remain-on-exit", "on");
         }
     }
     // For git worktree projects, tmux session is created after worktree setup (below)
@@ -425,45 +433,19 @@ pub async fn list_builds(
 #[get("/api/workspaces")]
 pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     let conn = db.lock().unwrap();
-    let workspaces = db::list_workspaces(&conn);
-    let projects = db::list_projects(&conn);
     let divider_pos = db::get_setting(&conn, "ws_divider_pos")
         .and_then(|v| v.parse::<i64>().ok());
 
     if !**use_tmux {
+        let workspaces = db::list_workspaces(&conn);
         let mut resp = serde_json::json!({ "workspaces": workspaces });
         if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
         return HttpResponse::Ok().json(resp);
     }
 
-    // Check "building" workspaces — if init pane is dead, finalize them.
-    // This replaces the fragile in-memory poll loop that died on restart.
-    for ws in &workspaces {
-        if ws.status != "building" { continue; }
-        let session = format!("ws-{}", ws.id);
-        // Single tmux command to check init pane status — avoids spawning
-        // multiple subprocesses per workspace per poll.
-        let Some((dead, exit_status)) = tmux::init_pane_status(&session) else {
-            continue; // window doesn't exist or command failed — skip
-        };
-        if !dead { continue; }
-        let Some(ok) = exit_status else { continue; }; // can't read status yet — retry next poll
-        let cwd = ws.worktree_dir.as_deref().unwrap_or("");
-        if ok == 0 {
-            if let Some(proj) = projects.iter().find(|p| p.name == ws.project) {
-                let agent_cmd = bash_script_cmd("claude", proj, &ws.build_variant, cwd);
-                let wt = ws.worktree_dir.as_deref().unwrap_or(&proj.root_dir);
-                tlog!("Build succeeded for workspace {} (detected in poll), creating agent window", ws.id);
-                let _ = tmux::new_window(&session, "agent", wt, Some(&agent_cmd));
-            }
-            db::update_workspace_status(&conn, ws.id, "ready", ws.worktree_dir.as_deref());
-        } else {
-            tlog!("Build failed for workspace {} (exit code {ok}, detected in poll)", ws.id);
-            db::update_workspace_status(&conn, ws.id, "build_failed", ws.worktree_dir.as_deref());
-        }
-    }
-
-    // Re-read workspaces after potential status changes
+    // Build completion is primarily detected by a background timer, but also
+    // check here so the response always reflects the latest state.
+    check_building_workspaces(&conn);
     let workspaces = db::list_workspaces(&conn);
 
     // Annotate with agent pane titles and init window presence
@@ -482,6 +464,50 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     let mut resp = serde_json::json!({ "workspaces": annotated });
     if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
     HttpResponse::Ok().json(resp)
+}
+
+/// Check all "building" workspaces and finalize any whose init pane has exited.
+/// Returns true if any workspace status changed (caller should notify clients).
+pub fn check_building_workspaces(conn: &rusqlite::Connection) -> bool {
+    let workspaces = db::list_workspaces(conn);
+    let projects = db::list_projects(conn);
+    let mut changed = false;
+    for ws in &workspaces {
+        if ws.status != "building" { continue; }
+        let session = format!("ws-{}", ws.id);
+        // Try tmux first, fall back to status file (handles race where pane
+        // exits before remain-on-exit is set, destroying the window).
+        let status_file = format!("/tmp/agentdispatch-init-{}.status", ws.id);
+        // Try tmux first (if remain-on-exit was set in time), then status file.
+        let ok: i32;
+        if let Some((true, exit_status)) = tmux::init_pane_status(&session) {
+            ok = exit_status.unwrap_or(0);
+        } else if let Ok(content) = std::fs::read_to_string(&status_file) {
+            ok = content.trim().parse().unwrap_or(-1);
+        } else {
+            continue; // not done yet
+        }
+        let _ = std::fs::remove_file(&status_file);
+        let cwd = ws.worktree_dir.as_deref().unwrap_or("");
+        if ok == 0 {
+            if let Some(proj) = projects.iter().find(|p| p.name == ws.project) {
+                let agent_cmd = bash_script_cmd("claude", proj, &ws.build_variant, cwd);
+                let wt = ws.worktree_dir.as_deref().unwrap_or(&proj.root_dir);
+                tlog!("Build succeeded for workspace {}, creating agent window", ws.id);
+                if tmux::has_session(&session) {
+                    let _ = tmux::new_window(&session, "agent", wt, Some(&agent_cmd));
+                } else {
+                    let _ = tmux::new_session(&session, "agent", wt, Some(&agent_cmd));
+                }
+            }
+            db::update_workspace_status(conn, ws.id, "ready", ws.worktree_dir.as_deref());
+        } else {
+            tlog!("Build failed for workspace {} (exit code {ok})", ws.id);
+            db::update_workspace_status(conn, ws.id, "build_failed", ws.worktree_dir.as_deref());
+        }
+        changed = true;
+    }
+    changed
 }
 
 #[post("/api/workspaces/{id}/kill-init")]

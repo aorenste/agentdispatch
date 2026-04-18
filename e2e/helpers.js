@@ -63,6 +63,14 @@ async function startServer() {
   const socket = `agentdispatch-e2e-${port}`;
   const db = `/tmp/agentdispatch-e2e-${port}.db`;
 
+  // Kill stale tmux server from previous failed runs
+  try {
+    require('child_process').execSync(
+      `tmux -L ${socket} kill-server 2>/dev/null || true`,
+      { stdio: 'ignore' }
+    );
+  } catch {}
+
   // Clean stale DB
   for (const suffix of ['', '-wal', '-shm']) {
     try { require('fs').unlinkSync(db + suffix); } catch {}
@@ -71,6 +79,13 @@ async function startServer() {
   const proc = spawn(BINARY, ['--db', db, '--port', String(port)], {
     env: { ...process.env, AGENTDISPATCH_TMUX_SOCKET: socket },
     stdio: 'pipe',
+  });
+
+  // Last-resort cleanup: if the process exits without stopServer (e.g. SIGTERM
+  // from the outer timeout wrapper), kill tmux + server to prevent orphans.
+  process.on('exit', () => {
+    try { require('child_process').execSync(`tmux -L ${socket} kill-server 2>/dev/null || true`, { stdio: 'ignore' }); } catch {}
+    try { proc.kill('SIGKILL'); } catch {}
   });
 
   // Log server stderr for debugging
@@ -85,14 +100,15 @@ async function startServer() {
 
 function stopServer(server) {
   if (!server) return;
-  server.proc.kill('SIGTERM');
-  // Clean up tmux sessions
+  // Kill tmux server FIRST — this ensures no child processes survive
   try {
     require('child_process').execSync(
       `tmux -L ${server.socket} kill-server 2>/dev/null || true`,
-      { stdio: 'ignore' }
+      { stdio: 'ignore', timeout: 5000 }
     );
   } catch {}
+  // Kill the server process and wait for it to exit
+  server.proc.kill('SIGKILL');
   // Clean up DB files
   for (const suffix of ['', '-wal', '-shm']) {
     try { require('fs').unlinkSync(server.db + suffix); } catch {}
@@ -100,9 +116,10 @@ function stopServer(server) {
 }
 
 /** Poll until a workspace reaches "ready" or "build_failed" status.
- *  Each poll triggers server-side build-completion detection in list_workspaces.
- *  Minimal delay between polls — just enough to not starve the server. */
+ *  Each GET /api/workspaces also runs the build-completion check server-side. */
 async function waitForReady(request, base, wsId) {
+  const start = Date.now();
+  let polls = 0;
   for (;;) {
     const res = await request.get(`${base}/api/workspaces`);
     const data = await res.json();
@@ -112,7 +129,13 @@ async function waitForReady(request, base, wsId) {
     if (current && current.status === 'build_failed') {
       throw new Error(`Workspace ${wsId} build failed`);
     }
-    await new Promise(r => setTimeout(r, 100));
+    polls++;
+    const elapsed = Date.now() - start;
+    if (elapsed > 10000 && polls % 50 === 0) {
+      const status = current ? current.status : 'not found';
+      process.stderr.write(`[waitForReady] ws ${wsId}: status=${status} after ${elapsed}ms (${polls} polls)\n`);
+    }
+    await new Promise(r => setTimeout(r, 200));
   }
 }
 

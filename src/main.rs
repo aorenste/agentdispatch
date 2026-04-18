@@ -99,6 +99,27 @@ async fn main() -> std::io::Result<()> {
     let build_hash = web::build_hash();
     tlog!("Build hash: {}", build_hash);
 
+    // Background task: check building workspaces and finalize them.
+    // Sends SSE notification so clients refresh without polling.
+    if use_tmux {
+        let db_bg = db_arc.clone();
+        let tx_bg = tx.clone();
+        let hash_bg = build_hash.clone();
+        actix_web::rt::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let changed = {
+                    let conn = db_bg.lock().unwrap();
+                    projects::check_building_workspaces(&conn)
+                };
+                if changed {
+                    let _ = tx_bg.send(web::UpdateBatch { build_hash: hash_bg.clone() });
+                }
+            }
+        });
+    }
+
     println!("http://localhost:{}", args.port);
 
     let tx_data = actix_web::web::Data::new(tx);

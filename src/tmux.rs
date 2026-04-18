@@ -106,6 +106,16 @@ pub fn new_session_ex(session: &str, window: &str, cwd: &str, cmd: Option<&str>,
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+    if !keep_shell {
+        // Set remain-on-exit so the pane stays visible after the build finishes.
+        // Race note: if the pane exits before this, the window is destroyed and
+        // init_pane_status returns None — check_building_workspaces handles this
+        // by looking for a status file written by the wrapper command.
+        let target = format!("{session}:{window}");
+        let _ = tmux_base()
+            .args(["set-option", "-t", &target, "remain-on-exit", "on"])
+            .output();
+    }
     ensure_server_config();
     Ok(())
 }
@@ -152,12 +162,10 @@ pub fn kill_window(session: &str, window: &str) {
         .output();
 }
 
-pub fn set_window_option(session: &str, window: &str, option: &str, value: &str) {
-    let target = format!("{session}:{window}");
-    let _ = tmux_base()
-        .args(["set-option", "-t", &target, option, value])
-        .output();
-}
+
+
+
+
 
 /// Check init pane status in a single tmux command.
 /// Returns None if the window doesn't exist or the command fails.

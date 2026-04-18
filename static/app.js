@@ -142,6 +142,8 @@ function connectSSE() {
     if (data.build_hash && data.build_hash !== buildHash) {
       location.reload();
     }
+    // Server detected a workspace status change — refresh
+    fetchWorkspaces();
   });
 
   evtSource.onerror = () => {
@@ -842,8 +844,6 @@ async function renameTab(tabId) {
   });
 }
 
-let _setupPollTimer = null;
-
 function renderSelectedWorkspace() {
   const main = document.getElementById('ws-main');
   const ws = _workspaces.find(w => w.id === _selectedWsId);
@@ -861,7 +861,6 @@ function renderSelectedWorkspace() {
   };
   if (setupPhases[ws.status]) {
     main.innerHTML = '<div class="ws-empty" style="padding:16px">' + setupPhases[ws.status] + '</div>';
-    startSetupPoll();
     return;
   }
   if (ws.status === 'error') {
@@ -869,11 +868,6 @@ function renderSelectedWorkspace() {
     return;
   }
   const isBuilding = ws.status === 'building' || ws.status === 'build_failed';
-  if (isBuilding) {
-    startSetupPoll();
-  } else {
-    stopSetupPoll();
-  }
   const hasInitTerminal = isBuilding || (ws.has_init && !_initClosed.has(ws.id));
 
   // Stash terminal containers in a hidden div before rebuilding innerHTML.
@@ -953,17 +947,7 @@ function renderSelectedWorkspace() {
   updateActivityDots();
 }
 
-function startSetupPoll() {
-  if (_setupPollTimer) return;
-  _setupPollTimer = setInterval(() => fetchWorkspaces(), 1000);
-}
 
-function stopSetupPoll() {
-  if (_setupPollTimer) {
-    clearInterval(_setupPollTimer);
-    _setupPollTimer = null;
-  }
-}
 
 function reconnectAllTerminals() {
   for (const [key, entry] of Object.entries(_tabTerminals)) {
