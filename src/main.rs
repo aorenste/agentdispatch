@@ -1,6 +1,12 @@
 #![deny(warnings)]
 
-/// Like `eprintln!` but prepends a timestamp.
+/// Global log file handle. Initialized by `init_log_file` at startup.
+/// `tlog!` writes to this AND stderr so diagnostics survive across runs.
+pub static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
+    std::sync::OnceLock::new();
+
+/// Like `eprintln!` but prepends a timestamp. Writes to stderr and, if
+/// `LOG_FILE` has been initialized, to the log file as well.
 macro_rules! tlog {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
@@ -12,9 +18,19 @@ macro_rules! tlog {
         let m = (secs / 60) % 60;
         let s = secs % 60;
         let ms = now.subsec_millis();
-        let mut stderr = std::io::stderr().lock();
-        let _ = write!(stderr, "{h:02}:{m:02}:{s:02}.{ms:03} ");
-        let _ = writeln!(stderr, $($arg)*);
+        let prefix = format!("{h:02}:{m:02}:{s:02}.{ms:03} ");
+        let body = format!($($arg)*);
+        {
+            let mut stderr = std::io::stderr().lock();
+            let _ = write!(stderr, "{prefix}");
+            let _ = writeln!(stderr, "{body}");
+        }
+        if let Some(f) = $crate::LOG_FILE.get() {
+            if let Ok(mut f) = f.lock() {
+                let _ = write!(f, "{prefix}");
+                let _ = writeln!(f, "{body}");
+            }
+        }
     }};
 }
 
@@ -27,6 +43,35 @@ mod web;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+/// Open the log file in append mode and install it as the global sink.
+/// Also writes a header with PID and startup timestamp so separate runs
+/// are easy to tell apart in the file.
+fn init_log_file(path: &std::path::Path) {
+    use std::io::Write as _;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+    let mut file = match file {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to open log file {}: {e}", path.display());
+            return;
+        }
+    };
+    let pid = std::process::id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let _ = writeln!(
+        file,
+        "\n===== agentdispatch start pid={pid} epoch={}.{:03} =====",
+        now.as_secs(),
+        now.subsec_millis()
+    );
+    let _ = LOG_FILE.set(std::sync::Mutex::new(file));
+}
 
 use actix_web::{App, HttpServer};
 use clap::Parser;
@@ -42,6 +87,11 @@ struct Args {
     #[arg(long, default_value = "agentdispatch.db")]
     db: PathBuf,
 
+    /// Path to log file (stderr is mirrored here). Defaults to the db path
+    /// with extension replaced by ".log".
+    #[arg(long)]
+    log: Option<PathBuf>,
+
     /// Disable tmux (use direct shell for terminals)
     #[arg(long)]
     no_tmux: bool,
@@ -56,6 +106,14 @@ async fn main() -> std::io::Result<()> {
     let args = Args::parse();
 
     let use_tmux = !args.no_tmux;
+
+    let log_path = args.log.clone().unwrap_or_else(|| {
+        let mut p = args.db.clone();
+        p.set_extension("log");
+        p
+    });
+    init_log_file(&log_path);
+    tlog!("agentdispatch starting (pid={}, log={})", std::process::id(), log_path.display());
 
     if args.reset {
         tlog!("Resetting: killing tmux server and deleting database");
@@ -75,6 +133,9 @@ async fn main() -> std::io::Result<()> {
             tlog!("Error: tmux is required but not found in PATH (use --no-tmux to disable)");
             std::process::exit(1);
         }
+        tmux::log_startup_diagnostics();
+        tmux::spawn_socket_watcher();
+        actix_web::rt::spawn(tmux::run_health_check());
     }
 
     let conn = db::init_db(&args.db);

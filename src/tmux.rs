@@ -4,30 +4,153 @@ use std::sync::atomic::{AtomicU64, Ordering};
 fn socket_name() -> String {
     std::env::var("AGENTDISPATCH_TMUX_SOCKET").unwrap_or_else(|_| "agentdispatch".to_string())
 }
+
+/// Full filesystem path of the tmux socket file we use.
+pub fn socket_path() -> String {
+    let uid = unsafe { nix::libc::getuid() };
+    format!("/tmp/tmux-{uid}/{}", socket_name())
+}
+
 static ATTACH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Remove stale tmux socket if the server is dead.
-/// This handles the case where the tmux server crashed or was killed
-/// but left its socket file behind.
+/// Outcome of probing the tmux socket file. Made public for tests and
+/// startup diagnostics.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum SocketProbe {
+    /// Socket file does not exist.
+    Missing,
+    /// Socket file exists and a process is accepting connections on it.
+    Live,
+    /// Socket file exists but nothing is listening (ECONNREFUSED).
+    /// Definitely safe to unlink.
+    Stale,
+    /// Socket file exists but connect() returned an error we don't
+    /// understand (EACCES, EAGAIN, etc). Conservative — do not unlink.
+    Unknown(std::io::ErrorKind),
+}
+
+/// Probe the socket by attempting a Unix-domain connect. Unlike asking
+/// tmux, this talks directly to the kernel so it can't be fooled by a
+/// tmux client that's merely slow.
+pub fn probe_socket(path: &str) -> SocketProbe {
+    if !std::path::Path::new(path).exists() {
+        return SocketProbe::Missing;
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => SocketProbe::Live,
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => SocketProbe::Stale,
+        Err(e) => SocketProbe::Unknown(e.kind()),
+    }
+}
+
+/// Remove the tmux socket file *only* if we are confident nothing is
+/// listening on it. We verify this with a direct `connect(2)` rather
+/// than relying on a single `tmux list-sessions` call — a transient
+/// failure of that command used to cause us to unlink the socket out
+/// from under a healthy server, leaving the sessions orphaned (alive
+/// but unreachable via the path).
 fn clean_stale_socket() {
-    let output = tmux_base()
-        .args(["list-sessions"])
-        .output();
-    match output {
-        Ok(o) if !o.status.success() => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            if stderr.contains("server exited unexpectedly") || stderr.contains("no server running") {
-                // Socket is stale — remove it
-                let uid = unsafe { nix::libc::getuid() };
-                {
-                    let socket_path = format!("/tmp/tmux-{uid}/{}", socket_name());
-                    let _ = std::fs::remove_file(&socket_path);
-                    tlog!("Removed stale tmux socket: {socket_path}");
+    let path = socket_path();
+    let probe = probe_socket(&path);
+    tlog!("clean_stale_socket: path={path} probe={probe:?}");
+    match probe {
+        SocketProbe::Missing | SocketProbe::Live | SocketProbe::Unknown(_) => {
+            // Nothing to do (or not safe to do anything).
+            return;
+        }
+        SocketProbe::Stale => {}
+    }
+
+    // Double-check via tmux as a belt-and-braces guard. Retry a few
+    // times to ride out transient hiccups. Only unlink if every attempt
+    // agrees the server is gone.
+    for attempt in 1..=3 {
+        let output = tmux_base().args(["list-sessions"]).output();
+        match output {
+            Ok(o) if o.status.success() => {
+                tlog!(
+                    "clean_stale_socket: list-sessions succeeded on attempt {attempt} — \
+                     server came back, not unlinking"
+                );
+                return;
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stderr = stderr.trim();
+                let recognised = stderr.contains("server exited unexpectedly")
+                    || stderr.contains("no server running");
+                tlog!(
+                    "clean_stale_socket: attempt {attempt} failed (status={}): {stderr}",
+                    o.status
+                );
+                if !recognised {
+                    tlog!("clean_stale_socket: unrecognised error, not unlinking");
+                    return;
                 }
             }
+            Err(e) => {
+                tlog!("clean_stale_socket: attempt {attempt} run error: {e} — not unlinking");
+                return;
+            }
         }
-        Err(_) => {}
-        _ => {}
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(_) => tlog!("clean_stale_socket: removed stale tmux socket: {path}"),
+        Err(e) => tlog!("clean_stale_socket: failed to remove {path}: {e}"),
+    }
+}
+
+/// Log everything we know about the tmux socket at startup. If the
+/// socket file is ever replaced or corrupted between runs, these lines
+/// will show the before/after state side by side in the log file.
+pub fn log_startup_diagnostics() {
+    let path = socket_path();
+    tlog!("tmux diag: socket path = {path}");
+
+    match std::fs::metadata(&path) {
+        Ok(md) => {
+            use std::os::unix::fs::MetadataExt as _;
+            let mtime = md.mtime();
+            tlog!(
+                "tmux diag: socket file inode={} mode={:o} uid={} mtime={} size={}",
+                md.ino(),
+                md.mode(),
+                md.uid(),
+                mtime,
+                md.len()
+            );
+        }
+        Err(e) => tlog!("tmux diag: no socket file ({e})"),
+    }
+
+    tlog!("tmux diag: probe = {:?}", probe_socket(&path));
+
+    match Command::new("tmux").arg("-V").output() {
+        Ok(o) => tlog!(
+            "tmux diag: version = {}",
+            String::from_utf8_lossy(&o.stdout).trim()
+        ),
+        Err(e) => tlog!("tmux diag: tmux -V failed: {e}"),
+    }
+
+    let ls = tmux_base().args(["list-sessions"]).output();
+    match ls {
+        Ok(o) if o.status.success() => {
+            let body = String::from_utf8_lossy(&o.stdout);
+            let count = body.lines().count();
+            tlog!("tmux diag: server reachable, {count} session(s)");
+            for line in body.lines() {
+                tlog!("tmux diag:   {line}");
+            }
+        }
+        Ok(o) => tlog!(
+            "tmux diag: list-sessions failed ({}): {}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tlog!("tmux diag: list-sessions run error: {e}"),
     }
 }
 
@@ -435,6 +558,92 @@ pub fn check_installed() -> bool {
     ok
 }
 
+/// Spawn a background thread that uses inotify to watch the parent of
+/// the tmux socket file, and logs every create/delete/move/attrib event
+/// that targets our filename. This catches external `rm`, renames from
+/// another process, and the server's own exit — all with a timestamp,
+/// so the log file tells us exactly when the socket went bad.
+pub fn spawn_socket_watcher() {
+    use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+
+    let full = socket_path();
+    let pathbuf = std::path::PathBuf::from(&full);
+    let Some(parent) = pathbuf.parent().map(|p| p.to_path_buf()) else {
+        tlog!("socket watcher: {full} has no parent dir, not watching");
+        return;
+    };
+    let Some(name) = pathbuf.file_name().map(|n| n.to_owned()) else {
+        tlog!("socket watcher: {full} has no file name, not watching");
+        return;
+    };
+
+    // The parent dir (/tmp/tmux-<uid>) may not exist yet at startup if
+    // no tmux command has run. Create it so inotify has something to
+    // watch; tmux itself uses mode 0700 on this directory.
+    if !parent.exists() {
+        let _ = std::fs::create_dir_all(&parent);
+    }
+
+    std::thread::spawn(move || {
+        loop {
+            let Ok(inotify) = Inotify::init(InitFlags::empty()) else {
+                tlog!("socket watcher: inotify init failed, giving up");
+                return;
+            };
+            let flags = AddWatchFlags::IN_CREATE
+                | AddWatchFlags::IN_DELETE
+                | AddWatchFlags::IN_MOVED_TO
+                | AddWatchFlags::IN_MOVED_FROM
+                | AddWatchFlags::IN_ATTRIB;
+            if let Err(e) = inotify.add_watch(&parent, flags) {
+                tlog!("socket watcher: add_watch({}) failed: {e} — retrying in 30s", parent.display());
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                continue;
+            }
+            tlog!("socket watcher: watching {} for {}", parent.display(), name.to_string_lossy());
+
+            loop {
+                let events = match inotify.read_events() {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        tlog!("socket watcher: read_events failed: {e} — reinitialising");
+                        break;
+                    }
+                };
+                for ev in events {
+                    if ev.name.as_deref() == Some(name.as_os_str()) {
+                        let probe = probe_socket(&full);
+                        tlog!(
+                            "socket watcher: {} on {} mask={:?} → probe={:?}",
+                            parent.display(),
+                            name.to_string_lossy(),
+                            ev.mask,
+                            probe
+                        );
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
+}
+
+/// Periodic sanity check: log whenever the socket probe result changes.
+/// Runs forever on the actix runtime.
+pub async fn run_health_check() {
+    let path = socket_path();
+    let mut prev: Option<SocketProbe> = None;
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        let now = probe_socket(&path);
+        if prev.as_ref() != Some(&now) {
+            tlog!("socket health: state {prev:?} -> {now:?}");
+            prev = Some(now);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,5 +802,101 @@ mod tests {
             "list_sessions should include {session}, got: {sessions:?}");
 
         test_kill_session(session);
+    }
+
+    /// Helper: build a unique temp path inside /tmp so probe tests don't
+    /// collide with each other or with the real tmux socket.
+    fn scratch_path(tag: &str) -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let pid = std::process::id();
+        format!("/tmp/agentdispatch-probe-{tag}-{pid}-{ns}")
+    }
+
+    #[test]
+    fn test_probe_socket_missing() {
+        let p = scratch_path("missing");
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(probe_socket(&p), SocketProbe::Missing);
+    }
+
+    #[test]
+    fn test_probe_socket_live_listener() {
+        let p = scratch_path("live");
+        let _ = std::fs::remove_file(&p);
+        let _listener = std::os::unix::net::UnixListener::bind(&p)
+            .expect("bind unix listener");
+        assert_eq!(probe_socket(&p), SocketProbe::Live);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn test_probe_socket_stale_after_listener_drops() {
+        // Bind a listener, drop it (which closes the fd but leaves the
+        // socket file on disk — exactly the stale-socket scenario).
+        let p = scratch_path("stale");
+        let _ = std::fs::remove_file(&p);
+        {
+            let listener = std::os::unix::net::UnixListener::bind(&p)
+                .expect("bind unix listener");
+            drop(listener);
+        }
+        assert_eq!(probe_socket(&p), SocketProbe::Stale);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// End-to-end check that inotify actually sees a delete+recreate
+    /// of the watched filename — the exact pattern the watcher is
+    /// meant to catch.
+    #[test]
+    fn test_inotify_sees_delete_and_recreate() {
+        use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+        let dir = std::env::temp_dir().join(format!(
+            "agentdispatch-itest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let target = dir.join("sock");
+        std::fs::write(&target, b"").expect("write target");
+
+        let inotify = Inotify::init(InitFlags::IN_NONBLOCK).expect("inotify init");
+        inotify
+            .add_watch(&dir, AddWatchFlags::IN_CREATE | AddWatchFlags::IN_DELETE)
+            .expect("add_watch");
+
+        std::fs::remove_file(&target).expect("delete");
+        std::fs::write(&target, b"").expect("recreate");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let mut saw_delete = false;
+        let mut saw_create = false;
+        while std::time::Instant::now() < deadline && !(saw_delete && saw_create) {
+            match inotify.read_events() {
+                Ok(events) => {
+                    for ev in events {
+                        if ev.name.as_deref() == Some(target.file_name().unwrap()) {
+                            if ev.mask.contains(AddWatchFlags::IN_DELETE) {
+                                saw_delete = true;
+                            }
+                            if ev.mask.contains(AddWatchFlags::IN_CREATE) {
+                                saw_create = true;
+                            }
+                        }
+                    }
+                }
+                Err(nix::errno::Errno::EAGAIN) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("read_events: {e}"),
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(saw_delete, "expected IN_DELETE for {}", target.display());
+        assert!(saw_create, "expected IN_CREATE for {}", target.display());
     }
 }
