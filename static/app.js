@@ -13,6 +13,7 @@ const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 const _wsWasSelected = {}; // workspace id -> was agent pane selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
+const _wsDead = new Set(); // workspace ids whose agent pane has exited
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
 const _wsTitles = {}; // workspace id -> pane title string
 const _initClosed = new Set(); // workspace ids where user closed the init tab
@@ -556,11 +557,12 @@ function updateActivityDots() {
     _wsLastOutput[ws.id] = r.outputMs;
     _wsWasSelected[ws.id] = isSelected;
     if (r.graceUntil) _wsOutputGrace[ws.id] = r.graceUntil;
+    const dotClass = _wsDead.has(ws.id) ? 'dead' : r.state;
     const sidebar = document.getElementById('activity-ws-' + ws.id);
-    if (sidebar) sidebar.className = 'activity-dot' + (r.state ? ' ' + r.state : '');
+    if (sidebar) sidebar.className = 'activity-dot' + (dotClass ? ' ' + dotClass : '');
     const tab = document.getElementById('activity-tab-' + ws.id);
-    if (tab) tab.className = 'activity-dot' + (r.state ? ' ' + r.state : '');
-    if (r.notify) notifyIdle(ws.name);
+    if (tab) tab.className = 'activity-dot' + (dotClass ? ' ' + dotClass : '');
+    if (r.notify && !_wsDead.has(ws.id)) notifyIdle(ws.name);
   }
 }
 
@@ -1050,6 +1052,9 @@ function initTerminal(key, paneEl, opts) {
 
   const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true };
   _tabTerminals[key] = entry;
+  if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
+    _wsDead.delete(opts.workspaceId);
+  }
 
   function connectWs() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1079,6 +1084,9 @@ function initTerminal(key, paneEl, opts) {
         if (typeof key === 'number') {
           console.log('[pane_exit] auto-closing tab ' + key);
           closeTab(key);
+        } else if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
+          _wsDead.add(opts.workspaceId);
+          updateActivityDots();
         }
         return;
       }
