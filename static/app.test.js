@@ -601,3 +601,37 @@ describe('adjustDividerAfterRemove', () => {
     assert.equal(adjust(null, 0, 2), null);
   });
 });
+
+describe('clearPaneError', () => {
+  const clear = app.clearPaneError;
+
+  test('clears connectError flag', () => {
+    const entry = { connectError: true, container: { querySelector: () => null } };
+    clear(entry);
+    assert.equal(entry.connectError, false);
+  });
+
+  test('removes overlay element when present', () => {
+    let removed = false;
+    const overlay = { remove: () => { removed = true; } };
+    const entry = {
+      connectError: true,
+      container: { querySelector: (sel) => sel === '.pane-error-overlay' ? overlay : null },
+    };
+    clear(entry);
+    assert.equal(removed, true);
+    assert.equal(entry.connectError, false);
+  });
+
+  test('noop when no overlay present and flag already false', () => {
+    const entry = { connectError: false, container: { querySelector: () => null } };
+    clear(entry);
+    assert.equal(entry.connectError, false);
+  });
+
+  test('tolerates missing container', () => {
+    const entry = { connectError: true };
+    clear(entry);
+    assert.equal(entry.connectError, false);
+  });
+});

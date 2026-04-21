@@ -374,14 +374,24 @@ fn spawn_cc_bridge(
         };
 
         let mut reader = CcReader::new(read_pane_id);
-        reader.set_window_id(window_id);
+        reader.set_window_id(window_id.clone());
         reader.set_alternate_screen(last_alt_screen);
         let mut raw_buf = [0u8; 4096];
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
         ping_interval.tick().await;
 
+        // Register to receive cross-reader notifications when OUR window
+        // is unlinked (tmux only delivers that event to grouped peers).
+        let registered_window_id = window_id.clone();
+        let own_close = tmux_cc::register_window_close(registered_window_id.clone());
+
         'outer: loop {
             tokio::select! {
+                _ = own_close.notified() => {
+                    tlog!("[terminal] {log_link} pane={log_pane}: window closed (observed by peer), sending pane_exit");
+                    let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
+                    break 'outer;
+                }
                 ready_result = tokio_fd_read.readable() => {
                     let mut ready = match ready_result {
                         Ok(r) => r,
@@ -430,6 +440,10 @@ fn spawn_cc_bridge(
                                         let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
                                         break 'outer;
                                     }
+                                    CcEvent::OtherWindowClosed { window_id: wid } => {
+                                        // Route to whichever reader owns that window.
+                                        tmux_cc::notify_window_closed(&wid);
+                                    }
                                 }
                             }
                         }
@@ -444,6 +458,7 @@ fn spawn_cc_bridge(
                 }
             }
         }
+        tmux_cc::unregister_window_close(&registered_window_id);
         let _ = session_clone.close(None).await;
     });
 

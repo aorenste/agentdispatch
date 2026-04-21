@@ -3,6 +3,49 @@
 //! Provides encoding/decoding for the tmux control mode protocol,
 //! plus `CcReader` (protocol parser) and `CcWriter` (command encoder).
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::Notify;
+
+// -- Window-close notification registry --
+//
+// In production tmux routes `%unlinked-window-close @X` events to the
+// grouped clients that are NOT the one whose window was destroyed.  So
+// the pane that actually died never sees its own close — we have to
+// route the event cross-reader.  Each WS handler registers its window_id
+// here and waits on the returned Notify; whichever other reader observes
+// the close event calls `notify_window_closed(id)`.
+
+fn registry() -> &'static Mutex<HashMap<String, Arc<Notify>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a window_id to listen for cross-reader close events.
+/// Returns a `Notify` whose `notified()` future resolves when any reader
+/// observes `%unlinked-window-close` for this window.
+pub fn register_window_close(window_id: String) -> Arc<Notify> {
+    let notify = Arc::new(Notify::new());
+    registry().lock().unwrap().insert(window_id, notify.clone());
+    notify
+}
+
+/// Remove a previously registered window_id.  Idempotent.
+pub fn unregister_window_close(window_id: &str) {
+    registry().lock().unwrap().remove(window_id);
+}
+
+/// Signal that `window_id` was observed being closed.  No-op if the
+/// window is not currently registered.  Uses `notify_one` so the signal
+/// is stored as a permit even if no waiter is currently polling —
+/// the first future to await `notified()` will immediately resolve.
+pub fn notify_window_closed(window_id: &str) {
+    let notify = registry().lock().unwrap().get(window_id).cloned();
+    if let Some(n) = notify {
+        n.notify_one();
+    }
+}
+
 // -- Protocol encode/decode --
 
 /// Decode a tmux control mode %output value.
@@ -153,9 +196,13 @@ pub enum CcEvent {
     /// This fires when the linked session is killed (e.g. reconnection cleanup)
     /// as well as when the session has no more windows.
     Exit,
-    /// The pane's window was destroyed (shell exited).
-    /// Only fires on %unlinked-window-close / %window-close matching our window.
+    /// Our own window was destroyed.  In production tmux does not deliver
+    /// this to the pane that actually died — it only arrives in other
+    /// grouped clients and gets routed here via the window-close registry.
     WindowClosed,
+    /// Observed `%unlinked-window-close` for a window other than ours.
+    /// The caller should route this to whichever reader owns `window_id`.
+    OtherWindowClosed { window_id: String },
 }
 
 /// Parses tmux control mode output from raw PTY bytes.
@@ -294,11 +341,9 @@ impl CcReader {
                         self.saw_exit = true;
                         return Some(CcEvent::WindowClosed);
                     }
-                    tlog!("[cc] pane={}: {line_str} — ignored (our window is {wid})", self.pane_id);
-                } else {
-                    tlog!("[cc] pane={}: {line_str} — ignored (no window_id set)", self.pane_id);
                 }
-                continue;
+                tlog!("[cc] pane={}: {line_str} — emitting OtherWindowClosed", self.pane_id);
+                return Some(CcEvent::OtherWindowClosed { window_id: rest.to_string() });
             }
 
             // All other % lines (notifications, %begin/%end, etc.) — skip
@@ -494,25 +539,97 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_window_close_wrong_id_ignored() {
+    fn test_reader_unlinked_other_window_emits_other_closed() {
+        // tmux routes %unlinked-window-close events to OTHER grouped clients,
+        // not the pane whose window was destroyed.  So the case that fires in
+        // production is "different window id from ours" — we must surface this
+        // as an event the caller can route, not silently drop it.
         let mut r = CcReader::new("%0".to_string());
         r.set_window_id("@1".to_string());
         r.feed(b"%unlinked-window-close @2\r\n%output %0 data\r\n");
+        match r.next_event() {
+            Some(CcEvent::OtherWindowClosed { window_id }) => assert_eq!(window_id, "@2"),
+            other => panic!("expected OtherWindowClosed, got {:?}", other.is_some()),
+        }
+        match r.next_event() {
+            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
+            other => panic!("expected Output after OtherWindowClosed, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_reader_unlinked_no_window_id_emits_other_closed() {
+        // With no window_id set we can't match "ours", so the close must
+        // still surface as OtherWindowClosed so a registry-based router can
+        // dispatch it to whoever does own that window.
+        let mut r = CcReader::new("%0".to_string());
+        r.feed(b"%unlinked-window-close @7\r\n%output %0 data\r\n");
+        match r.next_event() {
+            Some(CcEvent::OtherWindowClosed { window_id }) => assert_eq!(window_id, "@7"),
+            other => panic!("expected OtherWindowClosed, got {:?}", other.is_some()),
+        }
         match r.next_event() {
             Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
             other => panic!("expected Output, got {:?}", other.is_some()),
         }
     }
 
-    #[test]
-    fn test_reader_window_close_no_window_id_set() {
-        let mut r = CcReader::new("%0".to_string());
-        // No set_window_id call — window close should be ignored
-        r.feed(b"%unlinked-window-close @1\r\n%output %0 data\r\n");
-        match r.next_event() {
-            Some(CcEvent::Output { data, .. }) => assert_eq!(data, b"data"),
-            other => panic!("expected Output, got {:?}", other.is_some()),
+    // --- window close registry ---
+
+    #[actix_web::test]
+    async fn test_registry_notifies_registered_window() {
+        let notify = register_window_close("@ntest1".to_string());
+        // Simulate another reader seeing our window get unlinked
+        notify_window_closed("@ntest1");
+        tokio::time::timeout(std::time::Duration::from_millis(100), notify.notified())
+            .await
+            .expect("expected notification to fire");
+        unregister_window_close("@ntest1");
+    }
+
+    #[actix_web::test]
+    async fn test_registry_ignores_unregistered_window() {
+        // Calling notify on an unregistered id is a no-op (doesn't panic).
+        notify_window_closed("@never-registered");
+    }
+
+    #[actix_web::test]
+    async fn test_reader_and_registry_route_close_across_readers() {
+        // Simulates real tmux behavior: pane A's window is destroyed.
+        // Pane A's own reader sees nothing (or %exit, handled elsewhere).
+        // Pane B's reader sees `%unlinked-window-close @A_window`, emits
+        // OtherWindowClosed, and the caller routes it to A via the registry.
+        let a_notify = register_window_close("@route-A".to_string());
+
+        let mut reader_b = CcReader::new("%B".to_string());
+        reader_b.set_window_id("@route-B".to_string());
+        reader_b.feed(b"%unlinked-window-close @route-A\r\n");
+        match reader_b.next_event() {
+            Some(CcEvent::OtherWindowClosed { window_id }) => {
+                notify_window_closed(&window_id);
+            }
+            other => panic!("expected OtherWindowClosed, got {:?}", other.is_some()),
         }
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), a_notify.notified())
+            .await
+            .expect("expected A's notify to fire after B observed A's close");
+        unregister_window_close("@route-A");
+    }
+
+    #[actix_web::test]
+    async fn test_registry_unregister_stops_notifications() {
+        let notify = register_window_close("@ntest2".to_string());
+        unregister_window_close("@ntest2");
+        notify_window_closed("@ntest2");
+        // Should NOT fire within a short window (registration was dropped)
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            notify.notified(),
+        )
+        .await
+        .is_err();
+        assert!(timed_out, "notification fired after unregister");
     }
 
     /// %exit must produce CcEvent::Exit (NOT WindowClosed), even when a

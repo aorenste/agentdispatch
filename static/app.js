@@ -1073,6 +1073,7 @@ function initTerminal(key, paneEl, opts) {
     ws.onopen = () => {
       entry.connected = true;
       entry.connectedAt = Date.now();
+      clearPaneError(entry);
       // Only focus if this terminal is in the active pane (not stashed)
       if (entry.container.closest('#ws-active-pane')) term.focus();
     };
@@ -1695,6 +1696,13 @@ function adjustDividerAfterRemove(dividerPos, removedIdx, newListLength) {
   return dividerPos;
 }
 
+function clearPaneError(entry) {
+  entry.connectError = false;
+  if (!entry.container || typeof entry.container.querySelector !== 'function') return;
+  const overlay = entry.container.querySelector('.pane-error-overlay');
+  if (overlay) overlay.remove();
+}
+
 /* Node.js exports for testing */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
@@ -1711,6 +1719,7 @@ if (typeof module !== 'undefined' && module.exports) {
     shouldRecordOutput,
     morphdomShouldUpdate,
     adjustDividerAfterRemove,
+    clearPaneError,
     _setProjects: (p) => { _projects = p; },
   };
 }
