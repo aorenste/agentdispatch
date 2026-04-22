@@ -556,8 +556,10 @@ function shouldRecordOutput(isSelected, now, graceUntil) {
 // lastOutputMs: timestamp of last text output (ms), or null/undefined
 // now: current time (ms)
 // isSelected: whether this workspace is currently selected by the user
-function computeDotState(prev, lastOutputMs, now, isSelected) {
+// isBuilding: whether the init/build is still running (forces busy regardless of output)
+function computeDotState(prev, lastOutputMs, now, isSelected, isBuilding) {
   if (isSelected) return '';
+  if (isBuilding) return 'busy';
   const age = lastOutputMs != null ? now - lastOutputMs : Infinity;
   const recentOutput = age < 5000;
 
@@ -581,8 +583,8 @@ function computeDotState(prev, lastOutputMs, now, isSelected) {
 
 // Full tick: compute new state and clear output if user is watching.
 // Returns { state, outputMs, notify, graceUntil }.
-function tickDot(prev, lastOutputMs, now, isSelected, wasSelected) {
-  const state = computeDotState(prev, lastOutputMs, now, isSelected);
+function tickDot(prev, lastOutputMs, now, isSelected, wasSelected, isBuilding) {
+  const state = computeDotState(prev, lastOutputMs, now, isSelected, isBuilding);
   const justDeselected = wasSelected && !isSelected;
   return {
     state,
@@ -598,7 +600,8 @@ function updateActivityDots() {
     const prev = _wsDotState[ws.id] || '';
     const isSelected = isAgentPaneSelected(_selectedWsId, _selectedWsSubtab, ws.id);
     const wasSelected = _wsWasSelected[ws.id] || false;
-    const r = tickDot(prev, _wsLastOutput[ws.id], now, isSelected, wasSelected);
+    const isBuilding = ws.status === 'building';
+    const r = tickDot(prev, _wsLastOutput[ws.id], now, isSelected, wasSelected, isBuilding);
     _wsDotState[ws.id] = r.state;
     _wsLastOutput[ws.id] = r.outputMs;
     _wsWasSelected[ws.id] = isSelected;

@@ -369,6 +369,24 @@ describe('computeDotState', () => {
   test('done goes gray when selected with no output', () => {
     assert.equal(compute('done', null, now, true), '');
   });
+
+  // Building forces busy regardless of char output
+  test('building forces busy with no output', () => {
+    assert.equal(compute('', null, now, false, true), 'busy');
+  });
+
+  test('building forces busy even if previously done', () => {
+    assert.equal(compute('done', now - 30000, now, false, true), 'busy');
+  });
+
+  test('building forces busy overrides stale-output gray rule', () => {
+    assert.equal(compute('', now - 30000, now, false, true), 'busy');
+  });
+
+  // Selected still wins over building (user is watching)
+  test('building with selected returns gray', () => {
+    assert.equal(compute('busy', now, now, true, true), '');
+  });
 });
 
 describe('tickDot', () => {
