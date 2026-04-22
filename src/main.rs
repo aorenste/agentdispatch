@@ -214,6 +214,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::create_tab)
             .service(projects::update_tab)
             .service(projects::delete_tab)
+            .service(projects::client_log)
             .service(projects::list_conda_envs)
             .service(projects::check_git)
     })

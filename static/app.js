@@ -1,5 +1,50 @@
 /* AgentDispatch UI */
 
+/* Mirror console.log/warn/error to the server so they land in agentdispatch.log.
+ * Entries are batched (flushed on size/time threshold and on page unload). */
+(function() {
+  const MAX_BATCH = 20;
+  const FLUSH_DELAY_MS = 500;
+  const queue = [];
+  let flushTimer = null;
+  let inFlight = false;
+  function flush() {
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (inFlight || queue.length === 0) return;
+    const entries = queue.splice(0, queue.length);
+    inFlight = true;
+    fetch('/api/client-log', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({entries}),
+      keepalive: true,
+    }).catch(() => {}).finally(() => { inFlight = false; if (queue.length) schedule(); });
+  }
+  function schedule() {
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, FLUSH_DELAY_MS);
+  }
+  function enqueue(level, args) {
+    let msg;
+    try {
+      msg = args.map(a => {
+        if (typeof a === 'string') return a;
+        if (a instanceof Error) return a.stack || a.message;
+        try { return JSON.stringify(a); } catch { return String(a); }
+      }).join(' ');
+    } catch { msg = '[unserializable]'; }
+    queue.push({level, msg});
+    if (queue.length >= MAX_BATCH) flush(); else schedule();
+  }
+  for (const level of ['log', 'warn', 'error']) {
+    const orig = console[level].bind(console);
+    console[level] = function(...args) { orig(...args); enqueue(level, args); };
+  }
+  window.addEventListener('beforeunload', flush);
+  window.addEventListener('error', (e) => enqueue('error', [`window.onerror: ${e.message} at ${e.filename}:${e.lineno}:${e.colno}`, e.error]));
+  window.addEventListener('unhandledrejection', (e) => enqueue('error', ['unhandledrejection:', e.reason]));
+})();
+
 let evtSource = null;
 let buildHash = null;
 let _projects = [];
@@ -480,6 +525,7 @@ async function fetchWorkspaces() {
     const res = await fetch('/api/workspaces');
     const data = await res.json();
     const workspaces = data.workspaces || data; // handle wrapped or raw format
+    console.log('[workspaces]', workspaces.map(w => w.id + ':' + w.name + ':' + (w.tabs ? w.tabs.length : 0) + 'tabs' + (w.tabs && w.tabs.length ? '=' + w.tabs.map(t => t.id + '/' + t.name).join(',') : '')));
     _workspaces = workspaces;
     if (data.divider_pos != null) {
       _wsDividerPos = data.divider_pos;
@@ -786,6 +832,7 @@ function confirmCloseTab(tabId, tabName) {
 }
 
 async function closeTab(tabId) {
+  console.log('[closeTab]', tabId, 'called from:', new Error().stack);
   disposeTerminal(tabId);
   await fetch(`/api/tabs/${tabId}`, {method: 'DELETE'});
   const ws = _workspaces.find(w => w.id === _selectedWsId);

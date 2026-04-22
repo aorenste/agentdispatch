@@ -766,10 +766,32 @@ pub async fn delete_tab(
     let conn = db.lock().unwrap();
     // Kill tmux window before removing from DB
     if let Some(ws_id) = db::get_workspace_id_for_tab(&conn, tab_id) {
+        tlog!("[api] DELETE /api/tabs/{tab_id} (ws-{ws_id}): killing tmux window and removing from DB");
         tmux::kill_window(&format!("ws-{ws_id}"), &format!("tab-{tab_id}"));
+    } else {
+        tlog!("[api] DELETE /api/tabs/{tab_id}: no workspace found for tab, removing from DB only");
     }
     db::remove_workspace_tab(&conn, tab_id);
     HttpResponse::Ok().json(serde_json::json!({"status": "removed"}))
+}
+
+#[derive(Deserialize)]
+pub struct ClientLogEntry {
+    level: String,
+    msg: String,
+}
+
+#[derive(Deserialize)]
+pub struct ClientLogBody {
+    entries: Vec<ClientLogEntry>,
+}
+
+#[post("/api/client-log")]
+pub async fn client_log(body: web::Json<ClientLogBody>) -> HttpResponse {
+    for entry in &body.entries {
+        tlog!("[client {}] {}", entry.level, entry.msg);
+    }
+    HttpResponse::Ok().finish()
 }
 
 #[derive(Deserialize)]
