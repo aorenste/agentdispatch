@@ -943,9 +943,9 @@ function renderSelectedWorkspace() {
   main.innerHTML = `
     <div class="ws-subtabs">
       ${hasInitTerminal ? `<button class="ws-subtab ${_selectedWsSubtab === 'init' ? 'active' : ''}" onclick="switchWsSubtab('init')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); closeInitTab(${ws.id})">\u2715</span><span class="ws-subtab-label">Init</span></span></button>` : ''}
-      ${agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span id="activity-tab-${ws.id}" class="activity-dot"></span><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
-      ${tabButtons}
-      <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
+      ${!isBuilding && agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span id="activity-tab-${ws.id}" class="activity-dot"></span><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
+      ${!isBuilding ? tabButtons : ''}
+      ${!isBuilding ? `<button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>` : ''}
     </div>
     <div class="ws-pane active" id="ws-active-pane"></div>
   `;
