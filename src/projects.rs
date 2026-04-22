@@ -176,156 +176,113 @@ pub async fn launch_project(
         .unwrap_or(default_name);
 
     let needs_worktree = project.git;
-    let status = if needs_worktree { "setting_up" } else if **use_tmux { "building" } else { "ready" };
+    let variant = body.build.as_deref().unwrap_or("");
 
-    // Insert workspace into DB immediately
-    let ws = {
-        let conn = db.lock().unwrap();
-        let variant = body.build.as_deref().unwrap_or("");
-        db::add_workspace(&conn, &ws_name, &project_name, None, status, variant)
-    };
-
-    // Spawn worktree creation in background
-    if needs_worktree {
-        let root_dir = project.root_dir.clone();
-        let use_tmux_val = **use_tmux;
+    // For git worktree projects, predict the worktree path so the DB row has
+    // it from the start and the init tmux session can be created immediately
+    // (running fetch + worktree add + build all in the visible pane).
+    let (worktree_dir, init_cwd): (Option<String>, String) = if needs_worktree {
         let wt_name = generate_worktree_name();
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let base = std::path::PathBuf::from(&home).join("local/worktrees");
-        let wt_path = base.join(&wt_name);
+        let wt_path = std::path::PathBuf::from(&home).join("local/worktrees").join(&wt_name);
         let wt_path_str = wt_path.to_string_lossy().to_string();
-        let revision = body.revision.clone().unwrap_or_default();
-        let do_fetch = body.fetch;
-        let build_variant = body.build.clone();
-        let ws_id = ws.id;
-        let db = db.clone();
+        (Some(wt_path_str), project.root_dir.clone())
+    } else {
+        (None, project.root_dir.clone())
+    };
 
-        actix_web::rt::spawn(async move {
-            let db2 = db.clone();
-            let root_dir_for_bash = root_dir.clone();
-            let variant_for_bash = build_variant.clone();
-            let result = web::block(move || {
-                let set_phase = |phase: &str| {
-                    let conn = db2.lock().unwrap();
-                    db::update_workspace_status(&conn, ws_id, phase, None);
-                };
-                // Fetch latest from remotes if requested (best-effort, 30s timeout)
-                if do_fetch {
-                    set_phase("fetching");
-                    tlog!("Fetching latest for workspace {ws_id}...");
-                    let fetch_result = std::process::Command::new("timeout")
-                        .args(["30", "git", "fetch", "--all"])
-                        .current_dir(&root_dir)
-                        .output();
-                    match fetch_result {
-                        Ok(o) if o.status.success() => {
-                            tlog!("Fetch succeeded for workspace {ws_id}");
-                        }
-                        Ok(o) => {
-                            let stderr = String::from_utf8_lossy(&o.stderr);
-                            tlog!("Warning: git fetch failed for workspace {ws_id}: {}", stderr.trim());
-                        }
-                        Err(e) => {
-                            tlog!("Warning: git fetch failed for workspace {ws_id}: {e}");
-                        }
-                    }
-                }
-                set_phase("creating_worktree");
-                std::fs::create_dir_all(&base)?;
-                let mut args = vec![
-                    "worktree".to_string(),
-                    "add".to_string(),
-                    "--detach".to_string(),
-                    wt_path_str.clone(),
-                ];
-                if !revision.is_empty() {
-                    args.push(revision);
-                }
-                let output = std::process::Command::new("git")
-                    .args(&args)
-                    .current_dir(&root_dir)
-                    .output()?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, stderr.to_string()));
-                }
-                // Submodule init is handled by the build script (default-build.sh
-                // or a project-specific override).
-                Ok(wt_path_str)
-            })
-            .await;
+    let status = if **use_tmux { "building" } else { "ready" };
 
-            let conn = db.lock().unwrap();
-            match result {
-                Ok(Ok(path)) => {
-                    if !use_tmux_val {
-                        db::update_workspace_status(&conn, ws_id, "ready", Some(&path));
-                    } else {
-                        let tmux_session = format!("ws-{ws_id}");
-                        let variant = variant_for_bash.as_deref().unwrap_or("");
+    // Insert workspace into DB with predicted worktree_dir + "building" status
+    let ws = {
+        let conn = db.lock().unwrap();
+        db::add_workspace(&conn, &ws_name, &project_name, worktree_dir.as_deref(), status, variant)
+    };
 
-                        let build_script = resolve_build_script(&root_dir_for_bash);
-                        let bs = shell_escape(&build_script.to_string_lossy());
-                        let bv = shell_escape(variant);
-                        let bp = shell_escape(&path);
-                        let status_file = format!("/tmp/agentdispatch-init-{ws_id}.status");
-                        let sf = shell_escape(&status_file);
-                        let init_cmd = format!("_sf='{sf}'; trap 'echo $? > \"$_sf\"' EXIT HUP; bash '{bs}' '{bv}' '{bp}'");
-
-                        // Remove stale status file
-                        let _ = std::fs::remove_file(&status_file);
-
-                        if let Err(e) = tmux::new_session_ex(
-                            &tmux_session, "init", &path, Some(&init_cmd), false,
-                        ) {
-                            tlog!("Failed to create tmux session for workspace {ws_id}: {e}");
-                            db::update_workspace_status(&conn, ws_id, "error", Some(&path));
-                        } else {
-                            tlog!("Workspace {ws_id} tmux session {tmux_session} created (building)");
-                            db::update_workspace_status(&conn, ws_id, "building", Some(&path));
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    tlog!("Worktree creation failed for workspace {ws_id}: {e}");
-                    db::update_workspace_status(&conn, ws_id, "error", None);
-                }
-                Err(e) => {
-                    tlog!("Worktree creation failed for workspace {ws_id}: {e}");
-                    db::update_workspace_status(&conn, ws_id, "error", None);
-                }
-            }
-        });
-    }
-
-    // Create tmux session for non-worktree projects (if tmux is enabled)
-    if **use_tmux && !needs_worktree {
+    if **use_tmux {
         let tmux_session = format!("ws-{}", ws.id);
-        let cwd = &project.root_dir;
-        let variant = body.build.as_deref().unwrap_or("");
-
         let build_script = resolve_build_script(&project.root_dir);
-        let bs = shell_escape(&build_script.to_string_lossy());
-        let bv = shell_escape(variant);
-        let bp = shell_escape(cwd);
+        let build_path = worktree_dir.as_deref().unwrap_or(&project.root_dir);
         let status_file = format!("/tmp/agentdispatch-init-{}.status", ws.id);
-        let sf = shell_escape(&status_file);
-        let init_cmd = format!("_sf='{sf}'; trap 'echo $? > \"$_sf\"' EXIT HUP; bash '{bs}' '{bv}' '{bp}'");
+        let init_cmd = build_init_command(
+            &status_file,
+            needs_worktree,
+            body.fetch,
+            body.revision.as_deref().unwrap_or(""),
+            &build_script.to_string_lossy(),
+            variant,
+            build_path,
+        );
 
         // Remove stale status file
         let _ = std::fs::remove_file(&status_file);
 
         if let Err(e) = tmux::new_session_ex(
-            &tmux_session, "init", cwd, Some(&init_cmd), false,
+            &tmux_session, "init", &init_cwd, Some(&init_cmd), false,
         ) {
             tlog!("Failed to create tmux session for workspace {}: {e}", ws.id);
+            let conn = db.lock().unwrap();
+            db::update_workspace_status(&conn, ws.id, "error", worktree_dir.as_deref());
         } else {
             tlog!("Workspace {} tmux session {tmux_session} created (building)", ws.id);
         }
     }
-    // For git worktree projects, tmux session is created after worktree setup (below)
 
     HttpResponse::Ok().json(ws)
+}
+
+/// Build the init shell command that runs inside the tmux init pane.
+///
+/// For git-worktree workspaces, does fetch (optional) + `git worktree add` +
+/// build script — all in the same pane so the user sees output from t=0. For
+/// non-git workspaces, just runs the build script. Either way, an EXIT trap
+/// writes the final exit status to `status_file` so `check_building_workspaces`
+/// can detect completion even if the pane exits before remain-on-exit is set.
+fn build_init_command(
+    status_file: &str,
+    needs_worktree: bool,
+    do_fetch: bool,
+    revision: &str,
+    build_script: &str,
+    variant: &str,
+    build_path: &str,
+) -> String {
+    let sf = shell_escape(status_file);
+    let bs = shell_escape(build_script);
+    let bv = shell_escape(variant);
+    let bp = shell_escape(build_path);
+
+    let mut script = format!(
+        "_sf='{sf}'; trap 'echo $? > \"$_sf\"' EXIT HUP\n\
+         set -e\n"
+    );
+
+    if needs_worktree {
+        if do_fetch {
+            script.push_str(
+                "echo '=== Fetching latest from remote ==='\n\
+                 timeout 30 git fetch --all || echo 'Warning: fetch failed'\n",
+            );
+        }
+        let wt_parent = std::path::Path::new(build_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let wtp = shell_escape(&wt_parent);
+        let rev_arg = if revision.is_empty() {
+            String::new()
+        } else {
+            format!(" '{}'", shell_escape(revision))
+        };
+        script.push_str(&format!(
+            "mkdir -p '{wtp}'\n\
+             echo '=== Creating worktree at {bp} ==='\n\
+             git worktree add --detach '{bp}'{rev_arg}\n"
+        ));
+    }
+
+    script.push_str(&format!("bash '{bs}' '{bv}' '{bp}'\n"));
+    script
 }
 
 #[delete("/api/projects/{name}")]

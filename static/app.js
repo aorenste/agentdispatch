@@ -2,7 +2,7 @@
 
 /* Mirror console.log/warn/error to the server so they land in agentdispatch.log.
  * Entries are batched (flushed on size/time threshold and on page unload). */
-(function() {
+if (typeof window !== 'undefined') (function() {
   const MAX_BATCH = 20;
   const FLUSH_DELAY_MS = 500;
   const queue = [];
@@ -901,17 +901,6 @@ function renderSelectedWorkspace() {
     return;
   }
 
-  // Show setup message while workspace is being prepared
-  const setupPhases = {
-    'setting_up': 'Setting up workspace\u2026',
-    'fetching': 'Fetching latest from remote\u2026',
-    'creating_worktree': 'Creating worktree\u2026',
-    'init_submodules': 'Initializing submodules\u2026',
-  };
-  if (setupPhases[ws.status]) {
-    main.innerHTML = '<div class="ws-empty" style="padding:16px">' + setupPhases[ws.status] + '</div>';
-    return;
-  }
   if (ws.status === 'error') {
     main.innerHTML = '<div class="ws-empty" style="padding:16px;color:var(--red)">Workspace setup failed</div>';
     return;
