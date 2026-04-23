@@ -59,6 +59,7 @@ const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 const _wsWasSelected = {}; // workspace id -> was agent pane selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
 const _wsDead = new Set(); // workspace ids whose agent pane has exited
+const _exitedTabs = new Set(); // tab ids whose pane has exited (kept until user dismisses)
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
 const _wsTitles = {}; // workspace id -> pane title string
 const _initClosed = new Set(); // workspace ids where user closed the init tab
@@ -837,6 +838,7 @@ function confirmCloseTab(tabId, tabName) {
 async function closeTab(tabId) {
   console.log('[closeTab]', tabId, 'called from:', new Error().stack);
   disposeTerminal(tabId);
+  _exitedTabs.delete(tabId);
   await fetch(`/api/tabs/${tabId}`, {method: 'DELETE'});
   const ws = _workspaces.find(w => w.id === _selectedWsId);
   if (ws) ws.tabs = ws.tabs.filter(t => t.id !== tabId);
@@ -940,7 +942,8 @@ function renderSelectedWorkspace() {
 
   const tabButtons = ws.tabs.map(t => {
     const tabKey = 'tab-' + t.id;
-    return `<button class="ws-subtab ${_selectedWsSubtab === tabKey ? 'active' : ''}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
+    const exitedClass = _exitedTabs.has(t.id) ? ' exited' : '';
+    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
   }).join('');
 
   main.innerHTML = `
@@ -1119,11 +1122,13 @@ function initTerminal(key, paneEl, opts) {
 
     ws.onmessage = (e) => {
       if (typeof e.data === 'string' && e.data.startsWith('{"type":"pane_exit"')) {
-        // Auto-close shell tabs when their pane exits
+        // Mark the pane exited but do NOT auto-delete. The pane can die for many
+        // reasons — shell exit, tmux churn, bugs — and losing tabs to transient
+        // events loses work. User dismisses via the close (X) button.
         console.log('[pane_exit] received for key=' + key + ' (type=' + typeof key + ')');
         if (typeof key === 'number') {
-          console.log('[pane_exit] auto-closing tab ' + key);
-          closeTab(key);
+          _exitedTabs.add(key);
+          renderSelectedWorkspace();
         } else if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
           _wsDead.add(opts.workspaceId);
           updateActivityDots();

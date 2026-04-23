@@ -388,6 +388,18 @@ fn spawn_cc_bridge(
         'outer: loop {
             tokio::select! {
                 _ = own_close.notified() => {
+                    // A peer observed %unlinked-window-close for our window. That event
+                    // fires both for real destruction AND when a linked session dies
+                    // (tmux broadcasts it as "unlinked from the dying session"). Verify
+                    // the window is truly gone before reporting the pane as exited.
+                    let wid = registered_window_id.clone();
+                    let still_alive = tokio::task::spawn_blocking(move || tmux::window_exists(&wid))
+                        .await
+                        .unwrap_or(false);
+                    if still_alive {
+                        tlog!("[terminal] {log_link} pane={log_pane}: peer close notification ignored (window {registered_window_id} still exists)");
+                        continue 'outer;
+                    }
                     tlog!("[terminal] {log_link} pane={log_pane}: window closed (observed by peer), sending pane_exit");
                     let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
                     break 'outer;

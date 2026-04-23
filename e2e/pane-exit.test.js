@@ -18,7 +18,7 @@ test.afterAll(async ({ request }) => {
   stopServer(server);
 });
 
-test('Shell tab auto-closes when shell exits', async ({ page }) => {
+test('Shell tab is marked exited (not deleted) when shell exits', async ({ page }) => {
   await connectToTerminal(page);
 
   // Verify the tab button exists
@@ -27,19 +27,18 @@ test('Shell tab auto-closes when shell exits', async ({ page }) => {
   // Type exit to close the shell
   await typeCmd(page, 'exit');
 
-  // The tab should disappear from the UI
-  await page.waitForFunction(() => {
-    return !document.querySelector('.ws-subtab-label')
-      || ![...document.querySelectorAll('.ws-subtab-label')].some(el => el.textContent === 'Shell');
-  });
+  // Tab should gain the `.exited` class but remain in the DOM.
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('.ws-subtab')]
+      .some(el => el.classList.contains('exited')
+        && el.querySelector('.ws-subtab-label')?.textContent === 'Shell')
+  );
 
-  // Verify via API that the tab was deleted
+  // Tab still exists in the API — it's only a visual mark, not a deletion.
   const wsRes = await page.request.get(`${server.base}/api/workspaces`);
   const wsData = await wsRes.json();
   const workspaces = wsData.workspaces || wsData;
   const ws = workspaces.find(w => w.id === wsId);
-  if (ws) {
-    const shellTabs = ws.tabs.filter(t => t.id === tabId);
-    expect(shellTabs.length).toBe(0);
-  }
+  expect(ws).toBeTruthy();
+  expect(ws.tabs.some(t => t.id === tabId)).toBe(true);
 });

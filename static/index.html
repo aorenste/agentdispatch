@@ -372,6 +372,8 @@
   }
   .ws-subtab:hover { color: var(--text); }
   .ws-subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .ws-subtab.exited .ws-subtab-label { text-decoration: line-through; opacity: 0.6; }
+  .ws-subtab.exited .ws-subtab-close { color: var(--red); }
   .ws-subtab-add {
     color: var(--text-muted); font-size: 18px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;

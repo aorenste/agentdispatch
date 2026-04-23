@@ -186,6 +186,25 @@ pub fn has_window(session: &str, window: &str) -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+/// Check whether a window with the given `@N` id still exists in any session.
+/// `%unlinked-window-close @X` fires both for real destruction AND when a
+/// linked session dies (tmux broadcasts that its windows were unlinked from
+/// the dying session, even though they remain in the main session). This
+/// helper distinguishes the two so callers can ignore spurious notifications.
+pub fn window_exists(window_id: &str) -> bool {
+    let output = tmux_base()
+        .args(["list-windows", "-a", "-F", "#{window_id}"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|l| l.trim() == window_id)
+        }
+        _ => false,
+    }
+}
+
 /// Apply global tmux options needed for the web UI.
 /// In control mode (-C) most settings are irrelevant since tmux doesn't render
 /// to the terminal. We only set history-limit for scrollback.
@@ -272,14 +291,20 @@ pub fn kill_server() {
         .output();
 }
 
+#[track_caller]
 pub fn kill_session(session: &str) {
+    let caller = std::panic::Location::caller();
+    tlog!("[tmux] kill_session {session} (called from {}:{})", caller.file(), caller.line());
     let _ = tmux_base()
         .args(["kill-session", "-t", session])
         .output();
 }
 
+#[track_caller]
 pub fn kill_window(session: &str, window: &str) {
+    let caller = std::panic::Location::caller();
     let target = format!("{session}:{window}");
+    tlog!("[tmux] kill_window {target} (called from {}:{})", caller.file(), caller.line());
     let _ = tmux_base()
         .args(["kill-window", "-t", &target])
         .output();
@@ -341,6 +366,7 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
     let prefix = format!("{session}--{window}-");
     for sess_name in list_sessions() {
         if sess_name.starts_with(&prefix) {
+            tlog!("[tmux] attach_args: killing stale linked session {sess_name}");
             let _ = tmux_base()
                 .args(["kill-session", "-t", &sess_name])
                 .output();
@@ -456,25 +482,45 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
         .output()
         .ok()?;
 
+    Some(assemble_capture_output(
+        scrollback.as_ref().filter(|o| o.status.success()).map(|o| o.stdout.as_slice()),
+        &content.stdout,
+        if cursor.status.success() { Some(&cursor.stdout) } else { None },
+    ))
+}
+
+/// Pure assembly of the capture-pane output bytes we send to xterm.js.
+/// Separated from `capture_pane_with_cursor` so the byte layout can be
+/// tested without a live tmux process.
+///
+/// `cursor_info`, when present, is the raw stdout of `list-panes -F "cursor_x
+/// cursor_y cursor_flag pane_height"`.
+fn assemble_capture_output(
+    scrollback_stdout: Option<&[u8]>,
+    visible_stdout: &[u8],
+    cursor_info: Option<&[u8]>,
+) -> Vec<u8> {
     let mut result = Vec::new();
 
     // Parse pane height from cursor info (needed to split scrollback from visible)
-    let pane_height = if cursor.status.success() {
-        let s = String::from_utf8_lossy(&cursor.stdout);
-        s.lines().next()
-            .and_then(|l| l.trim().split(' ').nth(3))
-            .and_then(|h| h.parse::<usize>().ok())
-            .unwrap_or(24)
-    } else {
-        24
-    };
+    let pane_height = cursor_info
+        .map(|c| String::from_utf8_lossy(c).to_string())
+        .and_then(|s| s.lines().next().map(str::to_string))
+        .and_then(|l| l.trim().split(' ').nth(3).map(str::to_string))
+        .and_then(|h| h.parse::<usize>().ok())
+        .unwrap_or(24);
 
     // Write scrollback lines as regular output (creates xterm.js scrollback).
     // capture-pane -S - returns scrollback + visible; we strip the visible
     // portion (last pane_height lines) since we paint that separately below.
-    if let Some(ref sb) = scrollback {
-        if sb.status.success() && !sb.stdout.is_empty() {
-            let mut all_stdout = sb.stdout.as_slice();
+    // Insert \x1b[m (full SGR reset) before each newline so the next line
+    // starts with a clean graphic state — tmux's -e only emits attribute
+    // changes on cell boundaries, so blank cells at line starts can inherit
+    // stale SGR from the previous line (e.g. emacs's inverse mode line
+    // bleeding into the line below it).
+    if let Some(sb) = scrollback_stdout {
+        if !sb.is_empty() {
+            let mut all_stdout = sb;
             if all_stdout.last() == Some(&b'\n') {
                 all_stdout = &all_stdout[..all_stdout.len() - 1];
             }
@@ -483,7 +529,7 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
             if sb_count > 0 {
                 for line in &all_lines[..sb_count] {
                     result.extend_from_slice(line);
-                    result.extend_from_slice(b"\r\n");
+                    result.extend_from_slice(b"\x1b[m\r\n");
                 }
                 // Push all scrollback lines off-screen by writing enough
                 // blank newlines to fill the visible area.
@@ -497,22 +543,26 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
     }
 
     // Write visible area with absolute positioning (existing behavior)
-    let mut stdout = content.stdout.as_slice();
+    let mut stdout = visible_stdout;
     if stdout.last() == Some(&b'\n') {
         stdout = &stdout[..stdout.len() - 1];
     }
-    result.extend_from_slice(b"\x1b[H");
+    result.extend_from_slice(b"\x1b[H\x1b[m");
     for &byte in stdout {
         if byte == b'\n' {
-            result.extend_from_slice(b"\r\n");
+            result.extend_from_slice(b"\x1b[m\r\n");
         } else {
             result.push(byte);
         }
     }
+    // Reset once more so the cursor is positioned with clean SGR state —
+    // otherwise the user's next keystroke inherits whatever attributes
+    // were active at the end of the last captured cell.
+    result.extend_from_slice(b"\x1b[m");
 
     // Position cursor
-    if cursor.status.success() {
-        let cursor_str = String::from_utf8_lossy(&cursor.stdout);
+    if let Some(c) = cursor_info {
+        let cursor_str = String::from_utf8_lossy(c);
         if let Some(line) = cursor_str.lines().next() {
             let parts: Vec<&str> = line.trim().split(' ').collect();
             if parts.len() >= 2 {
@@ -529,7 +579,7 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
         }
     }
 
-    Some(result)
+    result
 }
 
 /// Query whether a pane is currently in alternate screen mode.
@@ -647,6 +697,78 @@ pub async fn run_health_check() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Pure assembly tests (no tmux required) --
+
+    // Cursor info format: "cursor_x cursor_y cursor_flag pane_height"
+    fn cursor(x: u32, y: u32, visible: u32, h: usize) -> Vec<u8> {
+        format!("{x} {y} {visible} {h}\n").into_bytes()
+    }
+
+    #[test]
+    fn test_assemble_resets_sgr_between_visible_lines() {
+        // Simulate tmux capturing an emacs-like screen: two normal lines, a
+        // fully-inverse status line, and a blank minibuffer line. Tmux's -e
+        // emits \x1b[7m when entering inverse but may not emit an explicit
+        // reset on line transitions. We need \x1b[m inserted before each
+        // \r\n so the next line can't inherit the inverse attribute.
+        let visible = b"line above\n\x1b[7mstatus line\n\nafter blank\n";
+        let out = assemble_capture_output(None, visible, Some(&cursor(0, 0, 1, 4)));
+        let s = String::from_utf8_lossy(&out);
+
+        // Every captured-line newline must be preceded by a SGR reset.
+        assert!(s.contains("line above\x1b[m\r\n"), "missing reset after 'line above': {s:?}");
+        assert!(s.contains("status line\x1b[m\r\n"), "missing reset after status line: {s:?}");
+        // The blank line between status and 'after blank' must also reset
+        // (this is the emacs minibuffer case the user reported).
+        assert!(s.contains("\x1b[m\r\n\x1b[m\r\nafter blank"),
+            "missing resets around blank line: {s:?}");
+
+        // Start of visible area is reset too, so the screen opens clean.
+        assert!(s.contains("\x1b[H\x1b[m"), "missing home+reset at start: {s:?}");
+
+        // End of visible area must reset before cursor positioning so the
+        // user's next keystroke doesn't inherit stale SGR.
+        let pos = s.find("\x1b[").and_then(|_| {
+            // Find the final reset that precedes the cursor-position code.
+            let cursor_move = s.rfind("\x1b[1;1H")?;
+            let reset = s[..cursor_move].rfind("\x1b[m")?;
+            Some((reset, cursor_move))
+        });
+        assert!(pos.is_some(), "reset should come right before cursor positioning: {s:?}");
+    }
+
+    #[test]
+    fn test_assemble_scrollback_lines_reset_too() {
+        // Scrollback lines go through the same accumulator — verify they
+        // also get SGR resets so scrollback rows don't inherit stale attrs.
+        // 4 lines total, pane_height=2 → first 2 are scrollback.
+        let sb = b"sb1\n\x1b[7msb2-inverse\nvis1\nvis2\n";
+        let vis = b"vis1\nvis2\n";
+        let out = assemble_capture_output(Some(sb), vis, Some(&cursor(0, 0, 1, 2)));
+        let s = String::from_utf8_lossy(&out);
+
+        assert!(s.contains("sb1\x1b[m\r\n"), "scrollback line 1 missing reset: {s:?}");
+        assert!(s.contains("sb2-inverse\x1b[m\r\n"), "scrollback inverse line missing reset: {s:?}");
+    }
+
+    #[test]
+    fn test_assemble_cursor_position() {
+        let visible = b"hello\nworld\n";
+        let out = assemble_capture_output(None, visible, Some(&cursor(3, 1, 1, 2)));
+        let s = String::from_utf8_lossy(&out);
+        // cursor_x=3 cursor_y=1 -> \x1b[2;4H (1-based)
+        assert!(s.contains("\x1b[2;4H"), "expected cursor positioning: {s:?}");
+        // visible=1 -> show cursor
+        assert!(s.contains("\x1b[?25h"), "expected show-cursor: {s:?}");
+    }
+
+    #[test]
+    fn test_assemble_hidden_cursor() {
+        let out = assemble_capture_output(None, b"x\n", Some(&cursor(0, 0, 0, 1)));
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("\x1b[?25l"), "expected hide-cursor: {s:?}");
+    }
 
     // -- Integration tests (require tmux) --
     // These use a separate socket ("agentdispatch-test") to avoid
