@@ -517,16 +517,123 @@ fn spawn_cc_bridge(
 }
 
 /// Async write to the PTY fd.
+///
+/// Tracks how many bytes have been written so partial writes don't get
+/// re-sent. `write_all` doesn't return the number written on a partial
+/// failure, so under back-pressure (large pastes, slow consumer) it would
+/// keep retrying from offset 0 — duplicating earlier bytes and, in the
+/// worst case, never terminating.
 async fn async_write(
     fd: &std::sync::Arc<tokio::io::unix::AsyncFd<std::fs::File>>,
     data: &[u8],
 ) -> Result<(), std::io::Error> {
     use std::io::Write;
-    loop {
+    let mut written = 0;
+    while written < data.len() {
         let mut ready = fd.writable().await?;
-        match ready.try_io(|fd| fd.get_ref().write_all(data)) {
-            Ok(result) => return result,
+        match ready.try_io(|fd| fd.get_ref().write(&data[written..])) {
+            Ok(Ok(0)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write returned 0",
+                ));
+            }
+            Ok(Ok(n)) => written += n,
+            Ok(Err(e)) => return Err(e),
             Err(_would_block) => continue,
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reproduces the partial-write duplication bug. With a small kernel
+    /// buffer and a slow reader, write_all hits WouldBlock partway through.
+    /// The buggy retry loop redoes write_all from offset 0, so any bytes
+    /// already accepted by the kernel get re-emitted.
+    ///
+    /// We write a 1 MiB unique sequence; the reader must observe exactly
+    /// the same bytes back. If the bug is present, output > input (dups).
+    #[tokio::test]
+    async fn test_async_write_no_duplication_under_partial_writes() {
+        use std::io::Read;
+        use std::os::fd::{FromRawFd, IntoRawFd};
+
+        // Create pipe and grab raw fds.
+        let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
+        let read_raw = read_fd.into_raw_fd();
+        let write_raw = write_fd.into_raw_fd();
+
+        // Linux: shrink pipe buffer to one page (4 KiB) so a 1 MiB write
+        // is guaranteed to partial-write many times. Best-effort — the
+        // default 64 KiB buffer also exposes the bug for inputs > 64 KiB.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let _ = nix::libc::fcntl(write_raw, nix::libc::F_SETPIPE_SZ, 4096);
+        }
+
+        // Set write end non-blocking (required by AsyncFd).
+        unsafe {
+            let flags = nix::libc::fcntl(write_raw, nix::libc::F_GETFL);
+            nix::libc::fcntl(write_raw, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK);
+        }
+
+        // Wrap write end as AsyncFd<File>.
+        let write_file = unsafe { std::fs::File::from_raw_fd(write_raw) };
+        let write_async =
+            std::sync::Arc::new(tokio::io::unix::AsyncFd::new(write_file).expect("AsyncFd"));
+
+        // Reader thread: drains slowly so the writer keeps hitting backpressure.
+        let read_file = unsafe { std::fs::File::from_raw_fd(read_raw) };
+        let reader_handle = std::thread::spawn(move || {
+            let mut all = Vec::new();
+            let mut buf = [0u8; 256];
+            let mut reader = read_file;
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        all.extend_from_slice(&buf[..n]);
+                        // Slight sleep keeps the pipe near-full, forcing partial writes.
+                        std::thread::sleep(std::time::Duration::from_micros(20));
+                    }
+                    Err(e) => panic!("read error: {e}"),
+                }
+            }
+            all
+        });
+
+        // 1 MiB unique pattern so any duplication is byte-detectable.
+        let input: Vec<u8> = (0..(1024 * 1024)).map(|i| (i % 251) as u8).collect();
+
+        // Buggy implementations can loop forever (writing the same prefix
+        // repeatedly under sustained back-pressure), so cap the run time.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            async_write(&write_async, &input),
+        )
+        .await;
+
+        match result {
+            Err(_) => panic!("async_write hung — likely retry-from-offset-0 bug"),
+            Ok(Err(e)) => panic!("async_write failed: {e}"),
+            Ok(Ok(())) => {}
+        }
+
+        // Close the write side so the reader sees EOF.
+        drop(write_async);
+
+        let output = reader_handle.join().expect("reader thread");
+        assert_eq!(
+            output.len(),
+            input.len(),
+            "output length mismatch — likely duplication: in={} out={}",
+            input.len(),
+            output.len()
+        );
+        assert_eq!(output, input, "byte sequence mismatch");
     }
 }
