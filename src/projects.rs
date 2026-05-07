@@ -49,14 +49,6 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn normalize_agent(agent: &str) -> Option<&'static str> {
-    match agent {
-        "Claude" => Some("Claude"),
-        "Codex" => Some("Codex"),
-        "None" => Some("None"),
-        _ => None,
-    }
-}
 
 #[post("/api/projects")]
 pub async fn create_project(
@@ -92,16 +84,8 @@ pub async fn create_project(
                 .json(serde_json::json!({"error": format!("{root_dir} is not a directory"), "dir_not_found": true}));
         }
     }
-    let agent = match normalize_agent(&body.agent) {
-        Some(agent) => agent,
-        None => {
-            return HttpResponse::BadRequest()
-                .json(serde_json::json!({"error": "agent must be one of: Claude, Codex, None"}));
-        }
-    };
-
     let conn = db.lock().unwrap();
-    match db::add_project(&conn, &body.name, &root_dir, body.git, agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env, &body.default_branch) {
+    match db::add_project(&conn, &body.name, &root_dir, body.git, &body.agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env, &body.default_branch) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "created"})),
         Err(msg) => HttpResponse::BadRequest().json(serde_json::json!({"error": msg})),
     }
@@ -120,17 +104,10 @@ pub async fn update_project(
         return HttpResponse::BadRequest()
             .json(serde_json::json!({"error": format!("{root_dir} is not a directory")}));
     }
-    let agent = match normalize_agent(&body.agent) {
-        Some(agent) => agent,
-        None => {
-            return HttpResponse::BadRequest()
-                .json(serde_json::json!({"error": "agent must be one of: Claude, Codex, None"}));
-        }
-    };
     let conn = db.lock().unwrap();
     match db::update_project(
         &conn, &old_name, &body.name, &root_dir,
-        body.git, agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env, &body.default_branch,
+        body.git, &body.agent, body.claude_internet, body.claude_skip_permissions, &body.conda_env, &body.default_branch,
     ) {
         Ok(()) => HttpResponse::Ok().json(serde_json::json!({"status": "updated"})),
         Err(msg) => HttpResponse::BadRequest().json(serde_json::json!({"error": msg})),
@@ -196,7 +173,7 @@ pub async fn launch_project(
     // Insert workspace into DB with predicted worktree_dir + "building" status
     let ws = {
         let conn = db.lock().unwrap();
-        db::add_workspace(&conn, &ws_name, &project_name, worktree_dir.as_deref(), status, variant)
+        db::add_workspace(&conn, &ws_name, &project_name, worktree_dir.as_deref(), status, variant, "")
     };
 
     if **use_tmux {
@@ -400,18 +377,12 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
         return HttpResponse::Ok().json(resp);
     }
 
-    // Build completion is primarily detected by a background timer, but also
-    // check here so the response always reflects the latest state.
     check_building_workspaces(&conn);
+    adopt_orphan_windows(&conn);
     let workspaces = db::list_workspaces(&conn);
 
-    // Annotate with agent pane titles and init window presence
-    let titles = tmux::agent_pane_titles();
     let annotated: Vec<serde_json::Value> = workspaces.into_iter().map(|ws| {
         let mut v = serde_json::to_value(&ws).unwrap();
-        if let Some(title) = titles.get(&ws.id) {
-            v["agent_title"] = serde_json::json!(title);
-        }
         let session = format!("ws-{}", ws.id);
         if let Some((true, _)) = tmux::init_pane_status(&session) {
             v["has_init"] = serde_json::json!(true);
@@ -423,6 +394,27 @@ pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     HttpResponse::Ok().json(resp)
 }
 
+/// Scan ready workspaces for tmux windows not tracked as tabs and adopt them.
+fn adopt_orphan_windows(conn: &rusqlite::Connection) {
+    let workspaces = db::list_workspaces(conn);
+    for ws in &workspaces {
+        if ws.status != "ready" { continue; }
+        let session = format!("ws-{}", ws.id);
+        if !tmux::has_session(&session) { continue; }
+        let windows = tmux::list_windows(&session);
+        let tracked: std::collections::HashSet<String> = ws.tabs.iter()
+            .map(|t| format!("tab-{}", t.id))
+            .collect();
+        for win_name in &windows {
+            if win_name == "init" || tracked.contains(win_name) { continue; }
+            let tab = db::add_workspace_tab(conn, ws.id, win_name, "shell");
+            let new_name = format!("tab-{}", tab.id);
+            tmux::rename_window(&session, win_name, &new_name);
+            tlog!("Adopted orphan window {win_name} in ws-{} as tab-{}", ws.id, tab.id);
+        }
+    }
+}
+
 /// Check all "building" workspaces and finalize any whose init pane has exited.
 /// Returns true if any workspace status changed (caller should notify clients).
 pub fn check_building_workspaces(conn: &rusqlite::Connection) -> bool {
@@ -432,29 +424,27 @@ pub fn check_building_workspaces(conn: &rusqlite::Connection) -> bool {
     for ws in &workspaces {
         if ws.status != "building" { continue; }
         let session = format!("ws-{}", ws.id);
-        // Try tmux first, fall back to status file (handles race where pane
-        // exits before remain-on-exit is set, destroying the window).
         let status_file = format!("/tmp/agentdispatch-init-{}.status", ws.id);
-        // Try tmux first (if remain-on-exit was set in time), then status file.
         let ok: i32;
         if let Some((true, exit_status)) = tmux::init_pane_status(&session) {
             ok = exit_status.unwrap_or(0);
         } else if let Ok(content) = std::fs::read_to_string(&status_file) {
             ok = content.trim().parse().unwrap_or(-1);
         } else {
-            continue; // not done yet
+            continue;
         }
         let _ = std::fs::remove_file(&status_file);
-        let cwd = ws.worktree_dir.as_deref().unwrap_or("");
         if ok == 0 {
             if let Some(proj) = projects.iter().find(|p| p.name == ws.project) {
-                let agent_cmd = bash_script_cmd("claude", proj, &ws.build_variant, cwd);
                 let wt = ws.worktree_dir.as_deref().unwrap_or(&proj.root_dir);
-                tlog!("Build succeeded for workspace {}, creating agent window", ws.id);
+                let shell_cmd = bash_script_cmd("shell", proj, &ws.build_variant, wt);
+                let tab = db::add_workspace_tab(conn, ws.id, "shell", "shell");
+                let tmux_window = format!("tab-{}", tab.id);
+                tlog!("Build succeeded for workspace {}, creating shell tab {}", ws.id, tab.id);
                 if tmux::has_session(&session) {
-                    let _ = tmux::new_window(&session, "agent", wt, Some(&agent_cmd));
+                    let _ = tmux::new_window(&session, &tmux_window, wt, Some(&shell_cmd));
                 } else {
-                    let _ = tmux::new_session(&session, "agent", wt, Some(&agent_cmd));
+                    let _ = tmux::new_session(&session, &tmux_window, wt, Some(&shell_cmd));
                 }
             }
             db::update_workspace_status(conn, ws.id, "ready", ws.worktree_dir.as_deref());
@@ -545,19 +535,6 @@ pub struct CreateTabRequest {
     tab_type: String,
 }
 
-/// Agent command without conda prefix — conda is handled by default bash.sh
-/// when bash.sh handles env setup itself.
-fn build_bare_agent_command(agent: &str, project: &db::Project) -> String {
-    let mut cmd = if agent == "Codex" { "codex".to_string() } else { "claude".to_string() };
-    if (agent == "Claude" || agent == "Codex") && project.claude_internet {
-        cmd.push_str(" --dangerously-enable-internet-mode");
-    }
-    if agent == "Claude" && project.claude_skip_permissions {
-        cmd.push_str(" --dangerously-skip-permissions");
-    }
-    cmd
-}
-
 fn default_shell() -> String { "shell".to_string() }
 
 #[post("/api/workspaces/{id}/tabs")]
@@ -568,7 +545,7 @@ pub async fn create_tab(
     use_tmux: UseTmux,
 ) -> HttpResponse {
     let ws_id = path.into_inner();
-    let (tab, cwd, project, variant) = {
+    let (tab, mut cwd, project, variant) = {
         let conn = db.lock().unwrap();
         let tab = db::add_workspace_tab(&conn, ws_id, &body.name, &body.tab_type);
         let ws = db::get_workspace(&conn, ws_id);
@@ -587,6 +564,9 @@ pub async fn create_tab(
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = format!("tab-{}", tab.id);
         if tmux::has_session(&tmux_session) {
+            if let Some(pane_cwd) = tmux::first_pane_cwd(&tmux_session) {
+                cwd = pane_cwd;
+            }
             let shell_cmd = if let Some(ref proj) = project {
                 let wt = if cwd != proj.root_dir { &cwd } else { "" };
                 Some(bash_script_cmd("shell", proj, &variant, wt))
@@ -641,25 +621,26 @@ pub async fn recreate_workspace(
     let wt = ws.worktree_dir.as_deref().unwrap_or("");
     let variant = &ws.build_variant;
 
-    let agent_cmd = bash_script_cmd("claude", &project, variant, wt);
-    if let Err(e) = tmux::new_session(
-        &tmux_session, "agent", cwd, Some(&agent_cmd),
-    ) {
-        return HttpResponse::InternalServerError()
-            .json(serde_json::json!({"error": format!("Failed to create tmux session: {e}")}));
-    }
+    let shell_cmd = bash_script_cmd("shell", &project, variant, wt);
 
     // Recreate tmux windows for existing tabs
     let tabs = {
         let conn = db.lock().unwrap();
         db::list_workspace_tabs(&conn, ws_id)
     };
-    let shell_cmd = bash_script_cmd("shell", &project, variant, wt);
     for tab in &tabs {
         let tmux_window = format!("tab-{}", tab.id);
-        if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, Some(&shell_cmd)) {
-            tlog!("Failed to recreate tmux window tab-{}: {e}", tab.id);
+        if tmux::has_session(&tmux_session) {
+            if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, cwd, Some(&shell_cmd)) {
+                tlog!("Failed to recreate tmux window tab-{}: {e}", tab.id);
+            }
+        } else if let Err(e) = tmux::new_session(&tmux_session, &tmux_window, cwd, Some(&shell_cmd)) {
+            tlog!("Failed to create tmux session for tab-{}: {e}", tab.id);
         }
+    }
+    if !tmux::has_session(&tmux_session) {
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": "Failed to create tmux session — no tabs to recreate"}));
     }
 
     HttpResponse::Ok().json(serde_json::json!({"status": "recreated"}))
@@ -872,22 +853,12 @@ fn bash_script_cmd(action: &str, project: &db::Project, variant: &str, worktree:
     let default_script = default_bash_sh_path();
     let s = shell_escape(&default_script.to_string_lossy());
 
-    let agent = normalize_agent(&project.agent).unwrap_or("Claude");
-    let agent_cmd = if action == "claude" && agent != "None" {
-        build_bare_agent_command(agent, project)
-    } else {
-        String::new()
-    };
-
     let project_bash = find_bash_script(&project.root_dir)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
     let mut parts = Vec::new();
     parts.push(format!("AGENTDISPATCH_ACTION={action}"));
-    if !agent_cmd.is_empty() {
-        parts.push(format!("AGENTDISPATCH_AGENT_CMD='{}'", shell_escape(&agent_cmd)));
-    }
     if !variant.is_empty() {
         parts.push(format!("AGENTDISPATCH_VARIANT='{}'", shell_escape(variant)));
     }
@@ -962,21 +933,6 @@ mod tests {
     fn test_expand_tilde_bare() {
         // "~nope" without slash should NOT expand
         assert_eq!(expand_tilde("~nope"), "~nope");
-    }
-
-    #[test]
-    fn test_normalize_agent_valid() {
-        assert_eq!(normalize_agent("Claude"), Some("Claude"));
-        assert_eq!(normalize_agent("Codex"), Some("Codex"));
-        assert_eq!(normalize_agent("None"), Some("None"));
-    }
-
-    #[test]
-    fn test_normalize_agent_invalid() {
-        assert_eq!(normalize_agent("invalid"), None);
-        assert_eq!(normalize_agent("claude"), None); // case-sensitive
-        assert_eq!(normalize_agent(""), None);
-        assert_eq!(normalize_agent("GPT"), None);
     }
 
     fn make_temp_dir() -> std::path::PathBuf {
@@ -1085,50 +1041,33 @@ mod tests {
     }
 
     #[test]
-    fn test_bash_script_cmd_claude_basic() {
-        let proj = test_project("Claude", false, "");
-        let cmd = bash_script_cmd("claude", &proj, "", "");
-        assert!(cmd.starts_with("AGENTDISPATCH_ACTION=claude"));
-        assert!(cmd.contains("AGENTDISPATCH_AGENT_CMD='claude'"));
+    fn test_bash_script_cmd_basic() {
+        let proj = test_project("", false, "");
+        let cmd = bash_script_cmd("shell", &proj, "", "");
+        assert!(cmd.starts_with("AGENTDISPATCH_ACTION=shell"));
         assert!(cmd.contains("AGENTDISPATCH_ROOT_DIR='/tmp/test'"));
         assert!(cmd.contains("exec bash --rcfile"));
-    }
-
-    #[test]
-    fn test_bash_script_cmd_shell_with_variant() {
-        let proj = test_project("Claude", false, "");
-        let cmd = bash_script_cmd("shell", &proj, "py310", "");
-        assert!(cmd.starts_with("AGENTDISPATCH_ACTION=shell"));
-        assert!(cmd.contains("AGENTDISPATCH_VARIANT='py310'"));
-        assert!(!cmd.contains("AGENTDISPATCH_AGENT_CMD")); // shell action, no agent cmd
-    }
-
-    #[test]
-    fn test_bash_script_cmd_with_conda() {
-        let proj = test_project("Claude", false, "myenv");
-        let cmd = bash_script_cmd("claude", &proj, "", "");
-        assert!(cmd.contains("AGENTDISPATCH_CONDA_ENV='myenv'"));
-    }
-
-    #[test]
-    fn test_bash_script_cmd_with_flags() {
-        let proj = test_project("Claude", true, "");
-        let cmd = bash_script_cmd("claude", &proj, "", "");
-        assert!(cmd.contains("AGENTDISPATCH_AGENT_CMD='claude --dangerously-skip-permissions'"));
-    }
-
-    #[test]
-    fn test_bash_script_cmd_agent_none() {
-        let proj = test_project("None", false, "");
-        let cmd = bash_script_cmd("claude", &proj, "", "");
-        // Agent=None: no AGENTDISPATCH_AGENT_CMD
         assert!(!cmd.contains("AGENTDISPATCH_AGENT_CMD"));
     }
 
     #[test]
+    fn test_bash_script_cmd_with_variant() {
+        let proj = test_project("", false, "");
+        let cmd = bash_script_cmd("shell", &proj, "py310", "");
+        assert!(cmd.contains("AGENTDISPATCH_VARIANT='py310'"));
+    }
+
+    #[test]
+    fn test_bash_script_cmd_with_conda() {
+        let proj = test_project("", false, "myenv");
+        let cmd = bash_script_cmd("shell", &proj, "", "");
+        assert!(cmd.contains("AGENTDISPATCH_CONDA_ENV='myenv'"));
+    }
+
+    #[test]
     fn test_bash_script_cmd_with_worktree() {
-        let proj = test_project("Claude", false, "");
-        let cmd = bash_script_cmd("claude", &proj, "", "/tmp/wt");
+        let proj = test_project("", false, "");
+        let cmd = bash_script_cmd("shell", &proj, "", "/tmp/wt");
         assert!(cmd.contains("AGENTDISPATCH_WORKTREE='/tmp/wt'"));
     }
 
@@ -1411,7 +1350,7 @@ mod tests {
             let conn = db.lock().unwrap();
             crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
-            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready", "").id
+            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready", "", "").id
         };
 
         let req = actix_web::test::TestRequest::get()
@@ -1453,7 +1392,7 @@ mod tests {
             let conn = db.lock().unwrap();
             crate::db::add_project(&conn, "proj", "/tmp", false, "Claude", false, false, "", "")
                 .unwrap();
-            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready", "").id
+            crate::db::add_workspace(&conn, "ws1", "proj", None, "ready", "", "").id
         };
 
         // Create tab

@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 12;
+const CURRENT_VERSION: i64 = 13;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -55,6 +55,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE projects ADD COLUMN default_branch TEXT NOT NULL DEFAULT ''",
     // 11 -> 12: add build_variant to workspaces
     "ALTER TABLE workspaces ADD COLUMN build_variant TEXT NOT NULL DEFAULT ''",
+    // 12 -> 13: add agent to workspaces (override project default at launch time)
+    "ALTER TABLE workspaces ADD COLUMN agent TEXT NOT NULL DEFAULT ''",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -183,12 +185,13 @@ pub struct Workspace {
     pub worktree_dir: Option<String>,
     pub status: String,
     pub build_variant: String,
+    pub agent: String,
     pub tabs: Vec<WorkspaceTab>,
 }
 
 pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
     let mut stmt = conn
-        .prepare("SELECT id, name, project, created_at, worktree_dir, status, build_variant FROM workspaces ORDER BY sort_order, id")
+        .prepare("SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent FROM workspaces ORDER BY sort_order, id")
         .unwrap();
     let mut workspaces: Vec<Workspace> = stmt.query_map([], |row| {
         Ok(Workspace {
@@ -199,6 +202,7 @@ pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
             worktree_dir: row.get(4)?,
             status: row.get(5)?,
             build_variant: row.get(6)?,
+            agent: row.get(7)?,
             tabs: Vec::new(),
         })
     })
@@ -214,7 +218,7 @@ pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
 
 pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
     conn.query_row(
-        "SELECT id, name, project, created_at, worktree_dir, status, build_variant FROM workspaces WHERE id = ?1",
+        "SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent FROM workspaces WHERE id = ?1",
         [id],
         |row| {
             Ok(Workspace {
@@ -225,6 +229,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
                 worktree_dir: row.get(4)?,
                 status: row.get(5)?,
                 build_variant: row.get(6)?,
+                agent: row.get(7)?,
                 tabs: Vec::new(),
             })
         },
@@ -249,7 +254,7 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
     .collect()
 }
 
-pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir: Option<&str>, status: &str, build_variant: &str) -> Workspace {
+pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir: Option<&str>, status: &str, build_variant: &str, agent: &str) -> Workspace {
     // Insert just before the divider (or at end if no divider)
     let divider_pos: i64 = get_setting(conn, "ws_divider_pos")
         .and_then(|v| v.parse().ok())
@@ -275,15 +280,15 @@ pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir:
         set_setting(conn, "ws_divider_pos", &(divider_pos + 1).to_string());
     }
     conn.execute(
-        "INSERT INTO workspaces (name, project, worktree_dir, status, sort_order, build_variant) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![name, project, worktree_dir, status, insert_order, build_variant],
+        "INSERT INTO workspaces (name, project, worktree_dir, status, sort_order, build_variant, agent) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![name, project, worktree_dir, status, insert_order, build_variant, agent],
     )
     .expect("Failed to insert workspace");
     let id = conn.last_insert_rowid();
     let created_at: String = conn
         .query_row("SELECT created_at FROM workspaces WHERE id = ?1", [id], |row| row.get(0))
         .unwrap();
-    Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), build_variant: build_variant.to_string(), tabs: Vec::new() }
+    Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), build_variant: build_variant.to_string(), agent: agent.to_string(), tabs: Vec::new() }
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
@@ -486,7 +491,7 @@ mod tests {
     fn test_update_project_cascades_to_workspaces() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
 
         update_project(&conn, "proj", "newproj", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
@@ -499,7 +504,7 @@ mod tests {
     fn test_update_project_same_name_no_cascade() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
 
         // Update with same name — should not break
         update_project(&conn, "proj", "proj", "/var", false, "Claude", false, false, "", "").unwrap();
@@ -543,7 +548,7 @@ mod tests {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
         assert_eq!(ws.name, "ws1");
         assert_eq!(ws.project, "proj");
         assert_eq!(ws.status, "ready");
@@ -559,7 +564,7 @@ mod tests {
     fn test_get_workspace() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
 
         let fetched = get_workspace(&conn, ws.id).unwrap();
         assert_eq!(fetched.name, "ws1");
@@ -572,7 +577,7 @@ mod tests {
     fn test_workspace_with_worktree() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", Some("/tmp/wt"), "setting_up", "");
+        let ws = add_workspace(&conn, "ws1", "proj", Some("/tmp/wt"), "setting_up", "", "");
         assert_eq!(ws.worktree_dir.as_deref(), Some("/tmp/wt"));
         assert_eq!(ws.status, "setting_up");
     }
@@ -581,7 +586,7 @@ mod tests {
     fn test_rename_workspace() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "old", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "old", "proj", None, "ready", "", "");
 
         rename_workspace(&conn, ws.id, "new");
         let fetched = get_workspace(&conn, ws.id).unwrap();
@@ -592,7 +597,7 @@ mod tests {
     fn test_update_workspace_status() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "setting_up", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "setting_up", "", "");
 
         update_workspace_status(&conn, ws.id, "ready", Some("/tmp/wt"));
         let fetched = get_workspace(&conn, ws.id).unwrap();
@@ -604,7 +609,7 @@ mod tests {
     fn test_remove_workspace_cascades_tabs() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
         add_workspace_tab(&conn, ws.id, "shell", "shell");
         add_workspace_tab(&conn, ws.id, "agent", "claude");
 
@@ -617,8 +622,8 @@ mod tests {
     fn test_workspaces_ordered_by_id() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws1 = add_workspace(&conn, "second", "proj", None, "ready", "");
-        let ws2 = add_workspace(&conn, "first", "proj", None, "ready", "");
+        let ws1 = add_workspace(&conn, "second", "proj", None, "ready", "", "");
+        let ws2 = add_workspace(&conn, "first", "proj", None, "ready", "", "");
 
         let workspaces = list_workspaces(&conn);
         assert_eq!(workspaces.len(), 2);
@@ -633,7 +638,7 @@ mod tests {
     fn test_workspace_tabs() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
 
         let t1 = add_workspace_tab(&conn, ws.id, "shell", "shell");
         let t2 = add_workspace_tab(&conn, ws.id, "agent", "claude");
@@ -656,7 +661,7 @@ mod tests {
     fn test_update_workspace_tab() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
         let tab = add_workspace_tab(&conn, ws.id, "old", "shell");
 
         update_workspace_tab(&conn, tab.id, "new");
@@ -668,7 +673,7 @@ mod tests {
     fn test_remove_workspace_tab() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
         let tab = add_workspace_tab(&conn, ws.id, "shell", "shell");
 
         remove_workspace_tab(&conn, tab.id);
@@ -679,7 +684,7 @@ mod tests {
     fn test_get_workspace_id_for_tab() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
         let tab = add_workspace_tab(&conn, ws.id, "shell", "shell");
 
         assert_eq!(get_workspace_id_for_tab(&conn, tab.id), Some(ws.id));
@@ -690,7 +695,7 @@ mod tests {
     fn test_tab_sort_order_after_removal() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "");
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
         let t1 = add_workspace_tab(&conn, ws.id, "first", "shell");
         let _t2 = add_workspace_tab(&conn, ws.id, "second", "shell");
 
@@ -715,10 +720,10 @@ mod tests {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
 
-        add_workspace(&conn, "proj-1", "proj", None, "ready", "");
+        add_workspace(&conn, "proj-1", "proj", None, "ready", "", "");
         assert_eq!(next_workspace_name(&conn, "proj"), "proj-2");
 
-        add_workspace(&conn, "proj-5", "proj", None, "ready", "");
+        add_workspace(&conn, "proj-5", "proj", None, "ready", "", "");
         assert_eq!(next_workspace_name(&conn, "proj"), "proj-6");
     }
 
@@ -726,7 +731,7 @@ mod tests {
     fn test_next_workspace_name_ignores_non_numeric() {
         let conn = test_db();
         add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        add_workspace(&conn, "proj-custom", "proj", None, "ready", "");
+        add_workspace(&conn, "proj-custom", "proj", None, "ready", "", "");
         assert_eq!(next_workspace_name(&conn, "proj"), "proj-1");
     }
 
@@ -735,7 +740,7 @@ mod tests {
         let conn = test_db();
         add_project(&conn, "a", "/tmp", true, "Claude", false, false, "", "").unwrap();
         add_project(&conn, "b", "/tmp", true, "Claude", false, false, "", "").unwrap();
-        add_workspace(&conn, "a-3", "a", None, "ready", "");
+        add_workspace(&conn, "a-3", "a", None, "ready", "", "");
 
         assert_eq!(next_workspace_name(&conn, "a"), "a-4");
         assert_eq!(next_workspace_name(&conn, "b"), "b-1");

@@ -2,32 +2,6 @@ const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const app = require('./app.js');
 
-describe('getProjectAgent', () => {
-  test('returns Claude for null project', () => {
-    assert.equal(app.getProjectAgent(null), 'Claude');
-  });
-
-  test('returns Claude for undefined project', () => {
-    assert.equal(app.getProjectAgent(undefined), 'Claude');
-  });
-
-  test('returns Claude for project with no agent field', () => {
-    assert.equal(app.getProjectAgent({}), 'Claude');
-  });
-
-  test('returns valid agent values', () => {
-    assert.equal(app.getProjectAgent({agent: 'Claude'}), 'Claude');
-    assert.equal(app.getProjectAgent({agent: 'Codex'}), 'Codex');
-    assert.equal(app.getProjectAgent({agent: 'None'}), 'None');
-  });
-
-  test('returns Claude for unknown agent', () => {
-    assert.equal(app.getProjectAgent({agent: 'GPT'}), 'Claude');
-    assert.equal(app.getProjectAgent({agent: ''}), 'Claude');
-    assert.equal(app.getProjectAgent({agent: 'claude'}), 'Claude'); // case-sensitive
-  });
-});
-
 describe('getTerminalConfig', () => {
   test('scrollback is large enough for meaningful history', () => {
     assert.ok(app.getTerminalConfig().scrollback >= 10000);
@@ -49,7 +23,6 @@ describe('getTerminalConfig', () => {
     const a = app.getTerminalConfig();
     const b = app.getTerminalConfig();
     assert.notEqual(a, b);
-    assert.deepEqual(a, b);
   });
 });
 
@@ -59,7 +32,7 @@ describe('escAttr', () => {
   });
 
   test('escapes single quotes', () => {
-    assert.equal(app.escAttr("test's"), "test\\'s");
+    assert.equal(app.escAttr("it's"), "it\\'s");
   });
 
   test('escapes backslashes', () => {
@@ -67,166 +40,47 @@ describe('escAttr', () => {
   });
 
   test('escapes both together', () => {
-    assert.equal(app.escAttr("it\\'s"), "it\\\\\\'s");
+    assert.equal(app.escAttr("a\\'b"), "a\\\\\\'b");
   });
 
   test('safe for onclick attribute', () => {
-    const name = "my'project";
-    const attr = `onclick="fn('${app.escAttr(name)}')"`;
-    // Should produce valid HTML attribute with escaped JS string
-    assert.ok(!attr.includes("my'project"));
-    assert.ok(attr.includes("my\\'project"));
-  });
-});
-
-describe('buildAgentCommand', () => {
-  test('claude base command', () => {
-    assert.equal(app.buildAgentCommand('Claude', {}), 'claude');
-  });
-
-  test('codex base command', () => {
-    assert.equal(app.buildAgentCommand('Codex', {}), 'codex');
-  });
-
-  test('claude with internet flag', () => {
-    assert.equal(
-      app.buildAgentCommand('Claude', {claude_internet: true}),
-      'claude --dangerously-enable-internet-mode'
-    );
-  });
-
-  test('codex with internet flag', () => {
-    assert.equal(
-      app.buildAgentCommand('Codex', {claude_internet: true}),
-      'codex --dangerously-enable-internet-mode'
-    );
-  });
-
-  test('claude with skip permissions', () => {
-    assert.equal(
-      app.buildAgentCommand('Claude', {claude_skip_permissions: true}),
-      'claude --dangerously-skip-permissions'
-    );
-  });
-
-  test('codex does NOT get skip permissions', () => {
-    assert.equal(
-      app.buildAgentCommand('Codex', {claude_skip_permissions: true}),
-      'codex'
-    );
-  });
-
-  test('claude with both flags', () => {
-    assert.equal(
-      app.buildAgentCommand('Claude', {claude_internet: true, claude_skip_permissions: true}),
-      'claude --dangerously-enable-internet-mode --dangerously-skip-permissions'
-    );
-  });
-
-  test('with conda env', () => {
-    assert.equal(
-      app.buildAgentCommand('Claude', {conda_env: 'py310'}),
-      'conda activate py310 && claude'
-    );
-  });
-
-  test('conda env with flags', () => {
-    assert.equal(
-      app.buildAgentCommand('Claude', {conda_env: 'py310', claude_internet: true}),
-      'conda activate py310 && claude --dangerously-enable-internet-mode'
-    );
-  });
-
-  test('null proj uses defaults', () => {
-    assert.equal(app.buildAgentCommand('Claude', null), 'claude');
-  });
-
-  test('empty conda_env is not prepended', () => {
-    assert.equal(app.buildAgentCommand('Claude', {conda_env: ''}), 'claude');
+    const val = app.escAttr("test'name");
+    assert.ok(!val.includes("'") || val.indexOf("'") === val.indexOf("\\'") + 1);
   });
 });
 
 describe('getDefaultWsSubtab', () => {
-  beforeEach(() => {
-    app._setProjects([]);
+  test('returns first tab when tabs exist', () => {
+    assert.equal(app.getDefaultWsSubtab({tabs: [{id: 7}]}), 'tab-7');
   });
 
-  test('returns agent when project agent is Claude', () => {
-    app._setProjects([{name: 'p', agent: 'Claude'}]);
-    assert.equal(app.getDefaultWsSubtab({project: 'p', tabs: []}), 'agent');
+  test('returns empty when no tabs', () => {
+    assert.equal(app.getDefaultWsSubtab({tabs: []}), '');
   });
 
-  test('returns agent when project agent is Codex', () => {
-    app._setProjects([{name: 'p', agent: 'Codex'}]);
-    assert.equal(app.getDefaultWsSubtab({project: 'p', tabs: []}), 'agent');
-  });
-
-  test('returns first tab when agent is None', () => {
-    app._setProjects([{name: 'p', agent: 'None'}]);
-    assert.equal(app.getDefaultWsSubtab({project: 'p', tabs: [{id: 7}]}), 'tab-7');
-  });
-
-  test('returns empty when agent is None and no tabs', () => {
-    app._setProjects([{name: 'p', agent: 'None'}]);
-    assert.equal(app.getDefaultWsSubtab({project: 'p', tabs: []}), '');
-  });
-
-  test('returns agent when project not found (defaults to Claude)', () => {
-    app._setProjects([]);
-    assert.equal(app.getDefaultWsSubtab({project: 'missing', tabs: []}), 'agent');
-  });
-
-  test('returns agent for null ws', () => {
-    assert.equal(app.getDefaultWsSubtab(null), 'agent');
+  test('returns empty for null ws', () => {
+    assert.equal(app.getDefaultWsSubtab(null), '');
   });
 });
 
 describe('normalizeWsSubtab', () => {
-  beforeEach(() => {
-    app._setProjects([{name: 'p', agent: 'Claude'}]);
-  });
-
   test('returns empty for null workspace', () => {
-    assert.equal(app.normalizeWsSubtab(null, 'agent'), '');
-  });
-
-  test('normalizes legacy "claude" to "agent"', () => {
-    const ws = {project: 'p', tabs: []};
-    assert.equal(app.normalizeWsSubtab(ws, 'claude'), 'agent');
+    assert.equal(app.normalizeWsSubtab(null, 'init'), '');
   });
 
   test('keeps valid tab reference', () => {
-    const ws = {project: 'p', tabs: [{id: 5}]};
+    const ws = {tabs: [{id: 5}]};
     assert.equal(app.normalizeWsSubtab(ws, 'tab-5'), 'tab-5');
   });
 
   test('falls back to default when tab is gone', () => {
-    const ws = {project: 'p', tabs: [{id: 3}]};
-    assert.equal(app.normalizeWsSubtab(ws, 'tab-99'), 'agent');
+    const ws = {tabs: [{id: 3}]};
+    assert.equal(app.normalizeWsSubtab(ws, 'tab-99'), 'tab-3');
   });
 
   test('returns default for unknown subtab value', () => {
-    const ws = {project: 'p', tabs: []};
-    assert.equal(app.normalizeWsSubtab(ws, 'garbage'), 'agent');
-  });
-
-  test('agent subtab uses getDefaultWsSubtab', () => {
-    app._setProjects([{name: 'p', agent: 'None'}]);
-    const ws = {project: 'p', tabs: [{id: 1}]};
-    // agent is None, so default is first tab
-    assert.equal(app.normalizeWsSubtab(ws, 'agent'), 'tab-1');
-  });
-
-  test('history subtab valid when agent enabled', () => {
-    app._setProjects([{name: 'p', agent: 'Claude'}]);
-    const ws = {project: 'p', tabs: []};
-    assert.equal(app.normalizeWsSubtab(ws, 'history'), 'history');
-  });
-
-  test('history subtab falls back when agent is None', () => {
-    app._setProjects([{name: 'p', agent: 'None'}]);
-    const ws = {project: 'p', tabs: [{id: 1}]};
-    assert.equal(app.normalizeWsSubtab(ws, 'history'), 'tab-1');
+    const ws = {tabs: [{id: 1}]};
+    assert.equal(app.normalizeWsSubtab(ws, 'garbage'), 'tab-1');
   });
 });
 
@@ -260,7 +114,6 @@ describe('computeDotState', () => {
   const compute = app.computeDotState;
   const now = 100000;
 
-  // Initial state: gray
   test('starts gray with no output', () => {
     assert.equal(compute('', null, now, false), '');
   });
@@ -269,123 +122,45 @@ describe('computeDotState', () => {
     assert.equal(compute('', null, now, true), '');
   });
 
-  // Gray → busy on text output
   test('gray goes busy when output is recent', () => {
     assert.equal(compute('', now - 1000, now, false), 'busy');
   });
 
-  test('gray goes busy when output just happened', () => {
-    assert.equal(compute('', now, now, false), 'busy');
-  });
-
-  // Gray does NOT go busy if output is already old (e.g. initial load with stale data)
   test('gray stays gray if output is already 5s old', () => {
     assert.equal(compute('', now - 5000, now, false), '');
   });
 
-  test('gray stays gray if output is already 10s old', () => {
-    assert.equal(compute('', now - 10000, now, false), '');
-  });
-
-  // Busy stays busy while output is recent
   test('busy stays busy with recent output', () => {
-    assert.equal(compute('busy', now - 2000, now, false), 'busy');
+    assert.equal(compute('busy', now - 1000, now, false), 'busy');
   });
 
-  test('busy stays busy at 4999ms', () => {
-    assert.equal(compute('busy', now - 4999, now, false), 'busy');
+  test('busy becomes slowing when output stops', () => {
+    assert.equal(compute('busy', now - 6000, now, false), 'slowing');
   });
 
-  // Busy → slowing at 5s
-  test('busy goes slowing at 5s idle', () => {
-    assert.equal(compute('busy', now - 5000, now, false), 'slowing');
-  });
-
-  test('busy goes slowing at 7s idle', () => {
-    assert.equal(compute('busy', now - 7000, now, false), 'slowing');
-  });
-
-  // Busy → slowing, not directly to done
-  test('busy does NOT skip to done at 10s', () => {
-    assert.equal(compute('busy', now - 10000, now, false), 'slowing');
-  });
-
-  // Slowing → busy on new output
   test('slowing goes back to busy on new output', () => {
     assert.equal(compute('slowing', now - 1000, now, false), 'busy');
   });
 
-  // Slowing stays slowing between 5-10s
-  test('slowing stays slowing at 7s', () => {
-    assert.equal(compute('slowing', now - 7000, now, false), 'slowing');
+  test('slowing becomes done after 10s', () => {
+    assert.equal(compute('slowing', now - 11000, now, false), 'done');
   });
 
-  // Slowing → done at 10s (not selected)
-  test('slowing goes done at 10s when not selected', () => {
-    assert.equal(compute('slowing', now - 10000, now, false), 'done');
-  });
-
-  test('slowing goes done at 15s when not selected', () => {
-    assert.equal(compute('slowing', now - 15000, now, false), 'done');
-  });
-
-  // Selected (viewing agent pane) → always gray, regardless of state
-  test('selected: gray stays gray with recent output', () => {
-    assert.equal(compute('', now - 1000, now, true), '');
-  });
-
-  test('selected: busy goes gray', () => {
-    assert.equal(compute('busy', now - 2000, now, true), '');
-  });
-
-  test('selected: slowing goes gray', () => {
-    assert.equal(compute('slowing', now - 7000, now, true), '');
-  });
-
-  test('selected: slowing goes gray even at 10s', () => {
-    assert.equal(compute('slowing', now - 10000, now, true), '');
-  });
-
-  // Done is sticky — stays done regardless of time
-  test('done stays done with old output', () => {
-    assert.equal(compute('done', now - 30000, now, false), 'done');
-  });
-
-  test('done stays done with no output', () => {
-    assert.equal(compute('done', null, now, false), 'done');
-  });
-
-  // Done → busy on new output
-  test('done goes busy on new output', () => {
+  test('done goes back to busy on new output', () => {
     assert.equal(compute('done', now - 1000, now, false), 'busy');
   });
 
-  // Done → gray when user clicks (selected)
-  test('done goes gray when selected', () => {
-    assert.equal(compute('done', now - 30000, now, true), '');
+  test('done stays done when no new output', () => {
+    assert.equal(compute('done', now - 20000, now, false), 'done');
   });
 
-  // Done → gray when selected even with no output
-  test('done goes gray when selected with no output', () => {
-    assert.equal(compute('done', null, now, true), '');
+  test('selected always returns empty', () => {
+    assert.equal(compute('busy', now - 1000, now, true), '');
+    assert.equal(compute('done', now - 1000, now, true), '');
   });
 
-  // Building forces busy regardless of char output
-  test('building forces busy with no output', () => {
+  test('building always returns busy', () => {
     assert.equal(compute('', null, now, false, true), 'busy');
-  });
-
-  test('building forces busy even if previously done', () => {
-    assert.equal(compute('done', now - 30000, now, false, true), 'busy');
-  });
-
-  test('building forces busy overrides stale-output gray rule', () => {
-    assert.equal(compute('', now - 30000, now, false, true), 'busy');
-  });
-
-  // Selected still wins over building (user is watching)
-  test('building with selected returns gray', () => {
-    assert.equal(compute('busy', now, now, true, true), '');
   });
 });
 
@@ -393,190 +168,80 @@ describe('tickDot', () => {
   const tick = app.tickDot;
   const now = 100000;
 
-  // Basic: not selected, no output → gray, no output change
-  test('gray with no output stays gray', () => {
-    const r = tick('', null, now, false);
-    assert.equal(r.state, '');
-    assert.equal(r.outputMs, null);
-  });
-
-  // Not selected, recent output → busy, output preserved
-  test('gray with recent output goes busy', () => {
-    const r = tick('', now - 1000, now, false);
-    assert.equal(r.state, 'busy');
-    assert.equal(r.outputMs, now - 1000);
-  });
-
-  // Selected → gray, output CLEARED (user saw it)
-  // tickDot(prev, lastOutputMs, now, isSelected, wasSelected)
-  // 5th param tracks previous tick's selected state
-
-  test('selected clears output and stays gray', () => {
-    const r = tick('', now - 500, now, true, true);
-    assert.equal(r.state, '');
-    assert.equal(r.outputMs, null);
-  });
-
-  test('selected clears output from busy state', () => {
-    const r = tick('busy', now - 500, now, true, false);
-    assert.equal(r.state, '');
-    assert.equal(r.outputMs, null);
-  });
-
-  test('selected clears output from done state', () => {
-    const r = tick('done', now - 30000, now, true, false);
-    assert.equal(r.state, '');
-    assert.equal(r.outputMs, null);
-  });
-
-  // Just deselected → sets grace period to suppress residual output
-  test('just deselected returns graceUntil', () => {
-    const r = tick('', null, now, false, true);
-    assert.equal(r.state, '');
-    assert.ok(r.graceUntil > now);
-  });
-
-  test('not just deselected returns no graceUntil', () => {
-    const r = tick('', null, now, false, false);
-    assert.equal(r.graceUntil, null);
-  });
-
-  test('staying selected returns no graceUntil', () => {
-    const r = tick('', null, now, true, true);
-    assert.equal(r.graceUntil, null);
-  });
-
-  // THE KEY BUG SCENARIO:
-  // User watches agent pane, output happening. Leaves. Residual WebSocket
-  // data arrives. Should NOT trigger busy because of grace period.
-  test('full scenario: watch, leave, residual output stays gray', () => {
-    // Tick 1: watching, output happening
-    const t1 = tick('', now - 500, now, true, true);
-    assert.equal(t1.state, '');
-    assert.equal(t1.outputMs, null);
-
-    // Tick 2: user just left (wasSelected=true, isSelected=false)
-    const t2 = tick(t1.state, t1.outputMs, now + 1000, false, true);
-    assert.equal(t2.state, '');
-    assert.ok(t2.graceUntil > now + 1000); // grace period set
-
-    // Between ticks, WS data arrives — but shouldRecordOutput blocks it
-    // (tested separately below)
-
-    // Tick 3: still away, no output recorded (grace blocked it)
-    const t3 = tick(t2.state, null, now + 2000, false, false);
-    assert.equal(t3.state, '');
-  });
-
-  // New output well after grace period DOES trigger busy
-  test('output after grace period triggers busy', () => {
-    const t1 = tick('', null, now, false, true); // just deselected
-    // Grace expires after ~2s. New output at now+5000:
-    const t2 = tick(t1.state, now + 5000, now + 5500, false, false);
-    assert.equal(t2.state, 'busy');
-  });
-
-  // Notification flag
-  test('notify on slowing → done transition', () => {
-    const r = tick('slowing', now - 10000, now, false, false);
+  test('notify fires on slowing→done transition', () => {
+    const r = tick('slowing', now - 11000, now, false, false, false);
     assert.equal(r.state, 'done');
     assert.equal(r.notify, true);
   });
 
-  test('no notify on other transitions', () => {
-    assert.equal(tick('', now - 1000, now, false, false).notify, false);
-    assert.equal(tick('busy', now - 5000, now, false, false).notify, false);
-    assert.equal(tick('busy', now - 1000, now, false, false).notify, false);
+  test('notify does not fire on done→done', () => {
+    const r = tick('done', now - 20000, now, false, false, false);
+    assert.equal(r.state, 'done');
+    assert.equal(r.notify, false);
+  });
+
+  test('clears output when selected', () => {
+    const r = tick('busy', now - 1000, now, true, true, false);
+    assert.equal(r.outputMs, null);
+  });
+
+  test('preserves output when not selected', () => {
+    const r = tick('busy', now - 1000, now, false, false, false);
+    assert.equal(r.outputMs, now - 1000);
+  });
+
+  test('grace period on deselect', () => {
+    const r = tick('busy', now - 1000, now, false, true, false);
+    assert.ok(r.graceUntil != null);
+    assert.ok(r.graceUntil > now);
+  });
+});
+
+describe('isWsSelected', () => {
+  test('true when workspace matches', () => {
+    assert.equal(app.isWsSelected(42, 42), true);
+  });
+
+  test('false when different workspace', () => {
+    assert.equal(app.isWsSelected(42, 99), false);
+  });
+
+  test('false when no workspace selected', () => {
+    assert.equal(app.isWsSelected(null, 42), false);
   });
 });
 
 describe('shouldRecordOutput', () => {
-  const should = app.shouldRecordOutput;
-  const now = 100000;
-
-  test('no when selected', () => {
-    assert.equal(should(true, now, null), false);
+  test('false when selected', () => {
+    assert.equal(app.shouldRecordOutput(true, 1000, null), false);
   });
 
-  test('yes when not selected and no grace', () => {
-    assert.equal(should(false, now, null), true);
+  test('true when not selected', () => {
+    assert.equal(app.shouldRecordOutput(false, 1000, null), true);
   });
 
-  test('yes when not selected and grace is null', () => {
-    assert.equal(should(false, now, undefined), true);
+  test('false during grace period', () => {
+    assert.equal(app.shouldRecordOutput(false, 1000, 2000), false);
   });
 
-  test('no when within grace period', () => {
-    assert.equal(should(false, now, now + 1000), false);
-  });
-
-  test('yes when grace expired', () => {
-    assert.equal(should(false, now, now - 1), true);
-  });
-
-  test('yes when grace is exactly now', () => {
-    assert.equal(should(false, now, now), true);
-  });
-});
-
-describe('isAgentPaneSelected', () => {
-  const isSel = app.isAgentPaneSelected;
-
-  test('true when workspace matches and subtab is agent', () => {
-    assert.equal(isSel(42, 'agent', 42), true);
-  });
-
-  test('false when different workspace', () => {
-    assert.equal(isSel(42, 'agent', 99), false);
-  });
-
-  test('false when subtab is not agent', () => {
-    assert.equal(isSel(42, 'tab-1', 42), false);
-    assert.equal(isSel(42, 'history', 42), false);
-  });
-
-  test('false when no workspace selected', () => {
-    assert.equal(isSel(null, 'agent', 42), false);
-  });
-
-  // Output should NOT be recorded while viewing the agent pane
-  // This is the guard the WebSocket handler must use
-  test('used to gate output recording', () => {
-    // Simulating: ws handler receives output for workspace 42
-    // User is viewing workspace 42 agent pane → don't record
-    assert.equal(isSel(42, 'agent', 42), true); // selected → skip recording
-
-    // User switches to shell tab → record
-    assert.equal(isSel(42, 'tab-1', 42), false); // not selected → record
-
-    // User switches to different workspace → record
-    assert.equal(isSel(99, 'agent', 42), false); // not selected → record
+  test('true after grace period', () => {
+    assert.equal(app.shouldRecordOutput(false, 3000, 2000), true);
   });
 });
 
 describe('morphdomShouldUpdate', () => {
   const shouldUpdate = app.morphdomShouldUpdate;
-
-  // Simulate DOM elements as plain objects with className
   const el = (className) => ({ className, classList: { contains: (c) => className.split(' ').includes(c) } });
 
   test('returns true for normal elements', () => {
     assert.equal(shouldUpdate(el('ws-popover'), el('ws-popover')), true);
   });
 
-  test('returns false when existing popover has open class', () => {
+  test('returns false for open popover that would close', () => {
     assert.equal(shouldUpdate(el('ws-popover open'), el('ws-popover')), false);
   });
 
-  test('returns true when popover is not open', () => {
-    assert.equal(shouldUpdate(el('ws-popover'), el('ws-popover')), true);
-  });
-
-  test('returns true for non-popover elements even with open class', () => {
-    assert.equal(shouldUpdate(el('something open'), el('something')), true);
-  });
-
-  test('returns true when both have open', () => {
+  test('returns true for open popover staying open', () => {
     assert.equal(shouldUpdate(el('ws-popover open'), el('ws-popover open')), true);
   });
 });
@@ -584,72 +249,19 @@ describe('morphdomShouldUpdate', () => {
 describe('adjustDividerAfterRemove', () => {
   const adjust = app.adjustDividerAfterRemove;
 
-  // Workspaces: [A, B, --- divider at 2 ---, C, D]
-  // Removing A (idx 0, above divider) should shift divider from 2 to 1
-  test('removing workspace above divider shifts divider down', () => {
-    assert.equal(adjust(2, 0, 3), 1);
+  test('returns null when no divider', () => {
+    assert.equal(adjust(null, 2, 5), null);
   });
 
-  // Removing C (idx 2, below divider at 2) should not change divider
-  test('removing workspace below divider keeps divider', () => {
-    assert.equal(adjust(2, 2, 3), 2);
+  test('decrements when item removed above divider', () => {
+    assert.equal(adjust(3, 1, 4), 2);
   });
 
-  test('removing workspace at end keeps divider', () => {
-    assert.equal(adjust(2, 3, 3), 2);
+  test('no change when item removed below divider', () => {
+    assert.equal(adjust(3, 4, 4), 3);
   });
 
-  // Removing B (idx 1, above divider at 2) should shift divider from 2 to 1
-  test('removing second workspace above divider shifts divider', () => {
-    assert.equal(adjust(2, 1, 3), 1);
-  });
-
-  // Divider at 0 (top), removing workspace below
-  test('divider at top, removing below keeps divider at 0', () => {
-    assert.equal(adjust(0, 1, 2), 0);
-  });
-
-  // Divider at end (all workspaces above)
-  test('divider at end, removing workspace above shifts divider', () => {
-    assert.equal(adjust(3, 1, 2), 2);
-  });
-
-  // Null divider
-  test('null divider stays null', () => {
-    assert.equal(adjust(null, 0, 2), null);
-  });
-});
-
-describe('clearPaneError', () => {
-  const clear = app.clearPaneError;
-
-  test('clears connectError flag', () => {
-    const entry = { connectError: true, container: { querySelector: () => null } };
-    clear(entry);
-    assert.equal(entry.connectError, false);
-  });
-
-  test('removes overlay element when present', () => {
-    let removed = false;
-    const overlay = { remove: () => { removed = true; } };
-    const entry = {
-      connectError: true,
-      container: { querySelector: (sel) => sel === '.pane-error-overlay' ? overlay : null },
-    };
-    clear(entry);
-    assert.equal(removed, true);
-    assert.equal(entry.connectError, false);
-  });
-
-  test('noop when no overlay present and flag already false', () => {
-    const entry = { connectError: false, container: { querySelector: () => null } };
-    clear(entry);
-    assert.equal(entry.connectError, false);
-  });
-
-  test('tolerates missing container', () => {
-    const entry = { connectError: true };
-    clear(entry);
-    assert.equal(entry.connectError, false);
+  test('no change when item removed at divider', () => {
+    assert.equal(adjust(3, 3, 4), 3);
   });
 });

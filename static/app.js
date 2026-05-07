@@ -50,18 +50,15 @@ let buildHash = null;
 let _projects = [];
 let _workspaces = [];
 let _selectedWsId = null;
-let _selectedWsSubtab = 'agent';
+let _selectedWsSubtab = '';
 let _wsSubtabs = {}; // workspace id -> last selected subtab
 let _tabTerminals = {}; // keyed by tab id -> {term, ws, fitAddon, container}
-let _historyTerminals = {}; // keyed by workspace id -> {term, fitAddon, container}
 const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
-const _wsWasSelected = {}; // workspace id -> was agent pane selected last tick
+const _wsWasSelected = {}; // workspace id -> was selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
-const _wsDead = new Set(); // workspace ids whose agent pane has exited
 const _exitedTabs = new Set(); // tab ids whose pane has exited (kept until user dismisses)
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
-const _wsTitles = {}; // workspace id -> pane title string
 const _initClosed = new Set(); // workspace ids where user closed the init tab
 let _dialogCallback = null;
 let _dialogFields = [];
@@ -78,29 +75,14 @@ function morphdomShouldUpdate(fromEl, toEl) {
   return true;
 }
 
-function getProjectAgent(proj) {
-  if (!proj) return 'Claude';
-  if (proj.agent === 'Claude' || proj.agent === 'Codex' || proj.agent === 'None') {
-    return proj.agent;
-  }
-  return 'Claude';
-}
 
 function getDefaultWsSubtab(ws) {
-  const proj = ws ? _projects.find(p => p.name === ws.project) : null;
-  if (getProjectAgent(proj) !== 'None') return 'agent';
   if (ws && ws.tabs.length > 0) return 'tab-' + ws.tabs[0].id;
   return '';
 }
 
 function normalizeWsSubtab(ws, subtab) {
   if (!ws) return '';
-  if (subtab === 'claude') subtab = 'agent';
-  if (subtab === 'agent') return getDefaultWsSubtab(ws);
-  if (subtab === 'history') {
-    const proj = ws ? _projects.find(p => p.name === ws.project) : null;
-    return getProjectAgent(proj) !== 'None' ? 'history' : getDefaultWsSubtab(ws);
-  }
   if (subtab === 'init') {
     return (ws.has_init && !_initClosed.has(ws.id)) ? 'init' : getDefaultWsSubtab(ws);
   }
@@ -122,20 +104,6 @@ function getTerminalConfig() {
       selectionBackground: 'rgba(129, 140, 248, 0.3)',
     },
   };
-}
-
-function buildAgentCommand(agent, proj) {
-  let cmd = agent === 'Codex' ? 'codex' : 'claude';
-  if ((agent === 'Claude' || agent === 'Codex') && proj && proj.claude_internet) {
-    cmd += ' --dangerously-enable-internet-mode';
-  }
-  if (agent === 'Claude' && proj && proj.claude_skip_permissions) {
-    cmd += ' --dangerously-skip-permissions';
-  }
-  if (proj && proj.conda_env) {
-    cmd = 'conda activate ' + proj.conda_env + ' && ' + cmd;
-  }
-  return cmd;
 }
 
 function containsEraseDisplay(data) {
@@ -280,10 +248,6 @@ async function showAddProject() {
     {id: 'proj-name', placeholder: 'Project name'},
     {id: 'proj-dir', placeholder: 'Root directory'},
     {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: false, disabled: true},
-    {id: 'proj-agent', type: 'select', label: 'Agent', options: ['Claude', 'Codex', 'None'], value: 'Claude'},
-    {id: 'proj-agent-options-heading', type: 'heading', label: 'Claude Options'},
-    {id: 'proj-claude-internet', type: 'checkbox', label: '--dangerously-enable-internet-mode', checked: false, section: 'agent-options'},
-    {id: 'proj-claude-skip-perms', type: 'checkbox', label: '--dangerously-skip-permissions', checked: false, section: 'agent-options'},
   ], async (values) => {
     const name = values['proj-name'];
     const dir = values['proj-dir'];
@@ -299,9 +263,6 @@ async function showAddProject() {
     const projectBody = {
       name, root_dir: dir,
       git: values['proj-git'],
-      agent: values['proj-agent'],
-      claude_internet: values['proj-claude-internet'],
-      claude_skip_permissions: values['proj-claude-skip-perms'],
     };
     try {
       const res = await fetch('/api/projects', {
@@ -363,7 +324,6 @@ async function showAddProject() {
 async function showProjectInfo(name) {
   const p = _projects.find(proj => proj.name === name);
   if (!p) return;
-  const agentVal = getProjectAgent(p);
   const isGit = await checkIsGitDir(p.root_dir);
   // Fetch branches for the default branch combobox (best-effort)
   let branches = [];
@@ -385,10 +345,6 @@ async function showProjectInfo(name) {
     {id: 'proj-dir', placeholder: 'Root directory', value: p.root_dir},
     {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: isGit && p.git, disabled: !isGit},
     {id: 'proj-default-branch', type: 'combobox', label: 'Default branch', options: branchOptions, value: p.default_branch || 'HEAD'},
-    {id: 'proj-agent', type: 'select', label: 'Agent', options: ['Claude', 'Codex', 'None'], value: agentVal},
-    {id: 'proj-agent-options-heading', type: 'heading', label: 'Claude Options'},
-    {id: 'proj-claude-internet', type: 'checkbox', label: '--dangerously-enable-internet-mode', checked: p.claude_internet, section: 'agent-options'},
-    {id: 'proj-claude-skip-perms', type: 'checkbox', label: '--dangerously-skip-permissions', checked: p.claude_skip_permissions, section: 'agent-options'},
   ];
   showForm('Edit Project', fields, async (values) => {
     const newName = values['proj-name'];
@@ -407,9 +363,6 @@ async function showProjectInfo(name) {
         body: JSON.stringify({
           name: newName, root_dir: dir,
           git: values['proj-git'],
-          agent: values['proj-agent'],
-          claude_internet: values['proj-claude-internet'],
-          claude_skip_permissions: values['proj-claude-skip-perms'],
           default_branch: (branch && branch !== 'HEAD') ? branch : '',
         }),
       });
@@ -532,19 +485,15 @@ async function fetchWorkspaces() {
       _wsDividerPos = data.divider_pos;
     }
     // Initialize activity timestamps and titles from server-reported tmux data
-    for (const ws of workspaces) {
-      if (ws.agent_title && !_wsTitles[ws.id]) {
-        _wsTitles[ws.id] = ws.agent_title;
-      }
-    }
     renderWorkspaces();
   } catch {}
 }
 
 
 // Pure state machine for activity dots.
-function isAgentPaneSelected(selectedWsId, selectedSubtab, wsId) {
-  return selectedWsId === wsId && selectedSubtab === 'agent';
+
+function isWsSelected(selectedWsId, wsId) {
+  return selectedWsId === wsId;
 }
 
 function shouldRecordOutput(isSelected, now, graceUntil) {
@@ -553,11 +502,6 @@ function shouldRecordOutput(isSelected, now, graceUntil) {
   return true;
 }
 
-// prev: current state ('' | 'busy' | 'slowing' | 'done')
-// lastOutputMs: timestamp of last text output (ms), or null/undefined
-// now: current time (ms)
-// isSelected: whether this workspace is currently selected by the user
-// isBuilding: whether the init/build is still running (forces busy regardless of output)
 function computeDotState(prev, lastOutputMs, now, isSelected, isBuilding) {
   if (isSelected) return '';
   if (isBuilding) return 'busy';
@@ -577,13 +521,10 @@ function computeDotState(prev, lastOutputMs, now, isSelected, isBuilding) {
     if (recentOutput) return 'busy';
     return 'slowing';
   }
-  // prev === '' (gray)
   if (recentOutput) return 'busy';
   return '';
 }
 
-// Full tick: compute new state and clear output if user is watching.
-// Returns { state, outputMs, notify, graceUntil }.
 function tickDot(prev, lastOutputMs, now, isSelected, wasSelected, isBuilding) {
   const state = computeDotState(prev, lastOutputMs, now, isSelected, isBuilding);
   const justDeselected = wasSelected && !isSelected;
@@ -599,7 +540,7 @@ function updateActivityDots() {
   const now = Date.now();
   for (const ws of _workspaces) {
     const prev = _wsDotState[ws.id] || '';
-    const isSelected = isAgentPaneSelected(_selectedWsId, _selectedWsSubtab, ws.id);
+    const isSelected = isWsSelected(_selectedWsId, ws.id);
     const wasSelected = _wsWasSelected[ws.id] || false;
     const isBuilding = ws.status === 'building';
     const r = tickDot(prev, _wsLastOutput[ws.id], now, isSelected, wasSelected, isBuilding);
@@ -607,17 +548,13 @@ function updateActivityDots() {
     _wsLastOutput[ws.id] = r.outputMs;
     _wsWasSelected[ws.id] = isSelected;
     if (r.graceUntil) _wsOutputGrace[ws.id] = r.graceUntil;
-    const dotClass = _wsDead.has(ws.id) ? 'dead' : r.state;
     const sidebar = document.getElementById('activity-ws-' + ws.id);
-    if (sidebar) sidebar.className = 'activity-dot' + (dotClass ? ' ' + dotClass : '');
-    const tab = document.getElementById('activity-tab-' + ws.id);
-    if (tab) tab.className = 'activity-dot' + (dotClass ? ' ' + dotClass : '');
-    if (r.notify && !_wsDead.has(ws.id)) notifyIdle(ws.name);
+    if (sidebar) sidebar.className = 'activity-dot' + (r.state ? ' ' + r.state : '');
+    if (r.notify) notifyIdle(ws.name);
   }
 }
 
 function notifyIdle(name) {
-  // In-page toast
   const toast = document.createElement('div');
   toast.className = 'idle-toast';
   toast.textContent = `${name} is idle`;
@@ -627,8 +564,6 @@ function notifyIdle(name) {
     toast.classList.remove('show');
     setTimeout(() => toast.remove(), 300);
   }, 5000);
-
-  // Browser notification (best-effort)
   if (Notification.permission === 'granted') {
     new Notification('AgentDispatch', { body: `${name} is idle`, tag: 'idle-' + name });
   } else if (Notification.permission !== 'denied') {
@@ -667,7 +602,6 @@ function renderWorkspaces() {
       <div class="ws-sidebar-info">
         <div class="ws-name" ondblclick="event.stopPropagation(); renameWorkspace(${ws.id})">${esc(ws.name)}</div>
         <div class="ws-project">${esc(ws.project)}</div>
-        <div id="title-ws-${ws.id}" class="ws-title">${esc(_wsTitles[ws.id] || '')}</div>
       </div>
       <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleWsMenu(${ws.id})">\u2026</button>
       <div class="ws-popover" id="ws-menu-${ws.id}">
@@ -928,15 +862,7 @@ function renderSelectedWorkspace() {
       stash.appendChild(entry.container);
     }
   }
-  for (const [, entry] of Object.entries(_historyTerminals)) {
-    if (entry.container.parentElement) {
-      stash.appendChild(entry.container);
-    }
-  }
-
   const proj = _projects.find(p => p.name === ws.project);
-  const agent = getProjectAgent(proj);
-  const agentEnabled = agent !== 'None';
   _selectedWsSubtab = isBuilding ? 'init' : normalizeWsSubtab(ws, _selectedWsSubtab);
   _wsSubtabs[ws.id] = _selectedWsSubtab;
 
@@ -949,7 +875,6 @@ function renderSelectedWorkspace() {
   main.innerHTML = `
     <div class="ws-subtabs">
       ${hasInitTerminal ? `<button class="ws-subtab ${_selectedWsSubtab === 'init' ? 'active' : ''}" onclick="switchWsSubtab('init')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); closeInitTab(${ws.id})">\u2715</span><span class="ws-subtab-label">Init</span></span></button>` : ''}
-      ${!isBuilding && agentEnabled ? `<button class="ws-subtab ${_selectedWsSubtab === 'agent' || _selectedWsSubtab === 'history' ? 'active' : ''}" onclick="switchWsSubtab(_selectedWsSubtab === 'history' ? 'agent' : 'agent')"><span class="ws-subtab-inner"><span id="activity-tab-${ws.id}" class="activity-dot"></span><span class="ws-subtab-label">${esc(agent)}</span><span id="altscreen-agent-${ws.id}" class="altscreen-badge" style="display:none">FS</span><select class="agent-view-select" onchange="switchWsSubtab(this.value); event.stopPropagation();" onclick="event.stopPropagation()"><option value="agent"${_selectedWsSubtab === 'agent' ? ' selected' : ''}>Live</option><option value="history"${_selectedWsSubtab === 'history' ? ' selected' : ''}>History</option></select></span></button>` : ''}
       ${!isBuilding ? tabButtons : ''}
       ${!isBuilding ? `<button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>` : ''}
     </div>
@@ -958,21 +883,9 @@ function renderSelectedWorkspace() {
 
   const paneEl = document.getElementById('ws-active-pane');
   const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
-  if (_selectedWsSubtab === 'agent') {
-    const agentCmd = buildAgentCommand(agent, proj);
-    const agentTerminal = _tabTerminals['agent-' + ws.id];
-    if (agentTerminal && (agentTerminal.opts.cmd !== agentCmd || agentTerminal.opts.cwd !== cwd)) {
-      disposeTerminal('agent-' + ws.id);
-    }
-    initTerminal('agent-' + ws.id, paneEl, {cwd, cmd: agentCmd, workspaceId: ws.id, tabId: 'agent'});
-  } else if (_selectedWsSubtab === 'history') {
-    const histEntry = getOrCreateHistoryTerminal(ws.id);
-    paneEl.appendChild(histEntry.container);
-    requestAnimationFrame(() => { histEntry.fitAddon.fit(); });
-  } else if (_selectedWsSubtab === 'init' && hasInitTerminal) {
+  if (_selectedWsSubtab === 'init' && hasInitTerminal) {
     initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
   } else if (!_selectedWsSubtab) {
-    disposeTerminal('agent-' + ws.id);
     paneEl.innerHTML = '<div class="ws-empty" style="padding:16px">No panes open</div>';
   } else {
     const tabId = parseInt(_selectedWsSubtab.replace('tab-', ''));
@@ -1001,46 +914,6 @@ function reconnectAllTerminals() {
   }
 }
 
-function getOrCreateHistoryTerminal(wsId) {
-  if (_historyTerminals[wsId]) return _historyTerminals[wsId];
-
-  const container = document.createElement('div');
-  container.style.flex = '1';
-  container.style.minHeight = '0';
-
-  const term = new Terminal({
-    ...getTerminalConfig(),
-    disableStdin: true,
-    scrollback: 20000,
-    cursorBlink: false,
-  });
-  const fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-
-  const resizeObserver = new ResizeObserver(() => { fitAddon.fit(); });
-  resizeObserver.observe(container);
-
-  const entry = { term, fitAddon, container, resizeObserver };
-  _historyTerminals[wsId] = entry;
-  return entry;
-}
-
-function captureAndAppendSnapshot(wsId, agentTerm) {
-  if (typeof SerializeAddon === 'undefined') return;
-  const histEntry = getOrCreateHistoryTerminal(wsId);
-  const addon = new SerializeAddon.SerializeAddon();
-  agentTerm.loadAddon(addon);
-  const serialized = addon.serialize({ scrollback: 0 });
-  addon.dispose();
-
-  if (!serialized || serialized.trim() === '') return;
-
-  const sep = '\r\n\x1b[38;5;240m' + '\u2500'.repeat(60) + '\x1b[0m\r\n';
-  histEntry.term.write(sep);
-  histEntry.term.write(serialized);
-}
 
 function initTerminal(key, paneEl, opts) {
   // Reuse existing terminal — never detach from DOM to preserve scroll state.
@@ -1094,9 +967,6 @@ function initTerminal(key, paneEl, opts) {
 
   const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true };
   _tabTerminals[key] = entry;
-  if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
-    _wsDead.delete(opts.workspaceId);
-  }
 
   function connectWs() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1129,9 +999,6 @@ function initTerminal(key, paneEl, opts) {
         if (typeof key === 'number') {
           _exitedTabs.add(key);
           renderSelectedWorkspace();
-        } else if (typeof key === 'string' && key.startsWith('agent-') && opts.workspaceId != null) {
-          _wsDead.add(opts.workspaceId);
-          updateActivityDots();
         }
         return;
       }
@@ -1146,19 +1013,12 @@ function initTerminal(key, paneEl, opts) {
         return;
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
-      // Track agent output for activity dot.
-      // Skip the first 2s after connection — that's capture-pane replay, not live output.
-      // Don't record while user is watching or during the grace period after leaving.
-      if (typeof key === 'string' && (key.startsWith('agent-') || key.startsWith('init-')) && opts.workspaceId != null
+      if (opts.workspaceId != null
           && entry.connectedAt && Date.now() - entry.connectedAt > 2000
           && shouldRecordOutput(
-              isAgentPaneSelected(_selectedWsId, _selectedWsSubtab, opts.workspaceId),
+              isWsSelected(_selectedWsId, opts.workspaceId),
               Date.now(), _wsOutputGrace[opts.workspaceId])) {
         _wsLastOutput[opts.workspaceId] = Date.now();
-      }
-      // Capture agent terminal screen before erase-display clears it
-      if (typeof key === 'string' && key.startsWith('agent-') && data instanceof Uint8Array && containsEraseDisplay(data)) {
-        captureAndAppendSnapshot(opts.workspaceId, term);
       }
       // Auto-scroll: use _autoScroll flag instead of checking viewportY vs
       // baseY on each write. The flag is only cleared by explicit user
@@ -1286,14 +1146,6 @@ function initTerminal(key, paneEl, opts) {
     if (entry.ws && entry.ws.readyState === WebSocket.OPEN) { entry.ws.send(data); }
   });
 
-  // Track pane title changes (OSC 0/2)
-  if (opts.workspaceId != null) {
-    term.onTitleChange((title) => {
-      _wsTitles[opts.workspaceId] = title;
-      const sideEl = document.getElementById('title-ws-' + opts.workspaceId);
-      if (sideEl) sideEl.textContent = title;
-    });
-  }
 
   // Copy-on-select: copy to clipboard whenever text is selected (like iTerm2)
   term.onSelectionChange(() => {
@@ -1398,7 +1250,6 @@ async function recreateWorkspace(id) {
   if (ws) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
   }
-  disposeTerminal('agent-' + id);
   const res = await fetch(`/api/workspaces/${id}/recreate`, {method: 'POST'});
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -1412,12 +1263,6 @@ async function destroyWorkspace(id) {
   const ws = _workspaces.find(w => w.id === id);
   if (ws) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
-  }
-  disposeTerminal('agent-' + id);
-  if (_historyTerminals[id]) {
-    _historyTerminals[id].resizeObserver.disconnect();
-    _historyTerminals[id].term.dispose();
-    delete _historyTerminals[id];
   }
   const removeIdx = _workspaces.findIndex(w => w.id === id);
   _workspaces = _workspaces.filter(w => w.id !== id);
@@ -1602,43 +1447,6 @@ function openDialog(msg, fields, callback, opts) {
     parentCb.addEventListener('change', update);
   });
 
-  const agentSelect = document.getElementById('dlg-proj-agent');
-  const agentHeading = document.getElementById('dlg-proj-agent-options-heading');
-  const agentRows = container.querySelectorAll('[data-section="agent-options"]');
-  const internetInput = document.getElementById('dlg-proj-claude-internet');
-  const skipPermsInput = document.getElementById('dlg-proj-claude-skip-perms');
-  if (agentSelect && agentHeading && agentRows.length > 0) {
-    const updateAgentOptions = () => {
-      const agent = agentSelect.value;
-      if (agent === 'Claude') agentHeading.textContent = 'Claude Options';
-      else if (agent === 'Codex') agentHeading.textContent = 'Codex Options';
-      else agentHeading.textContent = 'Agent Options';
-
-      const enabled = agent !== 'None';
-      agentHeading.style.opacity = enabled ? '1' : '0.45';
-      agentRows.forEach(row => {
-        row.style.opacity = enabled ? '1' : '0.45';
-        row.querySelectorAll('input, select, button').forEach(el => {
-          el.disabled = !enabled;
-        });
-      });
-
-      if (internetInput) {
-        const internetLabel = internetInput.closest('label');
-        if (internetLabel) internetLabel.style.display = enabled ? '' : 'none';
-      }
-
-      if (skipPermsInput) {
-        const skipPermsLabel = skipPermsInput.closest('label');
-        const showSkipPerms = agent === 'Claude';
-        skipPermsInput.disabled = !showSkipPerms;
-        if (skipPermsLabel) skipPermsLabel.style.display = showSkipPerms ? '' : 'none';
-      }
-    };
-    updateAgentOptions();
-    agentSelect.addEventListener('change', updateAgentOptions);
-  }
-
   document.getElementById('dialog-cancel').style.display = callback ? '' : 'none';
   const okBtn = document.getElementById('dialog-ok');
   if (opts && opts.destructive) {
@@ -1750,16 +1558,14 @@ function clearPaneError(entry) {
 /* Node.js exports for testing */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    getProjectAgent,
     getDefaultWsSubtab,
     normalizeWsSubtab,
     getTerminalConfig,
-    buildAgentCommand,
     escAttr,
     containsEraseDisplay,
     computeDotState,
     tickDot,
-    isAgentPaneSelected,
+    isWsSelected,
     shouldRecordOutput,
     morphdomShouldUpdate,
     adjustDividerAfterRemove,

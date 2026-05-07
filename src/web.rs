@@ -190,7 +190,7 @@ mod tests {
         let req = actix_web::test::TestRequest::get().uri("/app.js").to_request();
         let body = actix_web::test::call_and_read_body(&app, req).await;
         let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("function getProjectAgent("));
+        assert!(text.contains("function getDefaultWsSubtab("));
         assert!(text.contains("function getTerminalConfig("));
         assert!(text.contains("function buildAgentCommand("));
     }

@@ -429,32 +429,48 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
-/// Query pane titles for all agent panes.
-/// Returns a map of workspace ID → title string.
-pub fn agent_pane_titles() -> std::collections::HashMap<i64, String> {
-    let mut result = std::collections::HashMap::new();
+pub fn first_pane_cwd(session: &str) -> Option<String> {
     let output = tmux_base()
-        .args(["list-panes", "-a", "-F", "#{session_name}\t#{window_name}\t#{pane_title}"])
+        .args(["list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{pane_current_path}"])
         .output();
     if let Ok(o) = output {
         if o.status.success() {
             for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let parts: Vec<&str> = line.trim().splitn(3, '\t').collect();
-                if parts.len() == 3 && parts[1] == "agent" {
-                    if let Some(id_str) = parts[0].strip_prefix("ws-") {
-                        if let Ok(id) = id_str.parse::<i64>() {
-                            if id_str.contains('-') && id_str.contains("--") { continue; }
-                            let title = parts[2].to_string();
-                            if !title.is_empty() {
-                                result.insert(id, title);
-                            }
-                        }
+                let parts: Vec<&str> = line.splitn(2, '\t').collect();
+                if parts.len() == 2 && parts[0] != "init" {
+                    let path = parts[1].trim();
+                    if !path.is_empty() {
+                        return Some(path.to_string());
                     }
                 }
             }
         }
     }
-    result
+    None
+}
+
+pub fn rename_window(session: &str, old_name: &str, new_name: &str) {
+    let target = format!("{session}:{old_name}");
+    tmux_base()
+        .args(["rename-window", "-t", &target, new_name])
+        .output()
+        .ok();
+}
+
+pub fn list_windows(session: &str) -> Vec<String> {
+    let output = tmux_base()
+        .args(["list-windows", "-t", session, "-F", "#{window_name}"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Capture scrollback history + visible content of a pane with cursor position.
