@@ -50,7 +50,7 @@ enum SessionMode {
     /// Direct shell — raw PTY passthrough
     Direct,
     /// tmux control mode — parse %output, send-keys -H
-    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool },
+    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool, initial_title: Option<String> },
 }
 
 #[get("/api/terminal")]
@@ -84,13 +84,14 @@ pub async fn ws_terminal(
             }
             let (c, a, pane_id, link_name, window_id) = tmux::attach_args(&tmux_session, &tmux_window)?;
             let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
-            tlog!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen}");
-            Ok((c, a, pane_id, link_name, window_id, initial_alt_screen))
+            let initial_title = tmux::pane_title(&tmux_session, &tmux_window);
+            tlog!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen} title={initial_title:?}");
+            Ok((c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title))
         }).await.map_err(|e| actix_web::error::ErrorInternalServerError(format!("{e}")))?
           .map_err(|e| actix_web::error::ErrorNotFound(e))?;
 
-        let (c, a, pane_id, link_name, window_id, initial_alt_screen) = result;
-        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen })
+        let (c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title) = result;
+        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title })
     } else {
         let shell = user_shell();
         let args = if let Some(ref run_cmd) = cmd {
@@ -101,7 +102,7 @@ pub async fn ws_terminal(
         (shell, args, SessionMode::Direct)
     };
 
-    let (response, session, msg_stream) = actix_ws::handle(&req, stream)?;
+    let (response, mut session, msg_stream) = actix_ws::handle(&req, stream)?;
 
     // Open PTY
     let pty = nix::pty::openpty(None, None).map_err(|e| {
@@ -189,12 +190,19 @@ pub async fn ws_terminal(
         SessionMode::Direct => {
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
-        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen } => {
+        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title } => {
             let initial_content = tmux::capture_pane_with_cursor(&pane_id);
 
             // Send initial resize
             let resize_cmd = tmux_cc::encode_resize(init_cols, init_rows);
             std_file_write(&tokio_fd, &resize_cmd);
+
+            // Send initial pane title if set
+            if let Some(ref title) = initial_title {
+                let escaped = title.replace('\\', "\\\\").replace('"', "\\\"");
+                let msg = format!("{{\"type\":\"pane_title\",\"title\":\"{escaped}\"}}");
+                let _ = session.text(msg).await;
+            }
 
             spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen);
         }
@@ -453,8 +461,12 @@ fn spawn_cc_bridge(
                                         break 'outer;
                                     }
                                     CcEvent::OtherWindowClosed { window_id: wid } => {
-                                        // Route to whichever reader owns that window.
                                         tmux_cc::notify_window_closed(&wid);
+                                    }
+                                    CcEvent::PaneTitleChanged { title } => {
+                                        let escaped = title.replace('\\', "\\\\").replace('"', "\\\"");
+                                        let msg = format!("{{\"type\":\"pane_title\",\"title\":\"{escaped}\"}}");
+                                        let _ = session_clone.text(msg).await;
                                     }
                                 }
                             }

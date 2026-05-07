@@ -203,6 +203,8 @@ pub enum CcEvent {
     /// Observed `%unlinked-window-close` for a window other than ours.
     /// The caller should route this to whichever reader owns `window_id`.
     OtherWindowClosed { window_id: String },
+    /// The pane's title changed (tmux %pane-title-changed notification).
+    PaneTitleChanged { title: String },
 }
 
 /// Parses tmux control mode output from raw PTY bytes.
@@ -317,6 +319,20 @@ impl CcReader {
             if line.starts_with(b"%exit") {
                 self.saw_exit = true;
                 return Some(CcEvent::Exit);
+            }
+
+            // %pane-title-changed %<pane_id> <title>
+            if line.starts_with(b"%pane-title-changed ") {
+                if let Ok(s) = std::str::from_utf8(&line[20..]) {
+                    if let Some(space) = s.find(' ') {
+                        let pane = &s[..space];
+                        if pane.as_bytes() == self.pane_id.as_bytes() {
+                            let title = s[space + 1..].to_string();
+                            return Some(CcEvent::PaneTitleChanged { title });
+                        }
+                    }
+                }
+                continue;
             }
 
             // Detect window close — when the pane's window is destroyed

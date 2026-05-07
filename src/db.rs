@@ -86,6 +86,7 @@ pub struct Project {
     pub default_branch: String,
 }
 
+#[allow(dead_code)]
 pub fn list_projects(conn: &Connection) -> Vec<Project> {
     let mut stmt = conn
         .prepare("SELECT name, root_dir, git, agent, claude_internet, claude_skip_permissions, conda_env, default_branch FROM projects ORDER BY name")
@@ -107,6 +108,7 @@ pub fn list_projects(conn: &Connection) -> Vec<Project> {
     .collect()
 }
 
+#[allow(dead_code)]
 pub fn add_project(
     conn: &Connection,
     name: &str,
@@ -133,6 +135,7 @@ pub fn add_project(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn update_project(
     conn: &Connection,
     old_name: &str,
@@ -161,6 +164,7 @@ pub fn update_project(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn remove_project(conn: &Connection, name: &str) {
     conn.execute("DELETE FROM projects WHERE name = ?1", rusqlite::params![name])
         .ok();
@@ -324,6 +328,7 @@ pub fn rename_workspace(conn: &Connection, id: i64, name: &str) {
     .ok();
 }
 
+#[allow(dead_code)]
 pub fn update_workspace_status(conn: &Connection, id: i64, status: &str, worktree_dir: Option<&str>) {
     conn.execute(
         "UPDATE workspaces SET status = ?1, worktree_dir = ?2 WHERE id = ?3",

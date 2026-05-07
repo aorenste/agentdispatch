@@ -318,21 +318,6 @@ pub fn kill_window(session: &str, window: &str) {
 /// Check init pane status in a single tmux command.
 /// Returns None if the window doesn't exist or the command fails.
 /// Returns Some((dead, exit_status)) if successful.
-pub fn init_pane_status(session: &str) -> Option<(bool, Option<i32>)> {
-    let target = format!("{session}:init");
-    let output = tmux_base()
-        .args(["display-message", "-t", &target, "-p", "#{pane_dead} #{pane_dead_status}"])
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
-    let s = String::from_utf8_lossy(&output.stdout);
-    let s = s.trim();
-    let mut parts = s.splitn(2, ' ');
-    let dead = parts.next()? == "1";
-    let status = parts.next().and_then(|v| v.parse::<i32>().ok());
-    Some((dead, status))
-}
-
 /// Query the pane ID and window ID for a given session:window.
 fn get_pane_and_window_id(session: &str, window: &str) -> Result<(String, String), String> {
     let target = format!("{session}:{window}");
@@ -599,6 +584,17 @@ fn assemble_capture_output(
 }
 
 /// Query whether a pane is currently in alternate screen mode.
+pub fn pane_title(session: &str, window: &str) -> Option<String> {
+    let target = format!("{session}:{window}");
+    let output = tmux_base()
+        .args(["list-panes", "-t", &target, "-F", "#{pane_title}"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if title.is_empty() { None } else { Some(title) }
+}
+
 pub fn is_alternate_screen(session: &str, window: &str) -> bool {
     let target = format!("{session}:{window}");
     let output = tmux_base()

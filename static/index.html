@@ -258,6 +258,15 @@
     background: var(--bg-card);
     overflow-y: auto;
   }
+  .ws-new-btn {
+    padding: 6px 10px;
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+  }
+  .ws-new-btn:hover { background: rgba(99, 102, 241, 0.08); }
   .ws-sidebar-item {
     display: flex;
     align-items: center;
@@ -394,6 +403,16 @@
   .ws-subtab-close:hover { opacity: 1; background: rgba(248, 113, 113, 0.25); }
   .ws-subtab-label { cursor: default; }
   .ws-subtab .ws-subtab-label:hover { text-decoration: underline; text-decoration-style: dotted; }
+  .pane-title-bar {
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+    background: #1a1a2e;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .ws-pane { display: none; flex: 1; padding: 4px; overflow: hidden; min-height: 0; background: #000; }
   .ws-pane.active { display: flex; flex-direction: column; }
 
@@ -489,21 +508,7 @@
   <div id="conn-overlay"></div>
   <div id="conn-status"></div>
 
-  <div class="tab-bar">
-    <button class="tab-btn active" onclick="switchTab('projects')">Projects</button>
-    <button class="tab-btn" onclick="switchTab('workspaces')">Workspaces</button>
-  </div>
-
-  <div id="tab-projects" class="tab-content active">
-    <div class="section-header">
-      <h2>Projects</h2>
-      <button class="btn-primary" onclick="showAddProject()" style="padding:4px 10px;font-size:12px">Add</button>
-    </div>
-    <div id="projects"></div>
-    <div id="no-projects" class="empty-msg">No projects yet.</div>
-  </div>
-
-  <div id="tab-workspaces" class="tab-content">
+  <div id="tab-workspaces" class="tab-content active">
     <div class="ws-layout">
       <div class="ws-sidebar" id="ws-sidebar"></div>
       <div class="ws-main" id="ws-main">

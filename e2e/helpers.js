@@ -139,41 +139,38 @@ async function waitForReady(request, base, wsId) {
   }
 }
 
-/** Create a project + workspace + shell tab, return { wsId, tabId } */
+/** Create a workspace + shell tab, return { wsId, tabId } */
 async function setupWorkspace(request, base, projectName) {
+  // Clean up any leftover workspaces from previous runs with this name
   const wsRes = await request.get(`${base}/api/workspaces`);
   const wsData = await wsRes.json();
   for (const ws of (wsData.workspaces || wsData)) {
-    if (ws.project === projectName) {
+    if (ws.name === projectName) {
       await request.delete(`${base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${base}/api/projects/${projectName}`);
 
-  await request.post(`${base}/api/projects`, {
-    data: { name: projectName, root_dir: '/tmp', git: false, agent: 'None' },
+  const createRes = await request.post(`${base}/api/workspaces`, {
+    data: { name: projectName },
   });
-  const launchRes = await request.post(`${base}/api/projects/${projectName}/launch`, { data: {} });
-  if (!launchRes.ok()) throw new Error(`Failed to launch ${projectName}: ${launchRes.status()}`);
-  const ws = await launchRes.json();
-  await waitForReady(request, base, ws.id);
-  const tabRes = await request.post(`${base}/api/workspaces/${ws.id}/tabs`, {
-    data: { name: 'Shell', tab_type: 'shell' },
-  });
-  if (!tabRes.ok()) throw new Error(`Failed to create tab in ws ${ws.id}: ${tabRes.status()}`);
-  const tab = await tabRes.json();
+  if (!createRes.ok()) throw new Error(`Failed to create workspace ${projectName}: ${createRes.status()}`);
+  const ws = await createRes.json();
+  // Workspace comes with a shell tab already; find it
+  const listRes = await request.get(`${base}/api/workspaces`);
+  const list = await parseWorkspaces(listRes);
+  const current = list.find(w => w.id === ws.id);
+  const tab = current && current.tabs && current.tabs[0];
+  if (!tab) throw new Error(`No tab found in workspace ${ws.id}`);
   return { wsId: ws.id, tabId: tab.id };
 }
 
 async function teardownWorkspace(request, base, projectName, wsId) {
   if (wsId) await request.delete(`${base}/api/workspaces/${wsId}`);
-  await request.delete(`${base}/api/projects/${projectName}`);
 }
 
 function makeHelpers(getTabId, getBase, projectName) {
   async function connectToTerminal(page) {
     await page.goto(getBase() + '/');
-    await page.click('text=Workspaces');
     await page.waitForSelector('.ws-sidebar-item');
     await page.locator('.ws-sidebar-item').filter({ hasText: projectName }).click();
     await page.waitForSelector('.xterm-screen');

@@ -47,7 +47,6 @@ if (typeof window !== 'undefined') (function() {
 
 let evtSource = null;
 let buildHash = null;
-let _projects = [];
 let _workspaces = [];
 let _selectedWsId = null;
 let _selectedWsSubtab = '';
@@ -59,7 +58,6 @@ const _wsWasSelected = {}; // workspace id -> was selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
 const _exitedTabs = new Set(); // tab ids whose pane has exited (kept until user dismisses)
 let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
-const _initClosed = new Set(); // workspace ids where user closed the init tab
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -83,9 +81,6 @@ function getDefaultWsSubtab(ws) {
 
 function normalizeWsSubtab(ws, subtab) {
   if (!ws) return '';
-  if (subtab === 'init') {
-    return (ws.has_init && !_initClosed.has(ws.id)) ? 'init' : getDefaultWsSubtab(ws);
-  }
   if (subtab && subtab.startsWith('tab-')) {
     return ws.tabs.some(t => 'tab-' + t.id === subtab) ? subtab : getDefaultWsSubtab(ws);
   }
@@ -147,7 +142,6 @@ function connectSSE() {
     status.className = 'connected';
     setTimeout(() => { status.style.display = 'none'; }, 2000);
     // Refresh all data from server (handles --reset, server restart, etc.)
-    fetchProjects();
     fetchWorkspaces();
     reconnectAllTerminals();
   });
@@ -169,15 +163,6 @@ function connectSSE() {
   };
 }
 
-/* Projects */
-async function fetchProjects() {
-  try {
-    const res = await fetch('/api/projects');
-    const projects = await res.json();
-    renderProjects(projects);
-  } catch {}
-}
-
 function esc(s) {
   const d = document.createElement('div');
   d.textContent = s;
@@ -190,290 +175,6 @@ function escAttr(s) {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-function renderProjects(projects) {
-  _projects = projects;
-  const container = document.getElementById('projects');
-  const empty = document.getElementById('no-projects');
-  if (projects.length === 0) {
-    container.innerHTML = '';
-    empty.style.display = 'block';
-    return;
-  }
-  empty.style.display = 'none';
-  container.innerHTML = projects.map(p => `
-    <div class="project-row">
-      <div class="project-info">
-        <span class="project-name">${esc(p.name)}</span>
-        <span class="project-dir">${esc(p.root_dir)}</span>
-      </div>
-      <div class="project-actions">
-        <button class="btn-primary" onclick="launchProject('${escAttr(p.name)}')">Launch</button>
-        <button class="btn-secondary" onclick="showProjectInfo('${escAttr(p.name)}')">Edit</button>
-        <button class="btn-danger" onclick="removeProject('${escAttr(p.name)}')">Remove</button>
-      </div>
-    </div>
-  `).join('');
-}
-
-async function fetchCondaEnvs() {
-  try {
-    const res = await fetch('/api/conda-envs');
-    return await res.json();
-  } catch { return []; }
-}
-
-async function readApiError(res, fallback) {
-  try {
-    const data = await res.json();
-    return data && data.error ? data.error : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-async function checkIsGitDir(path) {
-  if (!path) return false;
-  try {
-    const res = await fetch(`/api/check-git?path=${encodeURIComponent(path)}`);
-    if (res.ok) {
-      const data = await res.json();
-      return !!data.git;
-    }
-  } catch {}
-  return false;
-}
-
-async function showAddProject() {
-  showForm('Add Project', [
-    {id: 'proj-name', placeholder: 'Project name'},
-    {id: 'proj-dir', placeholder: 'Root directory'},
-    {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: false, disabled: true},
-  ], async (values) => {
-    const name = values['proj-name'];
-    const dir = values['proj-dir'];
-    // Force git off if the checkbox is disabled (non-git dir)
-    const gitCb = document.getElementById('dlg-proj-git');
-    if (gitCb && gitCb.disabled) values['proj-git'] = false;
-    if (!name) {
-      return 'Project name is required.';
-    }
-    if (!dir) {
-      return 'Root directory is required.';
-    }
-    const projectBody = {
-      name, root_dir: dir,
-      git: values['proj-git'],
-    };
-    try {
-      const res = await fetch('/api/projects', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(projectBody),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        if (data && data.dir_not_found) {
-          closeDialog();
-          openDialog(`Directory "${dir}" does not exist. Create it?`, [], async () => {
-            const res2 = await fetch('/api/projects', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({...projectBody, create_dir: true, git: true}),
-            });
-            if (!res2.ok) {
-              const err = await readApiError(res2, 'Failed to create project.');
-              setDialogError(err);
-              return false;
-            }
-            fetchProjects();
-          }, {okText: 'Create'});
-          return false;
-        }
-        return (data && data.error) || `Failed to add project. "${dir}" must be an existing directory.`;
-      }
-      fetchProjects();
-    } catch {
-      return 'Failed to add project. Check that the server is reachable and try again.';
-    }
-  });
-  // Wire up auto-detect: when directory field loses focus, check if it's a git repo
-  const dirInput = document.getElementById('dlg-proj-dir');
-  const gitCb = document.getElementById('dlg-proj-git');
-  if (dirInput && gitCb) {
-    const updateGit = async () => {
-      const path = dirInput.value.trim();
-      if (!path) {
-        gitCb.checked = false;
-        gitCb.disabled = true;
-        return;
-      }
-      const isGit = await checkIsGitDir(path);
-      // Only auto-check when transitioning from disabled to enabled
-      // (first detection). Don't override if the user already unchecked it.
-      if (isGit && gitCb.disabled) {
-        gitCb.checked = true;
-      } else if (!isGit) {
-        gitCb.checked = false;
-      }
-      gitCb.disabled = !isGit;
-    };
-    dirInput.addEventListener('blur', updateGit);
-  }
-}
-
-async function showProjectInfo(name) {
-  const p = _projects.find(proj => proj.name === name);
-  if (!p) return;
-  const isGit = await checkIsGitDir(p.root_dir);
-  // Fetch branches for the default branch combobox (best-effort)
-  let branches = [];
-  if (isGit) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`/api/projects/${encodeURIComponent(name)}/branches`, { signal: controller.signal });
-      clearTimeout(timer);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) branches = data;
-      }
-    } catch {}
-  }
-  const branchOptions = ['HEAD', ...branches.filter(b => b !== 'HEAD')];
-  const fields = [
-    {id: 'proj-name', placeholder: 'Project name', value: p.name},
-    {id: 'proj-dir', placeholder: 'Root directory', value: p.root_dir},
-    {id: 'proj-git', type: 'checkbox', label: 'Make new git worktree', checked: isGit && p.git, disabled: !isGit},
-    {id: 'proj-default-branch', type: 'combobox', label: 'Default branch', options: branchOptions, value: p.default_branch || 'HEAD'},
-  ];
-  showForm('Edit Project', fields, async (values) => {
-    const newName = values['proj-name'];
-    const dir = values['proj-dir'];
-    if (!newName) {
-      return 'Project name is required.';
-    }
-    if (!dir) {
-      return 'Root directory is required.';
-    }
-    const branch = values['proj-default-branch'];
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          name: newName, root_dir: dir,
-          git: values['proj-git'],
-          default_branch: (branch && branch !== 'HEAD') ? branch : '',
-        }),
-      });
-      if (!res.ok) {
-        return await readApiError(res, `Failed to update project. "${dir}" must be an existing directory.`);
-      }
-      fetchProjects();
-    } catch {
-      return 'Failed to update project. Check that the server is reachable and try again.';
-    }
-  });
-  // Show/hide default branch combobox based on git checkbox
-  const gitCb = document.getElementById('dlg-proj-git');
-  const branchField = document.getElementById('dlg-proj-default-branch');
-  const branchRow = branchField ? branchField.closest('.combobox') : null;
-  const branchLabel = branchRow ? branchRow.previousElementSibling : null;
-  const updateBranchVisibility = () => {
-    const show = gitCb && gitCb.checked;
-    if (branchRow) branchRow.style.display = show ? '' : 'none';
-    if (branchLabel && branchLabel.classList.contains('dialog-heading')) branchLabel.style.display = show ? '' : 'none';
-  };
-  if (gitCb) {
-    gitCb.addEventListener('change', updateBranchVisibility);
-    updateBranchVisibility();
-  }
-  // Wire up auto-detect for directory changes
-  const dirInput = document.getElementById('dlg-proj-dir');
-  if (dirInput && gitCb) {
-    dirInput.addEventListener('blur', async () => {
-      const path = dirInput.value.trim();
-      if (!path) {
-        gitCb.checked = false;
-        gitCb.disabled = true;
-        updateBranchVisibility();
-        return;
-      }
-      const isGit = await checkIsGitDir(path);
-      gitCb.checked = isGit;
-      gitCb.disabled = !isGit;
-      updateBranchVisibility();
-    });
-  }
-}
-
-async function launchProject(name) {
-  const p = _projects.find(proj => proj.name === name);
-  const fields = [
-    {id: 'ws-name', placeholder: 'Workspace name (optional)'},
-  ];
-  if (p && p.git) {
-    // Fetch branches with a timeout so slow repos don't block the dialog
-    let branches = [];
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
-      const res = await fetch(`/api/projects/${encodeURIComponent(name)}/branches`, { signal: controller.signal });
-      clearTimeout(timer);
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) branches = data;
-      }
-    } catch {}
-    const options = ['HEAD', ...branches.filter(b => b !== 'HEAD')];
-    const defaultBranch = p.default_branch || 'HEAD';
-    fields.push({id: 'ws-revision', type: 'combobox', label: 'Start revision', options, value: defaultBranch});
-    fields.push({id: 'ws-fetch', type: 'checkbox', label: 'Fetch latest before creating', checked: true});
-    // Fetch available build variants
-    let builds = [];
-    try {
-      const controller2 = new AbortController();
-      const timer2 = setTimeout(() => controller2.abort(), 5000);
-      const res2 = await fetch(`/api/projects/${encodeURIComponent(name)}/builds`, { signal: controller2.signal });
-      clearTimeout(timer2);
-      if (res2.ok) {
-        const data2 = await res2.json();
-        if (Array.isArray(data2)) builds = data2;
-      }
-    } catch {}
-    if (builds.length > 0) {
-      fields.push({id: 'ws-build', type: 'select', label: 'Build', options: builds, value: builds[0]});
-    }
-  }
-  showForm('Launch Workspace', fields, async (values) => {
-    const body = {};
-    if (values['ws-name']) body.name = values['ws-name'];
-    const rev = values['ws-revision'];
-    if (rev && rev !== 'HEAD') body.revision = rev;
-    if (values['ws-fetch']) body.fetch = true;
-    const build = values['ws-build'];
-    if (build != null && !build) return 'Build variant is required.';
-    if (build) body.build = build;
-    const res = await fetch(`/api/projects/${encodeURIComponent(name)}/launch`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const data = await res.json();
-    if (data.error) { showDialog(data.error); return; }
-    _selectedWsId = data.id;
-    switchTab('workspaces');
-  });
-}
-
-async function removeProject(name) {
-  showConfirm(`Remove project "${name}"?`, async () => {
-    await fetch(`/api/projects/${encodeURIComponent(name)}`, {method: 'DELETE'});
-    fetchProjects();
-  });
-}
-
-/* Workspaces */
 async function fetchWorkspaces() {
   try {
     const res = await fetch('/api/workspaces');
@@ -582,10 +283,24 @@ function saveWorkspaceOrder() {
   });
 }
 
+async function newWorkspace() {
+  const res = await fetch('/api/workspaces', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({}),
+  });
+  const data = await res.json();
+  if (data.error) { showDialog(data.error); return; }
+  _selectedWsId = data.id;
+  switchTab('workspaces');
+  fetchWorkspaces();
+}
+
 function renderWorkspaces() {
   const sidebar = document.getElementById('ws-sidebar');
+  const newBtn = '<div class="ws-new-btn" onclick="newWorkspace()">+ New Workspace</div>';
   if (_workspaces.length === 0) {
-    sidebar.innerHTML = '<div class="ws-empty">No workspaces</div>';
+    sidebar.innerHTML = newBtn + '<div class="ws-empty">No workspaces</div>';
     renderSelectedWorkspace();
     return;
   }
@@ -601,18 +316,16 @@ function renderWorkspaces() {
       <span id="activity-ws-${ws.id}" class="activity-dot"></span>
       <div class="ws-sidebar-info">
         <div class="ws-name" ondblclick="event.stopPropagation(); renameWorkspace(${ws.id})">${esc(ws.name)}</div>
-        <div class="ws-project">${esc(ws.project)}</div>
       </div>
       <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleWsMenu(${ws.id})">\u2026</button>
       <div class="ws-popover" id="ws-menu-${ws.id}">
         <div class="ws-popover-item" onclick="event.stopPropagation(); renameWorkspace(${ws.id})">Rename</div>
-        <div class="ws-popover-item" onclick="event.stopPropagation(); showWsInfo(${ws.id})">Info</div>
         <div class="ws-popover-item danger" onclick="event.stopPropagation(); destroyWorkspace(${ws.id})">Destroy</div>
       </div>
     </div>`;
     return html;
   }).join('');
-  const fullHtml = wsHtml + (dividerPos >= _workspaces.length
+  const fullHtml = newBtn + wsHtml + (dividerPos >= _workspaces.length
     ? '<div class="ws-divider" draggable="true" data-divider="true"><span>\u2015\u2015\u2015</span></div>'
     : '');
 
@@ -766,7 +479,11 @@ function disposeTerminal(key) {
 }
 
 function confirmCloseTab(tabId, tabName) {
-  showConfirm(`Close "${tabName}"?`, () => closeTab(tabId), 'Close');
+  if (_exitedTabs.has(tabId)) {
+    closeTab(tabId);
+  } else {
+    showConfirm(`Close "${tabName}"?`, () => closeTab(tabId), 'Close');
+  }
 }
 
 async function closeTab(tabId) {
@@ -782,17 +499,6 @@ async function closeTab(tabId) {
   renderSelectedWorkspace();
 }
 
-function closeInitTab(wsId) {
-  disposeTerminal('init-' + wsId);
-  _initClosed.add(wsId);
-  if (_selectedWsSubtab === 'init') {
-    const ws = _workspaces.find(w => w.id === wsId);
-    _selectedWsSubtab = getDefaultWsSubtab(ws);
-  }
-  renderSelectedWorkspace();
-  // Kill the tmux init window server-side
-  fetch(`/api/workspaces/${wsId}/kill-init`, { method: 'POST' });
-}
 
 async function renameWorkspace(wsId) {
   closeAllWsMenus();
@@ -840,15 +546,7 @@ function renderSelectedWorkspace() {
     return;
   }
 
-  if (ws.status === 'error') {
-    main.innerHTML = '<div class="ws-empty" style="padding:16px;color:var(--red)">Workspace setup failed</div>';
-    return;
-  }
-  const isBuilding = ws.status === 'building' || ws.status === 'build_failed';
-  const hasInitTerminal = isBuilding || (ws.has_init && !_initClosed.has(ws.id));
-
   // Stash terminal containers in a hidden div before rebuilding innerHTML.
-  // This keeps them in the DOM so xterm.js viewport scroll state is preserved.
   let stash = document.getElementById('terminal-stash');
   if (!stash) {
     stash = document.createElement('div');
@@ -862,8 +560,7 @@ function renderSelectedWorkspace() {
       stash.appendChild(entry.container);
     }
   }
-  const proj = _projects.find(p => p.name === ws.project);
-  _selectedWsSubtab = isBuilding ? 'init' : normalizeWsSubtab(ws, _selectedWsSubtab);
+  _selectedWsSubtab = normalizeWsSubtab(ws, _selectedWsSubtab);
   _wsSubtabs[ws.id] = _selectedWsSubtab;
 
   const tabButtons = ws.tabs.map(t => {
@@ -872,26 +569,26 @@ function renderSelectedWorkspace() {
     return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
   }).join('');
 
+  const currentEntry = _selectedWsSubtab ? _tabTerminals[parseInt(_selectedWsSubtab.replace('tab-', ''))] : null;
+  const currentTitle = currentEntry && currentEntry.paneTitle ? currentEntry.paneTitle : '';
+
   main.innerHTML = `
     <div class="ws-subtabs">
-      ${hasInitTerminal ? `<button class="ws-subtab ${_selectedWsSubtab === 'init' ? 'active' : ''}" onclick="switchWsSubtab('init')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); closeInitTab(${ws.id})">\u2715</span><span class="ws-subtab-label">Init</span></span></button>` : ''}
-      ${!isBuilding ? tabButtons : ''}
-      ${!isBuilding ? `<button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>` : ''}
+      ${tabButtons}
+      <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
     </div>
+    <div class="pane-title-bar" id="pane-title-bar" style="${currentTitle ? '' : 'display:none'}">${esc(currentTitle)}</div>
     <div class="ws-pane active" id="ws-active-pane"></div>
   `;
 
   const paneEl = document.getElementById('ws-active-pane');
-  const cwd = ws.worktree_dir || (proj ? proj.root_dir : null);
-  if (_selectedWsSubtab === 'init' && hasInitTerminal) {
-    initTerminal('init-' + ws.id, paneEl, {cwd, workspaceId: ws.id, tabId: 'init'});
-  } else if (!_selectedWsSubtab) {
+  if (!_selectedWsSubtab) {
     paneEl.innerHTML = '<div class="ws-empty" style="padding:16px">No panes open</div>';
   } else {
     const tabId = parseInt(_selectedWsSubtab.replace('tab-', ''));
     const tab = ws.tabs.find(t => t.id === tabId);
     if (tab && tab.tab_type === 'shell') {
-      initTerminal(tabId, paneEl, {cwd, workspaceId: ws.id, tabId: 'tab-' + tabId});
+      initTerminal(tabId, paneEl, {workspaceId: ws.id, tabId: 'tab-' + tabId});
     }
   }
 
@@ -965,7 +662,20 @@ function initTerminal(key, paneEl, opts) {
   term.open(container);
   fitAddon.fit();
 
-  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true };
+  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true, paneTitle: '' };
+
+  term.onTitleChange((title) => {
+    entry.paneTitle = title;
+    const bar = document.getElementById('pane-title-bar');
+    if (bar && entry.container.closest('#ws-active-pane')) {
+      if (title) {
+        bar.textContent = title;
+        bar.style.display = '';
+      } else {
+        bar.style.display = 'none';
+      }
+    }
+  });
   _tabTerminals[key] = entry;
 
   function connectWs() {
@@ -1000,6 +710,22 @@ function initTerminal(key, paneEl, opts) {
           _exitedTabs.add(key);
           renderSelectedWorkspace();
         }
+        return;
+      }
+      if (typeof e.data === 'string' && e.data.startsWith('{"type":"pane_title"')) {
+        try {
+          const msg = JSON.parse(e.data);
+          entry.paneTitle = msg.title || '';
+          const bar = document.getElementById('pane-title-bar');
+          if (bar && entry.container.closest('#ws-active-pane')) {
+            if (entry.paneTitle) {
+              bar.textContent = entry.paneTitle;
+              bar.style.display = '';
+            } else {
+              bar.style.display = 'none';
+            }
+          }
+        } catch {}
         return;
       }
       if (typeof e.data === 'string' && e.data.startsWith('{"type":"altscreen"')) {
@@ -1210,25 +936,6 @@ function copyText(text, btn) {
   }).catch(() => {});
 }
 
-function showWsInfo(id) {
-  closeAllWsMenus();
-  const ws = _workspaces.find(w => w.id === id);
-  if (!ws) return;
-  const proj = _projects.find(p => p.name === ws.project);
-  const copyBtn = (path) => `<button class="copy-btn" onclick="copyText('${esc(path)}', this)">Copy</button>`;
-  let html = `<div class="ws-info">`;
-  html += `<div>Name: ${esc(ws.name)}</div>`;
-  html += `<div>Project: ${esc(ws.project)}</div>`;
-  html += `<div>Created: ${esc(ws.created_at)}</div>`;
-  if (ws.worktree_dir) {
-    html += `<div>Worktree: <code>${esc(ws.worktree_dir)}</code> ${copyBtn(ws.worktree_dir)}</div>`;
-  }
-  if (proj) {
-    html += `<div>Root: <code>${esc(proj.root_dir)}</code> ${copyBtn(proj.root_dir)}</div>`;
-  }
-  html += `</div>`;
-  showDialog(html, true);
-}
 
 function toggleWsMenu(id) {
   const menu = document.getElementById('ws-menu-' + id);
@@ -1532,7 +1239,6 @@ if (typeof document !== 'undefined') {
     }
   });
   connectSSE();
-  fetchProjects();
   initSidebarDragDrop();
 
   // Activity dot updater
@@ -1570,6 +1276,5 @@ if (typeof module !== 'undefined' && module.exports) {
     morphdomShouldUpdate,
     adjustDividerAfterRemove,
     clearPaneError,
-    _setProjects: (p) => { _projects = p; },
   };
 }

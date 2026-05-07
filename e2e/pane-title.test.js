@@ -1,5 +1,4 @@
 // @ts-check
-// Test that OSC 0/2 title changes are displayed in the agent tab and sidebar.
 const { test, expect } = require('@playwright/test');
 const { startServer, stopServer, setupWorkspace, teardownWorkspace, makeHelpers } = require('./helpers');
 
@@ -7,7 +6,7 @@ const PROJECT = 'e2e-pane-title';
 let server, wsId, tabId;
 const base = () => server.base;
 const tid = () => tabId;
-const { connectToTerminal, typeCmd, waitForContent } = makeHelpers(tid, base, PROJECT);
+const { connectToTerminal, typeCmd } = makeHelpers(tid, base, PROJECT);
 
 test.beforeAll(async ({ request }) => {
   server = await startServer();
@@ -19,40 +18,51 @@ test.afterAll(async ({ request }) => {
   stopServer(server);
 });
 
-test('pane title appears in sidebar', async ({ page }) => {
+test('title bar shows initial pane title on connect', async ({ page }) => {
+  await connectToTerminal(page);
+  const bar = page.locator('#pane-title-bar');
+  await expect(bar).toBeVisible();
+  // Default pane title is the hostname
+  await expect(bar).not.toBeEmpty();
+});
+
+test('title bar updates on OSC title change', async ({ page }) => {
   await connectToTerminal(page);
 
-  // Set the pane title via OSC 0
   await typeCmd(page, "printf '\\033]0;MY_TEST_TITLE\\033\\\\'");
 
-  // The title should appear in the sidebar workspace item
+  const bar = page.locator('#pane-title-bar');
+  await expect(bar).toContainText('MY_TEST_TITLE');
+});
+
+test('title bar updates on subsequent title change', async ({ page }) => {
+  await connectToTerminal(page);
+
+  await typeCmd(page, "printf '\\033]0;FIRST_TITLE\\033\\\\'");
+  const bar = page.locator('#pane-title-bar');
+  await expect(bar).toContainText('FIRST_TITLE');
+
+  await typeCmd(page, "printf '\\033]0;SECOND_TITLE\\033\\\\'");
+  await expect(bar).toContainText('SECOND_TITLE');
+});
+
+test('title bar restored on reconnect', async ({ page }) => {
+  await connectToTerminal(page);
+
+  await typeCmd(page, "printf '\\033]0;PERSIST_TITLE\\033\\\\'");
+  const bar = page.locator('#pane-title-bar');
+  await expect(bar).toContainText('PERSIST_TITLE');
+
+  // Reload page — triggers fresh WebSocket connection
+  await page.reload();
+  await page.waitForSelector('.ws-sidebar-item');
+  await page.locator('.ws-sidebar-item').filter({ hasText: PROJECT }).click();
+  await page.waitForSelector('.xterm-screen');
   await page.waitForFunction(
-    (wsId) => {
-      const el = document.getElementById('title-ws-' + wsId);
-      return el && el.textContent.includes('MY_TEST_TITLE');
-    },
-    wsId,
+    (key) => { const e = _tabTerminals[key]; return e && e.connected; },
+    tid(),
   );
 
-  // _wsTitles map should also be set
-  const title = await page.evaluate((wsId) => _wsTitles[wsId], wsId);
-  expect(title).toContain('MY_TEST_TITLE');
-
-  // Title should NOT appear in the pane tab (only sidebar)
-  const tabEl = await page.evaluate(
-    (wsId) => document.getElementById('title-tab-' + wsId),
-    wsId,
-  );
-  expect(tabEl).toBeNull();
-
-  // Change the title and verify sidebar updates
-  await typeCmd(page, "printf '\\033]0;UPDATED_TITLE\\033\\\\'");
-
-  await page.waitForFunction(
-    (wsId) => {
-      const el = document.getElementById('title-ws-' + wsId);
-      return el && el.textContent.includes('UPDATED_TITLE');
-    },
-    wsId,
-  );
+  const bar2 = page.locator('#pane-title-bar');
+  await expect(bar2).toContainText('PERSIST_TITLE');
 });
