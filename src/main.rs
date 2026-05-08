@@ -192,6 +192,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::reorder_tabs)
             .service(projects::create_tab)
             .service(projects::update_tab)
+            .service(projects::set_tab_mouse_wheel)
             .service(projects::delete_tab)
             .service(projects::client_log)
     })

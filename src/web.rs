@@ -232,6 +232,7 @@ mod tests {
     e2e_file_test!(test_e2e_workspace_reorder, "workspace-reorder");
     e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_title, "pane-title");
+    e2e_file_test!(test_e2e_mouse_wheel, "mouse-wheel");
     e2e_file_test!(test_e2e_reconnect_scroll, "reconnect-scroll");
     e2e_file_test!(test_e2e_pane_resize, "pane-resize");
     e2e_file_test!(test_e2e_stash_resize, "stash-resize");

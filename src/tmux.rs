@@ -595,6 +595,27 @@ pub fn pane_title(session: &str, window: &str) -> Option<String> {
     if title.is_empty() { None } else { Some(title) }
 }
 
+pub fn pane_mouse_mode(session: &str, window: &str) -> Vec<u8> {
+    let target = format!("{session}:{window}");
+    let output = tmux_base()
+        .args(["list-panes", "-t", &target, "-F", "#{mouse_any_flag} #{mouse_button_flag} #{mouse_standard_flag} #{mouse_sgr_flag}"])
+        .output();
+    let mut seqs = Vec::new();
+    if let Ok(o) = output {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let parts: Vec<&str> = s.trim().split(' ').collect();
+            if parts.len() >= 4 {
+                if parts[2] == "1" { seqs.extend_from_slice(b"\x1b[?1000h"); }
+                if parts[1] == "1" { seqs.extend_from_slice(b"\x1b[?1002h"); }
+                if parts[0] == "1" { seqs.extend_from_slice(b"\x1b[?1003h"); }
+                if parts[3] == "1" { seqs.extend_from_slice(b"\x1b[?1006h"); }
+            }
+        }
+    }
+    seqs
+}
+
 pub fn is_alternate_screen(session: &str, window: &str) -> bool {
     let target = format!("{session}:{window}");
     let output = tmux_base()

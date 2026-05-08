@@ -308,6 +308,23 @@ pub async fn update_tab(
     HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
 }
 
+#[derive(Deserialize)]
+pub struct SetMouseWheelRequest {
+    enabled: bool,
+}
+
+#[post("/api/tabs/{id}/mouse-wheel-fs")]
+pub async fn set_tab_mouse_wheel(
+    db: Db,
+    path: web::Path<i64>,
+    body: web::Json<SetMouseWheelRequest>,
+) -> HttpResponse {
+    let tab_id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::set_tab_mouse_wheel_fs(&conn, tab_id, body.enabled);
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
+}
+
 #[delete("/api/tabs/{id}")]
 pub async fn delete_tab(
     db: Db,

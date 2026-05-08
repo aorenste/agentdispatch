@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 14;
+const CURRENT_VERSION: i64 = 15;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -65,6 +65,8 @@ const MIGRATIONS: &[&str] = &[
         collapsed INTEGER NOT NULL DEFAULT 0
     );
     ALTER TABLE workspaces ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;",
+    // 14 -> 15: mouse_wheel_fs toggle per tab
+    "ALTER TABLE workspace_tabs ADD COLUMN mouse_wheel_fs INTEGER NOT NULL DEFAULT 0",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -257,6 +259,7 @@ pub struct WorkspaceTab {
     pub sort_order: i64,
     pub name: String,
     pub tab_type: String,
+    pub mouse_wheel_fs: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -325,7 +328,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
 
 pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<WorkspaceTab> {
     let mut stmt = conn
-        .prepare("SELECT id, sort_order, name, tab_type FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
+        .prepare("SELECT id, sort_order, name, tab_type, mouse_wheel_fs FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
         .unwrap();
     stmt.query_map([workspace_id], |row| {
         Ok(WorkspaceTab {
@@ -333,6 +336,7 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
             sort_order: row.get(1)?,
             name: row.get(2)?,
             tab_type: row.get(3)?,
+            mouse_wheel_fs: row.get::<_, i64>(4)? != 0,
         })
     })
     .unwrap()
@@ -424,7 +428,22 @@ pub fn add_workspace_tab(conn: &Connection, workspace_id: i64, name: &str, tab_t
     )
     .expect("Failed to insert workspace tab");
     let id = conn.last_insert_rowid();
-    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string() }
+    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string(), mouse_wheel_fs: false }
+}
+
+pub fn set_tab_mouse_wheel_fs(conn: &Connection, tab_id: i64, enabled: bool) {
+    conn.execute(
+        "UPDATE workspace_tabs SET mouse_wheel_fs = ?1 WHERE id = ?2",
+        rusqlite::params![enabled as i64, tab_id],
+    ).ok();
+}
+
+pub fn get_tab_mouse_wheel_fs(conn: &Connection, tab_id: i64) -> bool {
+    conn.query_row(
+        "SELECT mouse_wheel_fs FROM workspace_tabs WHERE id = ?1",
+        [tab_id],
+        |row| row.get::<_, i64>(0),
+    ).map(|v| v != 0).unwrap_or(false)
 }
 
 pub fn update_workspace_tab(conn: &Connection, tab_id: i64, name: &str) {

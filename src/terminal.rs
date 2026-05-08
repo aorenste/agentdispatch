@@ -50,7 +50,7 @@ enum SessionMode {
     /// Direct shell — raw PTY passthrough
     Direct,
     /// tmux control mode — parse %output, send-keys -H
-    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool, initial_title: Option<String> },
+    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool, initial_title: Option<String>, pass_mouse: bool, tmux_session: String, tmux_window: String },
 }
 
 #[get("/api/terminal")]
@@ -59,6 +59,7 @@ pub async fn ws_terminal(
     stream: web::Payload,
     query: web::Query<TerminalQuery>,
     use_tmux: UseTmux,
+    db: crate::projects::Db,
 ) -> Result<HttpResponse, actix_web::Error> {
     let cwd = query.cwd.clone();
     let cmd = query.cmd.clone();
@@ -74,6 +75,8 @@ pub async fn ws_terminal(
         let tid = tab_id.as_ref().unwrap().clone();
         let tmux_session = format!("ws-{ws_id}");
         let tmux_window = tid;
+        let tmux_session2 = tmux_session.clone();
+        let tmux_window2 = tmux_window.clone();
 
         let result = web::block(move || {
             if !tmux::has_session(&tmux_session) {
@@ -91,7 +94,15 @@ pub async fn ws_terminal(
           .map_err(|e| actix_web::error::ErrorNotFound(e))?;
 
         let (c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title) = result;
-        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title })
+        let pass_mouse = tab_id.as_deref()
+            .and_then(|t| t.strip_prefix("tab-"))
+            .and_then(|id| id.parse::<i64>().ok())
+            .map(|id| {
+                let conn = db.lock().unwrap();
+                crate::db::get_tab_mouse_wheel_fs(&conn, id)
+            })
+            .unwrap_or(false);
+        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, pass_mouse, tmux_session: tmux_session2, tmux_window: tmux_window2 })
     } else {
         let shell = user_shell();
         let args = if let Some(ref run_cmd) = cmd {
@@ -190,7 +201,7 @@ pub async fn ws_terminal(
         SessionMode::Direct => {
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
-        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title } => {
+        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, pass_mouse, tmux_session, tmux_window } => {
             let initial_content = tmux::capture_pane_with_cursor(&pane_id);
 
             // Send initial resize
@@ -204,7 +215,18 @@ pub async fn ws_terminal(
                 let _ = session.text(msg).await;
             }
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen);
+            // When pass_mouse is enabled and the pane is in mouse mode,
+            // inject mouse tracking sequences so xterm.js enters mouse mode
+            // immediately (the app already sent these, but they were stripped
+            // on previous connections).
+            if pass_mouse {
+                let mouse_flags = tmux::pane_mouse_mode(&tmux_session, &tmux_window);
+                if !mouse_flags.is_empty() {
+                    let _ = session.binary(mouse_flags).await;
+                }
+            }
+
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen, pass_mouse);
         }
     }
 
@@ -323,6 +345,7 @@ fn spawn_cc_bridge(
     _init_cols: u16,
     _init_rows: u16,
     initial_alt_screen: bool,
+    pass_mouse: bool,
 ) {
     let child_pid = child.id();
 
@@ -382,6 +405,7 @@ fn spawn_cc_bridge(
         };
 
         let mut reader = CcReader::new(read_pane_id);
+        reader.set_pass_mouse(pass_mouse);
         reader.set_window_id(window_id.clone());
         reader.set_alternate_screen(last_alt_screen);
         let mut raw_buf = [0u8; 4096];

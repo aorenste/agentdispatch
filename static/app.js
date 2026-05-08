@@ -622,6 +622,21 @@ function confirmCloseTab(tabId, tabName) {
   }
 }
 
+async function toggleMouseWheel(tabId) {
+  const ws = _workspaces.find(w => w.id === _selectedWsId);
+  if (!ws) return;
+  const tab = ws.tabs.find(t => t.id === tabId);
+  if (!tab) return;
+  tab.mouse_wheel_fs = !tab.mouse_wheel_fs;
+  await fetch(`/api/tabs/${tabId}/mouse-wheel-fs`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ enabled: tab.mouse_wheel_fs }),
+  });
+  disposeTerminal(tabId);
+  renderSelectedWorkspace();
+}
+
 async function closeTab(tabId) {
   console.log('[closeTab]', tabId, 'called from:', new Error().stack);
   disposeTerminal(tabId);
@@ -702,7 +717,9 @@ function renderSelectedWorkspace() {
   const tabButtons = ws.tabs.map(t => {
     const tabKey = 'tab-' + t.id;
     const exitedClass = _exitedTabs.has(t.id) ? ' exited' : '';
-    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" draggable="true" data-tab-id="${t.id}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span id="activity-tab-${t.id}" class="activity-dot"></span><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
+    const mouseOn = t.mouse_wheel_fs;
+    const fsBadge = `<span id="altscreen-${t.id}" class="altscreen-badge" style="display:none" onclick="event.stopPropagation(); toggleMouseWheel(${t.id})" title="Click to ${mouseOn ? 'disable' : 'enable'} mouse wheel in fullscreen">FS${mouseOn ? '\u{1f5b1}' : ''}</span>`;
+    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" draggable="true" data-tab-id="${t.id}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span id="activity-tab-${t.id}" class="activity-dot"></span><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span>${fsBadge}</span></button>`;
   }).join('');
 
   const currentEntry = _selectedWsSubtab ? _tabTerminals[parseInt(_selectedWsSubtab.replace('tab-', ''))] : null;
