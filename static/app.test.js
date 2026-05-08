@@ -246,22 +246,4 @@ describe('morphdomShouldUpdate', () => {
   });
 });
 
-describe('adjustDividerAfterRemove', () => {
-  const adjust = app.adjustDividerAfterRemove;
 
-  test('returns null when no divider', () => {
-    assert.equal(adjust(null, 2, 5), null);
-  });
-
-  test('decrements when item removed above divider', () => {
-    assert.equal(adjust(3, 1, 4), 2);
-  });
-
-  test('no change when item removed below divider', () => {
-    assert.equal(adjust(3, 4, 4), 3);
-  });
-
-  test('no change when item removed at divider', () => {
-    assert.equal(adjust(3, 3, 4), 3);
-  });
-});

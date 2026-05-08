@@ -1,181 +1,145 @@
 // @ts-check
 const { test, expect } = require('@playwright/test');
-const { startServer, stopServer, parseWorkspaces, waitForReady } = require('./helpers');
+const { startServer, stopServer, parseWorkspaces } = require('./helpers');
 
-const PROJECT = 'e2e-reorder';
+const PREFIX = 'e2e-reorder';
 let server;
+let catId;
 let wsIds = [];
 
 test.beforeAll(async ({ request }) => {
   server = await startServer();
 
-  // Clean up
+  // Clean up leftover workspaces from previous runs
   const wsRes = await request.get(`${server.base}/api/workspaces`);
-  for (const ws of await parseWorkspaces(wsRes)) {
-    if (ws.project === PROJECT) {
+  const data = await wsRes.json();
+  for (const ws of (data.workspaces || [])) {
+    if (ws.name.startsWith(PREFIX)) {
       await request.delete(`${server.base}/api/workspaces/${ws.id}`);
     }
   }
-  await request.delete(`${server.base}/api/projects/${PROJECT}`);
+  for (const cat of (data.categories || [])) {
+    if (cat.name.startsWith(PREFIX)) {
+      await request.delete(`${server.base}/api/categories/${cat.id}`);
+    }
+  }
 
-  await request.post(`${server.base}/api/projects`, {
-    data: { name: PROJECT, root_dir: '/tmp', git: false, agent: 'None' },
+  // Create a category
+  const catRes = await request.post(`${server.base}/api/categories`, {
+    data: { name: PREFIX + '-cat' },
   });
+  catId = (await catRes.json()).id;
 
-  // Create 4 workspaces: ws-A, ws-B, ws-C, ws-D
-  for (const name of ['ws-A', 'ws-B', 'ws-C', 'ws-D']) {
-    const res = await request.post(`${server.base}/api/projects/${PROJECT}/launch`, {
-      data: { name },
-    });
+  // Create 3 workspaces: A in category, B in category, C uncategorized
+  for (const name of [PREFIX + '-A', PREFIX + '-B']) {
+    const res = await request.post(`${server.base}/api/workspaces`, { data: { name } });
     const ws = await res.json();
+    await request.post(`${server.base}/api/workspaces/${ws.id}/category`, {
+      data: { category_id: catId },
+    });
     wsIds.push(ws.id);
   }
-  for (const id of wsIds) {
-    await waitForReady(request, server.base, id);
-  }
+  const res = await request.post(`${server.base}/api/workspaces`, { data: { name: PREFIX + '-C' } });
+  wsIds.push((await res.json()).id);
 });
 
 test.afterAll(async ({ request }) => {
   for (const id of wsIds) {
     await request.delete(`${server.base}/api/workspaces/${id}`);
   }
-  await request.delete(`${server.base}/api/projects/${PROJECT}`);
+  if (catId) await request.delete(`${server.base}/api/categories/${catId}`);
   stopServer(server);
 });
 
-/** Get workspace names and divider position from the page */
-function readSidebarOrder(page) {
-  return page.evaluate(() => {
-    const items = document.querySelectorAll('#ws-sidebar > .ws-sidebar-item, #ws-sidebar > .ws-divider');
-    const order = [];
-    let dividerIdx = null;
-    let idx = 0;
-    for (const el of items) {
-      if (el.classList.contains('ws-divider')) {
-        dividerIdx = idx;
-      } else {
-        order.push(el.querySelector('.ws-name').textContent);
-        idx++;
-      }
-    }
-    if (dividerIdx === null) dividerIdx = idx;
-    return { order, dividerIdx };
-  });
-}
-
 async function loadPage(page) {
   await page.goto(server.base + '/');
-  await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item');
-  await page.waitForFunction(() => {
-    return document.querySelectorAll('.ws-sidebar-item').length >= 4;
+}
+
+function readSidebar(page) {
+  return page.evaluate(() => {
+    const result = [];
+    for (const cat of document.querySelectorAll('.ws-category')) {
+      const header = cat.querySelector('.ws-category-name');
+      const items = cat.querySelectorAll('.ws-sidebar-item .ws-name');
+      result.push({
+        category: header ? header.textContent : '?',
+        workspaces: Array.from(items).map(el => el.textContent),
+      });
+    }
+    return result;
   });
 }
 
-test('initial order with divider', async ({ page, request }) => {
-  // Set divider after ws-B (position 2): [ws-A, ws-B, ---, ws-C, ws-D]
-  await request.post(`${server.base}/api/workspaces/reorder`, {
-    data: { ids: wsIds, divider_pos: 2 },
-  });
+test('initial layout: A and B in category, C uncategorized', async ({ page }) => {
   await loadPage(page);
-  const { order, dividerIdx } = await readSidebarOrder(page);
-  expect(order).toEqual(['ws-A', 'ws-B', 'ws-C', 'ws-D']);
-  expect(dividerIdx).toBe(2);
+  const layout = await readSidebar(page);
+  const cat = layout.find(g => g.category === PREFIX + '-cat');
+  const uncat = layout.find(g => g.category === 'Uncategorized');
+  expect(cat).toBeTruthy();
+  expect(cat.workspaces).toContain(PREFIX + '-A');
+  expect(cat.workspaces).toContain(PREFIX + '-B');
+  expect(uncat).toBeTruthy();
+  expect(uncat.workspaces).toContain(PREFIX + '-C');
 });
 
-test('deleting workspace above divider shifts divider', async ({ page, request }) => {
-  // Start: [ws-A, ws-B, ---(2), ws-C, ws-D]
-  await request.post(`${server.base}/api/workspaces/reorder`, {
-    data: { ids: wsIds, divider_pos: 2 },
+test('move workspace to category via API and verify', async ({ page, request }) => {
+  // Move C into the category
+  await request.post(`${server.base}/api/workspaces/${wsIds[2]}/category`, {
+    data: { category_id: catId },
   });
   await loadPage(page);
+  const layout = await readSidebar(page);
+  const cat = layout.find(g => g.category === PREFIX + '-cat');
+  expect(cat.workspaces).toContain(PREFIX + '-C');
 
-  // Delete ws-A (above divider) via the UI
-  const wsAItem = page.locator('.ws-sidebar-item').filter({ has: page.locator('.ws-name', { hasText: /^ws-A$/ }) });
-  await wsAItem.locator('.ws-menu-btn').click();
-  await wsAItem.locator('.ws-popover-item.danger').click();
-
-  // Wait for ws-A to disappear and divider to update
-  await page.waitForFunction(() => {
-    const items = document.querySelectorAll('#ws-sidebar > .ws-sidebar-item');
-    if (items.length !== 3) return false;
-    // Also wait for fetchWorkspaces to refresh divider from server
-    const dividers = document.querySelectorAll('#ws-sidebar > .ws-divider');
-    if (dividers.length === 0) return false;
-    // Check the divider is at the right position (after 1 workspace, not 2)
-    const all = document.querySelectorAll('#ws-sidebar > .ws-sidebar-item, #ws-sidebar > .ws-divider');
-    let wsCount = 0;
-    for (const el of all) {
-      if (el.classList.contains('ws-divider')) return wsCount === 1;
-      wsCount++;
-    }
-    return false;
-  }, { timeout: 5000 });
-
-  const { order, dividerIdx } = await readSidebarOrder(page);
-  expect(order).toEqual(['ws-B', 'ws-C', 'ws-D']);
-  expect(dividerIdx).toBe(1);
-
-  // Re-create ws-A for other tests
-  const res = await request.post(`${server.base}/api/projects/${PROJECT}/launch`, {
-    data: { name: 'ws-A' },
+  // Move C back to uncategorized
+  await request.post(`${server.base}/api/workspaces/${wsIds[2]}/category`, {
+    data: { category_id: null },
   });
-  const ws = await res.json();
-  wsIds[0] = ws.id;
-  await waitForReady(request, server.base, ws.id);
 });
 
-test('drag-drop reorder via JS: insert before', async ({ page, request }) => {
-  // Reset: [ws-A, ws-B, ---(2), ws-C, ws-D]
-  await request.post(`${server.base}/api/workspaces/reorder`, {
-    data: { ids: wsIds, divider_pos: 2 },
-  });
+test('workspace stays in correct category after reorder within category', async ({ page, request }) => {
   await loadPage(page);
 
-  // Simulate drag ws-C before ws-B via JS (bypass actual drag events)
-  const result = await page.evaluate(([fromId, toId]) => {
-    const fromIdx = _workspaces.findIndex(w => w.id === fromId);
-    const toIdx = _workspaces.findIndex(w => w.id === toId);
-    let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-    if (fromIdx < dp && toIdx >= dp) dp--;
-    else if (fromIdx >= dp && toIdx < dp) dp++;
-    _wsDividerPos = dp;
-    const [moved] = _workspaces.splice(fromIdx, 1);
-    // insert before target
-    const insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
-    _workspaces.splice(insertIdx, 0, moved);
-    renderWorkspaces();
-    return { order: _workspaces.map(w => w.name), divider: _wsDividerPos };
-  }, [wsIds[2], wsIds[1]]);  // ws-C onto ws-B
+  // Reorder: put B before A within the category
+  await request.post(`${server.base}/api/workspaces/reorder`, {
+    data: { ids: [wsIds[1], wsIds[0]] },
+  });
+  await page.reload();
+  await page.waitForSelector('.ws-sidebar-item');
 
-  expect(result.order).toEqual(['ws-A', 'ws-C', 'ws-B', 'ws-D']);
-  expect(result.divider).toBe(3);
+  const layout = await readSidebar(page);
+  const cat = layout.find(g => g.category === PREFIX + '-cat');
+  expect(cat.workspaces[0]).toBe(PREFIX + '-B');
+  expect(cat.workspaces[1]).toBe(PREFIX + '-A');
+
+  // Restore order
+  await request.post(`${server.base}/api/workspaces/reorder`, {
+    data: { ids: [wsIds[0], wsIds[1]] },
+  });
 });
 
-test('drag-drop reorder via JS: insert after (lower half)', async ({ page, request }) => {
-  // Reset: [ws-A, ws-B, ---(2), ws-C, ws-D]
-  await request.post(`${server.base}/api/workspaces/reorder`, {
-    data: { ids: wsIds, divider_pos: 2 },
+test('deleting category moves workspaces to uncategorized', async ({ page, request }) => {
+  // Create a temp category and move A into it
+  const tmpRes = await request.post(`${server.base}/api/categories`, {
+    data: { name: PREFIX + '-tmp' },
   });
+  const tmpCatId = (await tmpRes.json()).id;
+  await request.post(`${server.base}/api/workspaces/${wsIds[0]}/category`, {
+    data: { category_id: tmpCatId },
+  });
+
+  // Delete the temp category
+  await request.delete(`${server.base}/api/categories/${tmpCatId}`);
+
   await loadPage(page);
+  const layout = await readSidebar(page);
+  const uncat = layout.find(g => g.category === 'Uncategorized');
+  expect(uncat.workspaces).toContain(PREFIX + '-A');
 
-  // Simulate drag ws-A after ws-D via JS (lower half drop)
-  const result = await page.evaluate(([fromId, toId]) => {
-    const fromIdx = _workspaces.findIndex(w => w.id === fromId);
-    const toIdx = _workspaces.findIndex(w => w.id === toId);
-    let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-    if (fromIdx < dp && toIdx >= dp) dp--;
-    else if (fromIdx >= dp && toIdx < dp) dp++;
-    _wsDividerPos = dp;
-    const [moved] = _workspaces.splice(fromIdx, 1);
-    // insert after target (lower half)
-    let insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
-    insertIdx++;
-    _workspaces.splice(insertIdx, 0, moved);
-    renderWorkspaces();
-    return { order: _workspaces.map(w => w.name), divider: _wsDividerPos };
-  }, [wsIds[0], wsIds[3]]);  // ws-A onto lower half of ws-D
-
-  expect(result.order).toEqual(['ws-B', 'ws-C', 'ws-D', 'ws-A']);
-  expect(result.divider).toBe(1);
+  // Move A back to original category
+  await request.post(`${server.base}/api/workspaces/${wsIds[0]}/category`, {
+    data: { category_id: catId },
+  });
 });

@@ -49,22 +49,88 @@ pub async fn create_workspace(
 #[get("/api/workspaces")]
 pub async fn list_workspaces(db: Db, use_tmux: UseTmux) -> HttpResponse {
     let conn = db.lock().unwrap();
-    let divider_pos = db::get_setting(&conn, "ws_divider_pos")
-        .and_then(|v| v.parse::<i64>().ok());
 
-    if !**use_tmux {
-        let workspaces = db::list_workspaces(&conn);
-        let mut resp = serde_json::json!({ "workspaces": workspaces });
-        if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
-        return HttpResponse::Ok().json(resp);
+    if **use_tmux {
+        adopt_orphan_windows(&conn);
     }
 
-    adopt_orphan_windows(&conn);
     let workspaces = db::list_workspaces(&conn);
+    let categories = db::list_categories(&conn);
+    HttpResponse::Ok().json(serde_json::json!({
+        "workspaces": workspaces,
+        "categories": categories,
+    }))
+}
 
-    let mut resp = serde_json::json!({ "workspaces": workspaces });
-    if let Some(dp) = divider_pos { resp["divider_pos"] = serde_json::json!(dp); }
-    HttpResponse::Ok().json(resp)
+#[derive(Deserialize)]
+pub struct CreateCategoryRequest {
+    name: String,
+}
+
+#[post("/api/categories")]
+pub async fn create_category(db: Db, body: web::Json<CreateCategoryRequest>) -> HttpResponse {
+    let conn = db.lock().unwrap();
+    let cat = db::add_category(&conn, &body.name);
+    HttpResponse::Ok().json(cat)
+}
+
+#[derive(Deserialize)]
+pub struct RenameCategoryRequest {
+    name: String,
+}
+
+#[put("/api/categories/{id}")]
+pub async fn rename_category(db: Db, path: web::Path<i64>, body: web::Json<RenameCategoryRequest>) -> HttpResponse {
+    let id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::rename_category(&conn, id, &body.name);
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
+}
+
+#[delete("/api/categories/{id}")]
+pub async fn delete_category(db: Db, path: web::Path<i64>) -> HttpResponse {
+    let id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::delete_category(&conn, id);
+    HttpResponse::Ok().json(serde_json::json!({"status": "removed"}))
+}
+
+#[derive(Deserialize)]
+pub struct ReorderCategoriesRequest {
+    ids: Vec<i64>,
+}
+
+#[post("/api/categories/reorder")]
+pub async fn reorder_categories(db: Db, body: web::Json<ReorderCategoriesRequest>) -> HttpResponse {
+    let conn = db.lock().unwrap();
+    db::reorder_categories(&conn, &body.ids);
+    HttpResponse::Ok().json(serde_json::json!({"status": "reordered"}))
+}
+
+#[derive(Deserialize)]
+pub struct ToggleCategoryRequest {
+    collapsed: bool,
+}
+
+#[post("/api/categories/{id}/toggle")]
+pub async fn toggle_category(db: Db, path: web::Path<i64>, body: web::Json<ToggleCategoryRequest>) -> HttpResponse {
+    let id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::set_category_collapsed(&conn, id, body.collapsed);
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
+}
+
+#[derive(Deserialize)]
+pub struct SetWorkspaceCategoryRequest {
+    category_id: Option<i64>,
+}
+
+#[post("/api/workspaces/{id}/category")]
+pub async fn set_workspace_category(db: Db, path: web::Path<i64>, body: web::Json<SetWorkspaceCategoryRequest>) -> HttpResponse {
+    let id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::set_workspace_category(&conn, id, body.category_id);
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
 }
 
 fn adopt_orphan_windows(conn: &rusqlite::Connection) {
@@ -94,23 +160,9 @@ pub async fn delete_workspace(
 ) -> HttpResponse {
     let id = path.into_inner();
 
-    // Kill tmux session
     tmux::kill_session(&format!("ws-{id}"));
-
-    // Delete from DB, adjusting divider if workspace was above it
     let conn = db.lock().unwrap();
-    let workspaces = db::list_workspaces(&conn);
-    let removed_idx = workspaces.iter().position(|w| w.id == id);
     db::remove_workspace(&conn, id);
-    if let Some(idx) = removed_idx {
-        let divider_pos = db::get_setting(&conn, "ws_divider_pos")
-            .and_then(|v| v.parse::<usize>().ok());
-        if let Some(dp) = divider_pos {
-            if idx < dp {
-                db::set_setting(&conn, "ws_divider_pos", &(dp - 1).to_string());
-            }
-        }
-    }
     HttpResponse::Ok().json(serde_json::json!({"status": "removed"}))
 }
 
@@ -203,8 +255,6 @@ pub async fn recreate_workspace(
 #[derive(Deserialize)]
 pub struct ReorderRequest {
     ids: Vec<i64>,
-    #[serde(default)]
-    divider_pos: Option<i64>,
 }
 
 #[post("/api/workspaces/reorder")]
@@ -214,9 +264,6 @@ pub async fn reorder_workspaces(
 ) -> HttpResponse {
     let conn = db.lock().unwrap();
     db::reorder_workspaces(&conn, &body.ids);
-    if let Some(pos) = body.divider_pos {
-        db::set_setting(&conn, "ws_divider_pos", &pos.to_string());
-    }
     HttpResponse::Ok().json(serde_json::json!({"status": "reordered"}))
 }
 

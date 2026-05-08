@@ -57,7 +57,7 @@ const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 const _wsWasSelected = {}; // workspace id -> was selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
 const _exitedTabs = new Set(); // tab ids whose pane has exited (kept until user dismisses)
-let _wsDividerPos = null; // index where divider appears in workspace list (null = end)
+let _categories = [];
 let _dialogCallback = null;
 let _dialogFields = [];
 
@@ -179,13 +179,8 @@ async function fetchWorkspaces() {
   try {
     const res = await fetch('/api/workspaces');
     const data = await res.json();
-    const workspaces = data.workspaces || data; // handle wrapped or raw format
-    console.log('[workspaces]', workspaces.map(w => w.id + ':' + w.name + ':' + (w.tabs ? w.tabs.length : 0) + 'tabs' + (w.tabs && w.tabs.length ? '=' + w.tabs.map(t => t.id + '/' + t.name).join(',') : '')));
-    _workspaces = workspaces;
-    if (data.divider_pos != null) {
-      _wsDividerPos = data.divider_pos;
-    }
-    // Initialize activity timestamps and titles from server-reported tmux data
+    _workspaces = data.workspaces || [];
+    _categories = data.categories || [];
     renderWorkspaces();
   } catch {}
 }
@@ -272,14 +267,79 @@ function notifyIdle(name) {
   }
 }
 
-function saveWorkspaceOrder() {
+function saveWorkspaceOrder(categoryId) {
+  const inCat = _workspaces.filter(w => (w.category_id || null) === categoryId);
   fetch('/api/workspaces/reorder', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      ids: _workspaces.map(w => w.id),
-      divider_pos: _wsDividerPos,
-    }),
+    body: JSON.stringify({ ids: inCat.map(w => w.id) }),
+  });
+}
+
+function saveCategoryOrder() {
+  fetch('/api/categories/reorder', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ ids: _categories.map(c => c.id) }),
+  });
+}
+
+async function addCategory() {
+  showForm('New Category', [{id: 'cat-name', placeholder: 'Category name'}], async (values) => {
+    const name = values['cat-name'];
+    if (!name) return 'Name is required.';
+    await fetch('/api/categories', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name}),
+    });
+    fetchWorkspaces();
+  });
+}
+
+async function renameCategory(id) {
+  const cat = _categories.find(c => c.id === id);
+  if (!cat) return;
+  showForm('Rename Category', [{id: 'cat-name', placeholder: 'Category name', value: cat.name}], async (values) => {
+    const name = values['cat-name'];
+    if (!name) return 'Name is required.';
+    await fetch(`/api/categories/${id}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name}),
+    });
+    fetchWorkspaces();
+  });
+}
+
+async function deleteCategory(id) {
+  const cat = _categories.find(c => c.id === id);
+  if (!cat) return;
+  showConfirm(`Delete category "${cat.name}"? Workspaces will move to Uncategorized.`, async () => {
+    await fetch(`/api/categories/${id}`, {method: 'DELETE'});
+    fetchWorkspaces();
+  });
+}
+
+function toggleCategory(id) {
+  const cat = _categories.find(c => c.id === id);
+  if (!cat) return;
+  cat.collapsed = !cat.collapsed;
+  fetch(`/api/categories/${id}/toggle`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({collapsed: cat.collapsed}),
+  });
+  renderWorkspaces();
+}
+
+function moveWorkspaceToCategory(wsId, categoryId) {
+  const ws = _workspaces.find(w => w.id === wsId);
+  if (ws) ws.category_id = categoryId;
+  fetch(`/api/workspaces/${wsId}/category`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({category_id: categoryId}),
   });
 }
 
@@ -296,148 +356,194 @@ async function newWorkspace() {
   fetchWorkspaces();
 }
 
+function renderWsItem(ws) {
+  return `<div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
+       draggable="true" data-ws-id="${ws.id}" data-cat-id="${ws.category_id || ''}"
+       onclick="selectWorkspace(${ws.id})">
+    <span id="activity-ws-${ws.id}" class="activity-dot"></span>
+    <div class="ws-sidebar-info">
+      <div class="ws-name" ondblclick="event.stopPropagation(); renameWorkspace(${ws.id})">${esc(ws.name)}</div>
+    </div>
+    <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleWsMenu(${ws.id})">…</button>
+    <div class="ws-popover" id="ws-menu-${ws.id}">
+      <div class="ws-popover-item" onclick="event.stopPropagation(); renameWorkspace(${ws.id})">Rename</div>
+      <div class="ws-popover-item danger" onclick="event.stopPropagation(); destroyWorkspace(${ws.id})">Destroy</div>
+    </div>
+  </div>`;
+}
+
+function renderCategorySection(cat, workspaces) {
+  const isUncat = cat === null;
+  const catId = isUncat ? '' : cat.id;
+  const name = isUncat ? 'Uncategorized' : cat.name;
+  const collapsed = !isUncat && cat.collapsed;
+  const arrow = collapsed ? '▶' : '▼';
+  const items = collapsed ? '' : workspaces.map(renderWsItem).join('');
+  const menuHtml = isUncat ? '' : `
+    <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleCatMenu(${catId})">…</button>
+    <div class="ws-popover" id="cat-menu-${catId}">
+      <div class="ws-popover-item" onclick="event.stopPropagation(); renameCategory(${catId})">Rename</div>
+      <div class="ws-popover-item danger" onclick="event.stopPropagation(); deleteCategory(${catId})">Delete</div>
+    </div>`;
+  return `<div class="ws-category" data-cat-id="${catId}">
+    <div class="ws-category-header" draggable="${!isUncat}" data-cat-id="${catId}"
+         onclick="${isUncat ? '' : 'toggleCategory(' + catId + ')'}">
+      <span class="ws-category-arrow">${arrow}</span>
+      <span class="ws-category-name" ondblclick="event.stopPropagation(); ${isUncat ? '' : 'renameCategory(' + catId + ')'}">${esc(name)}</span>
+      <span class="ws-category-count">${workspaces.length}</span>
+      ${menuHtml}
+    </div>
+    <div class="ws-category-items" data-cat-id="${catId}">${items}</div>
+  </div>`;
+}
+
 function renderWorkspaces() {
   const sidebar = document.getElementById('ws-sidebar');
-  const newBtn = '<div class="ws-new-btn" onclick="newWorkspace()">+ New Workspace</div>';
-  if (_workspaces.length === 0) {
-    sidebar.innerHTML = newBtn + '<div class="ws-empty">No workspaces</div>';
-    renderSelectedWorkspace();
-    return;
-  }
-  const dividerPos = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-  const wsHtml = _workspaces.map((ws, i) => {
-    let html = '';
-    if (i === dividerPos) {
-      html += '<div class="ws-divider" draggable="true" data-divider="true"><span>\u2015\u2015\u2015</span></div>';
-    }
-    html += `<div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
-         draggable="true" data-ws-id="${ws.id}"
-         onclick="selectWorkspace(${ws.id})">
-      <span id="activity-ws-${ws.id}" class="activity-dot"></span>
-      <div class="ws-sidebar-info">
-        <div class="ws-name" ondblclick="event.stopPropagation(); renameWorkspace(${ws.id})">${esc(ws.name)}</div>
-      </div>
-      <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleWsMenu(${ws.id})">\u2026</button>
-      <div class="ws-popover" id="ws-menu-${ws.id}">
-        <div class="ws-popover-item" onclick="event.stopPropagation(); renameWorkspace(${ws.id})">Rename</div>
-        <div class="ws-popover-item danger" onclick="event.stopPropagation(); destroyWorkspace(${ws.id})">Destroy</div>
-      </div>
-    </div>`;
-    return html;
-  }).join('');
-  const fullHtml = newBtn + wsHtml + (dividerPos >= _workspaces.length
-    ? '<div class="ws-divider" draggable="true" data-divider="true"><span>\u2015\u2015\u2015</span></div>'
-    : '');
+  const toolbar = '<div class="ws-toolbar"><div class="ws-new-btn" onclick="newWorkspace()">+ Workspace</div><div class="ws-new-btn" onclick="addCategory()">+ Category</div></div>';
 
-  // Use morphdom to patch the sidebar — preserves open menus, scroll, focus
+  const grouped = {};
+  for (const ws of _workspaces) {
+    const key = ws.category_id || null;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(ws);
+  }
+
+  let html = toolbar;
+  for (const cat of _categories) {
+    html += renderCategorySection(cat, grouped[cat.id] || []);
+  }
+  html += renderCategorySection(null, grouped[null] || []);
+
   const tmp = document.createElement('div');
-  tmp.innerHTML = fullHtml;
+  tmp.innerHTML = html;
   if (typeof morphdom !== 'undefined') {
     morphdom(sidebar, tmp, {
       childrenOnly: true,
       onBeforeElUpdated: morphdomShouldUpdate,
     });
   } else {
-    sidebar.innerHTML = fullHtml;
+    sidebar.innerHTML = html;
   }
 
   renderSelectedWorkspace();
   updateActivityDots();
 }
 
-// Drag-and-drop: use event delegation on the sidebar (survives morphdom patches)
-let _dragType = null;
-let _dragWsId = null;
+function toggleCatMenu(catId) {
+  closeAllWsMenus();
+  const menu = document.getElementById('cat-menu-' + catId);
+  if (menu) menu.classList.toggle('open');
+}
+
+// Drag-and-drop for workspaces and categories
+let _dragType = null; // 'ws' or 'category'
+let _dragId = null;
+let _dropTarget = null; // {el, inLowerHalf} — resolved during dragover, used by drop
 function initSidebarDragDrop() {
   const sidebar = document.getElementById('ws-sidebar');
   const clearDragOver = () => sidebar.querySelectorAll('.drag-over-above, .drag-over-below').forEach(x => { x.classList.remove('drag-over-above', 'drag-over-below'); });
-  const findItem = (e) => e.target.closest('.ws-sidebar-item, .ws-divider');
+  const findTarget = (e) => e.target.closest('.ws-sidebar-item, .ws-category-header, .ws-category-items');
 
   sidebar.addEventListener('dragstart', (e) => {
-    const el = findItem(e);
-    if (!el) return;
-    if (el.dataset.divider === 'true') {
-      _dragType = 'divider';
-      _dragWsId = null;
-    } else {
+    const wsItem = e.target.closest('.ws-sidebar-item');
+    const catHeader = e.target.closest('.ws-category-header');
+    if (wsItem) {
       _dragType = 'ws';
-      _dragWsId = parseInt(el.dataset.wsId);
+      _dragId = parseInt(wsItem.dataset.wsId);
+      wsItem.classList.add('dragging');
+    } else if (catHeader && catHeader.getAttribute('draggable') === 'true') {
+      _dragType = 'category';
+      _dragId = parseInt(catHeader.dataset.catId);
+      catHeader.classList.add('dragging');
     }
     e.dataTransfer.effectAllowed = 'move';
-    el.classList.add('dragging');
   });
-  sidebar.addEventListener('dragend', (e) => {
-    const el = findItem(e);
-    if (el) el.classList.remove('dragging');
+  sidebar.addEventListener('dragend', () => {
+    sidebar.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
     clearDragOver();
+    _dropTarget = null;
   });
   sidebar.addEventListener('dragover', (e) => {
-    const el = findItem(e);
+    const el = findTarget(e);
     if (!el) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
     clearDragOver();
-    // Show insert indicator above or below based on cursor position
     const rect = el.getBoundingClientRect();
     const inLowerHalf = (e.clientY - rect.top) > rect.height / 2;
     el.classList.add(inLowerHalf ? 'drag-over-below' : 'drag-over-above');
+    _dropTarget = { el, inLowerHalf };
   });
   sidebar.addEventListener('drop', (e) => {
-    const el = findItem(e);
-    if (!el) return;
     e.preventDefault();
-    const rect = el.getBoundingClientRect();
-    const inLowerHalf = (e.clientY - rect.top) > rect.height / 2;
     clearDragOver();
-    const isDivider = el.dataset.divider === 'true';
-
-    if (_dragType === 'divider' && !isDivider) {
-      const targetIdx = _workspaces.findIndex(w => w.id === parseInt(el.dataset.wsId));
-      if (targetIdx >= 0) {
-        _wsDividerPos = inLowerHalf ? targetIdx + 1 : targetIdx;
-        saveWorkspaceOrder();
-        renderWorkspaces();
-      }
-    } else if (_dragType === 'ws') {
-      if (isDivider) {
-        // Drop on divider: place just above or below divider
-        const fromIdx = _workspaces.findIndex(w => w.id === _dragWsId);
-        if (fromIdx >= 0) {
-          let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-          const [moved] = _workspaces.splice(fromIdx, 1);
-          if (fromIdx < dp) dp--;
-          const insertAt = inLowerHalf ? dp : (dp > 0 ? dp - 1 : 0);
-          _workspaces.splice(insertAt, 0, moved);
-          // Divider stays between same groups
-          if (inLowerHalf) {
-            _wsDividerPos = dp;
-          } else {
-            _wsDividerPos = dp;
-          }
-          saveWorkspaceOrder();
-          renderWorkspaces();
-        }
-      } else {
-        const targetId = parseInt(el.dataset.wsId);
-        if (_dragWsId == null || _dragWsId === targetId) return;
-        const fromIdx = _workspaces.findIndex(w => w.id === _dragWsId);
-        let toIdx = _workspaces.findIndex(w => w.id === targetId);
-        if (fromIdx < 0 || toIdx < 0) return;
-        let dp = _wsDividerPos != null ? _wsDividerPos : _workspaces.length;
-        // Adjust divider when crossing it
-        if (fromIdx < dp && toIdx >= dp) dp--;
-        else if (fromIdx >= dp && toIdx < dp) dp++;
-        _wsDividerPos = dp;
-        const [moved] = _workspaces.splice(fromIdx, 1);
-        // inLowerHalf: insert after target, otherwise insert before
-        let insertIdx = fromIdx < toIdx ? toIdx - 1 : toIdx;
-        if (inLowerHalf) insertIdx++;
-        _workspaces.splice(insertIdx, 0, moved);
-        saveWorkspaceOrder();
-        renderWorkspaces();
-      }
-    }
+    if (!_dropTarget) return;
+    const { el, inLowerHalf } = _dropTarget;
+    _dropTarget = null;
+    if (_dragType === 'ws') handleWsDrop(el, inLowerHalf);
+    else if (_dragType === 'category') handleCatDrop(el, inLowerHalf);
   });
+}
+
+function parseCatId(str) {
+  if (str === '' || str == null) return null;
+  return parseInt(str);
+}
+
+function handleWsDrop(el, inLowerHalf) {
+  const wsId = _dragId;
+  const ws = _workspaces.find(w => w.id === wsId);
+  if (!ws) return;
+
+  if (el.classList.contains('ws-sidebar-item')) {
+    const targetId = parseInt(el.dataset.wsId);
+    if (targetId === wsId) return;
+    const targetW = _workspaces.find(w => w.id === targetId);
+    if (!targetW) return;
+    const container = el.closest('.ws-category-items');
+    const targetCatId = container ? parseCatId(container.dataset.catId) : (targetW.category_id || null);
+
+    if ((ws.category_id || null) !== targetCatId) {
+      ws.category_id = targetCatId;
+      moveWorkspaceToCategory(wsId, targetCatId);
+    }
+
+    const inCat = _workspaces.filter(w => (w.category_id || null) === targetCatId);
+    const fromIdx = inCat.indexOf(ws);
+    let toIdx = inCat.indexOf(targetW);
+    if (toIdx < 0) return;
+    if (fromIdx >= 0) inCat.splice(fromIdx, 1);
+    toIdx = inCat.indexOf(targetW);
+    if (inLowerHalf) toIdx++;
+    inCat.splice(toIdx, 0, ws);
+    saveWorkspaceOrder(targetCatId);
+    renderWorkspaces();
+  } else {
+    const catId = parseCatId(el.dataset.catId);
+    ws.category_id = catId;
+    moveWorkspaceToCategory(wsId, catId);
+    renderWorkspaces();
+  }
+}
+
+function handleCatDrop(el, inLowerHalf) {
+  const catId = _dragId;
+  const targetHeader = el.closest('.ws-category-header');
+  if (!targetHeader) return;
+  const targetCatIdStr = targetHeader.dataset.catId;
+  if (!targetCatIdStr) return;
+  const targetCatId = parseInt(targetCatIdStr);
+  if (targetCatId === catId) return;
+
+  const fromIdx = _categories.findIndex(c => c.id === catId);
+  let toIdx = _categories.findIndex(c => c.id === targetCatId);
+  if (fromIdx < 0 || toIdx < 0) return;
+  const [moved] = _categories.splice(fromIdx, 1);
+  toIdx = _categories.findIndex(c => c.id === targetCatId);
+  if (inLowerHalf) toIdx++;
+  _categories.splice(toIdx, 0, moved);
+  saveCategoryOrder();
+  renderWorkspaces();
 }
 
 function selectWorkspace(id) {
@@ -971,11 +1077,7 @@ async function destroyWorkspace(id) {
   if (ws) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
   }
-  const removeIdx = _workspaces.findIndex(w => w.id === id);
   _workspaces = _workspaces.filter(w => w.id !== id);
-  if (removeIdx >= 0) {
-    _wsDividerPos = adjustDividerAfterRemove(_wsDividerPos, removeIdx, _workspaces.length);
-  }
   if (_selectedWsId === id) _selectedWsId = null;
   renderWorkspaces();
   await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
@@ -1248,12 +1350,6 @@ if (typeof document !== 'undefined') {
 /// Adjust divider position after a workspace is removed from the list.
 /// `removedIdx` is the index of the workspace that was removed.
 /// Returns the new divider position.
-function adjustDividerAfterRemove(dividerPos, removedIdx, newListLength) {
-  if (dividerPos == null) return null;
-  if (removedIdx < dividerPos) return dividerPos - 1;
-  return dividerPos;
-}
-
 function clearPaneError(entry) {
   entry.connectError = false;
   if (!entry.container || typeof entry.container.querySelector !== 'function') return;
@@ -1274,7 +1370,6 @@ if (typeof module !== 'undefined' && module.exports) {
     isWsSelected,
     shouldRecordOutput,
     morphdomShouldUpdate,
-    adjustDividerAfterRemove,
     clearPaneError,
   };
 }

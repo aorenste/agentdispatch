@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 13;
+const CURRENT_VERSION: i64 = 14;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -57,6 +57,14 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE workspaces ADD COLUMN build_variant TEXT NOT NULL DEFAULT ''",
     // 12 -> 13: add agent to workspaces (override project default at launch time)
     "ALTER TABLE workspaces ADD COLUMN agent TEXT NOT NULL DEFAULT ''",
+    // 13 -> 14: categories for workspace grouping
+    "CREATE TABLE categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        collapsed INTEGER NOT NULL DEFAULT 0
+    );
+    ALTER TABLE workspaces ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -170,6 +178,77 @@ pub fn remove_project(conn: &Connection, name: &str) {
         .ok();
 }
 
+// -- Categories --
+
+#[derive(Serialize, Clone)]
+pub struct Category {
+    pub id: i64,
+    pub name: String,
+    pub sort_order: i64,
+    pub collapsed: bool,
+}
+
+pub fn list_categories(conn: &Connection) -> Vec<Category> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, sort_order, collapsed FROM categories ORDER BY sort_order, id")
+        .unwrap();
+    stmt.query_map([], |row| {
+        Ok(Category {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            sort_order: row.get(2)?,
+            collapsed: row.get::<_, i64>(3)? != 0,
+        })
+    })
+    .unwrap()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn add_category(conn: &Connection, name: &str) -> Category {
+    let next_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories", [], |row| row.get(0))
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT INTO categories (name, sort_order) VALUES (?1, ?2)",
+        rusqlite::params![name, next_order],
+    ).expect("Failed to insert category");
+    let id = conn.last_insert_rowid();
+    Category { id, name: name.to_string(), sort_order: next_order, collapsed: false }
+}
+
+pub fn rename_category(conn: &Connection, id: i64, name: &str) {
+    conn.execute("UPDATE categories SET name = ?1 WHERE id = ?2", rusqlite::params![name, id]).ok();
+}
+
+pub fn delete_category(conn: &Connection, id: i64) {
+    conn.execute("UPDATE workspaces SET category_id = NULL WHERE category_id = ?1", [id]).ok();
+    conn.execute("DELETE FROM categories WHERE id = ?1", [id]).ok();
+}
+
+pub fn reorder_categories(conn: &Connection, ids: &[i64]) {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE categories SET sort_order = ?1 WHERE id = ?2",
+            rusqlite::params![i as i64, id],
+        ).ok();
+    }
+}
+
+pub fn set_category_collapsed(conn: &Connection, id: i64, collapsed: bool) {
+    conn.execute(
+        "UPDATE categories SET collapsed = ?1 WHERE id = ?2",
+        rusqlite::params![collapsed as i64, id],
+    ).ok();
+}
+
+pub fn set_workspace_category(conn: &Connection, ws_id: i64, category_id: Option<i64>) {
+    conn.execute(
+        "UPDATE workspaces SET category_id = ?1 WHERE id = ?2",
+        rusqlite::params![category_id, ws_id],
+    ).ok();
+}
+
 // -- Workspaces --
 
 #[derive(Serialize, Clone)]
@@ -190,12 +269,13 @@ pub struct Workspace {
     pub status: String,
     pub build_variant: String,
     pub agent: String,
+    pub category_id: Option<i64>,
     pub tabs: Vec<WorkspaceTab>,
 }
 
 pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
     let mut stmt = conn
-        .prepare("SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent FROM workspaces ORDER BY sort_order, id")
+        .prepare("SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent, category_id FROM workspaces ORDER BY sort_order, id")
         .unwrap();
     let mut workspaces: Vec<Workspace> = stmt.query_map([], |row| {
         Ok(Workspace {
@@ -207,6 +287,7 @@ pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
             status: row.get(5)?,
             build_variant: row.get(6)?,
             agent: row.get(7)?,
+            category_id: row.get(8)?,
             tabs: Vec::new(),
         })
     })
@@ -222,7 +303,7 @@ pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
 
 pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
     conn.query_row(
-        "SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent FROM workspaces WHERE id = ?1",
+        "SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent, category_id FROM workspaces WHERE id = ?1",
         [id],
         |row| {
             Ok(Workspace {
@@ -234,6 +315,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
                 status: row.get(5)?,
                 build_variant: row.get(6)?,
                 agent: row.get(7)?,
+                category_id: row.get(8)?,
                 tabs: Vec::new(),
             })
         },
@@ -259,42 +341,22 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
 }
 
 pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir: Option<&str>, status: &str, build_variant: &str, agent: &str) -> Workspace {
-    // Insert just before the divider (or at end if no divider)
-    let divider_pos: i64 = get_setting(conn, "ws_divider_pos")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(i64::MAX);
-    let insert_order: i64 = conn
-        .query_row(
-            "SELECT COALESCE(sort_order, 0) FROM workspaces ORDER BY sort_order, id LIMIT 1 OFFSET ?1",
-            [divider_pos],
-            |row| row.get(0),
-        )
-        .unwrap_or_else(|_| {
-            // Divider is past all workspaces — insert at end
-            conn.query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces", [], |row| row.get(0))
-                .unwrap_or(0)
-        });
-    // Bump everything at or after the insert position
-    conn.execute(
-        "UPDATE workspaces SET sort_order = sort_order + 1 WHERE sort_order >= ?1",
-        [insert_order],
-    ).ok();
-    // Also bump the divider position
-    if divider_pos < i64::MAX {
-        set_setting(conn, "ws_divider_pos", &(divider_pos + 1).to_string());
-    }
+    let next_order: i64 = conn
+        .query_row("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces", [], |row| row.get(0))
+        .unwrap_or(0);
     conn.execute(
         "INSERT INTO workspaces (name, project, worktree_dir, status, sort_order, build_variant, agent) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![name, project, worktree_dir, status, insert_order, build_variant, agent],
+        rusqlite::params![name, project, worktree_dir, status, next_order, build_variant, agent],
     )
     .expect("Failed to insert workspace");
     let id = conn.last_insert_rowid();
     let created_at: String = conn
         .query_row("SELECT created_at FROM workspaces WHERE id = ?1", [id], |row| row.get(0))
         .unwrap();
-    Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), build_variant: build_variant.to_string(), agent: agent.to_string(), tabs: Vec::new() }
+    Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), build_variant: build_variant.to_string(), agent: agent.to_string(), category_id: None, tabs: Vec::new() }
 }
 
+#[allow(dead_code)]
 pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row(
         "SELECT value FROM settings WHERE key = ?1",
@@ -303,6 +365,7 @@ pub fn get_setting(conn: &Connection, key: &str) -> Option<String> {
     ).ok()
 }
 
+#[allow(dead_code)]
 pub fn set_setting(conn: &Connection, key: &str, value: &str) {
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
