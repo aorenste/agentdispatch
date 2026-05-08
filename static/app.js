@@ -430,9 +430,11 @@ function renderWorkspaces() {
 }
 
 function toggleCatMenu(catId) {
-  closeAllWsMenus();
   const menu = document.getElementById('cat-menu-' + catId);
-  if (menu) menu.classList.toggle('open');
+  if (!menu) return;
+  const wasOpen = menu.classList.contains('open');
+  closeAllWsMenus();
+  if (!wasOpen) menu.classList.add('open');
 }
 
 // Drag-and-drop for workspaces and categories
@@ -517,6 +519,16 @@ function handleWsDrop(el, inLowerHalf) {
     if (inLowerHalf) toIdx++;
     inCat.splice(toIdx, 0, ws);
     saveWorkspaceOrder(targetCatId);
+    renderWorkspaces();
+  } else if (el.classList.contains('ws-category-header') && !inLowerHalf) {
+    // Upper half of a category header — user was dragging at the bottom of the
+    // previous category. Find the category just above this header and drop there.
+    const thisCatEl = el.closest('.ws-category');
+    const prevCatEl = thisCatEl && thisCatEl.previousElementSibling;
+    const prevItems = prevCatEl && prevCatEl.querySelector('.ws-category-items');
+    const catId = prevItems ? parseCatId(prevItems.dataset.catId) : parseCatId(el.dataset.catId);
+    ws.category_id = catId;
+    moveWorkspaceToCategory(wsId, catId);
     renderWorkspaces();
   } else {
     const catId = parseCatId(el.dataset.catId);
@@ -672,7 +684,7 @@ function renderSelectedWorkspace() {
   const tabButtons = ws.tabs.map(t => {
     const tabKey = 'tab-' + t.id;
     const exitedClass = _exitedTabs.has(t.id) ? ' exited' : '';
-    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
+    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" draggable="true" data-tab-id="${t.id}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
   }).join('');
 
   const currentEntry = _selectedWsSubtab ? _tabTerminals[parseInt(_selectedWsSubtab.replace('tab-', ''))] : null;
@@ -705,9 +717,61 @@ function renderSelectedWorkspace() {
     entry.container.classList.toggle('xterm-altscreen', entry.altScreen);
   }
   updateActivityDots();
+  initTabDragDrop();
 }
 
-
+function initTabDragDrop() {
+  const bar = document.querySelector('.ws-subtabs');
+  if (!bar) return;
+  let dragTabId = null;
+  bar.addEventListener('dragstart', (e) => {
+    const btn = e.target.closest('[data-tab-id]');
+    if (!btn) return;
+    dragTabId = parseInt(btn.dataset.tabId);
+    e.dataTransfer.effectAllowed = 'move';
+    btn.classList.add('dragging');
+  });
+  bar.addEventListener('dragend', (e) => {
+    const btn = e.target.closest('[data-tab-id]');
+    if (btn) btn.classList.remove('dragging');
+    bar.querySelectorAll('.drag-over-left, .drag-over-right').forEach(el => el.classList.remove('drag-over-left', 'drag-over-right'));
+  });
+  bar.addEventListener('dragover', (e) => {
+    const btn = e.target.closest('[data-tab-id]');
+    if (!btn) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    bar.querySelectorAll('.drag-over-left, .drag-over-right').forEach(el => el.classList.remove('drag-over-left', 'drag-over-right'));
+    const rect = btn.getBoundingClientRect();
+    const inRightHalf = (e.clientX - rect.left) > rect.width / 2;
+    btn.classList.add(inRightHalf ? 'drag-over-right' : 'drag-over-left');
+  });
+  bar.addEventListener('drop', (e) => {
+    e.preventDefault();
+    bar.querySelectorAll('.drag-over-left, .drag-over-right').forEach(el => el.classList.remove('drag-over-left', 'drag-over-right'));
+    const btn = e.target.closest('[data-tab-id]');
+    if (!btn || dragTabId == null) return;
+    const targetTabId = parseInt(btn.dataset.tabId);
+    if (targetTabId === dragTabId) return;
+    const ws = _workspaces.find(w => w.id === _selectedWsId);
+    if (!ws) return;
+    const fromIdx = ws.tabs.findIndex(t => t.id === dragTabId);
+    let toIdx = ws.tabs.findIndex(t => t.id === targetTabId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const rect = btn.getBoundingClientRect();
+    const inRightHalf = (e.clientX - rect.left) > rect.width / 2;
+    const [moved] = ws.tabs.splice(fromIdx, 1);
+    toIdx = ws.tabs.findIndex(t => t.id === targetTabId);
+    if (inRightHalf) toIdx++;
+    ws.tabs.splice(toIdx, 0, moved);
+    fetch(`/api/workspaces/${ws.id}/tabs/reorder`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ ids: ws.tabs.map(t => t.id) }),
+    });
+    renderSelectedWorkspace();
+  });
+}
 
 function reconnectAllTerminals() {
   for (const [key, entry] of Object.entries(_tabTerminals)) {

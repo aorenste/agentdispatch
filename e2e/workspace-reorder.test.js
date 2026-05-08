@@ -120,6 +120,59 @@ test('workspace stays in correct category after reorder within category', async 
   });
 });
 
+test('drag workspace to bottom of category stays in that category', async ({ page, request }) => {
+  // Ensure A,B in cat and C uncategorized
+  await request.post(`${server.base}/api/workspaces/${wsIds[0]}/category`, { data: { category_id: catId } });
+  await request.post(`${server.base}/api/workspaces/${wsIds[1]}/category`, { data: { category_id: catId } });
+  await request.post(`${server.base}/api/workspaces/${wsIds[2]}/category`, { data: { category_id: null } });
+  await loadPage(page);
+
+  // Simulate the drop via JS — this is the exact scenario: the dragover resolved
+  // to the Uncategorized category header's upper half (which happens when dragging
+  // at the boundary between the last item in a category and the next header).
+  const result = await page.evaluate(([cWsId, catIdVal]) => {
+    // Find the Uncategorized header (the one after our category)
+    const headers = document.querySelectorAll('.ws-category-header');
+    let uncatHeader = null;
+    for (const h of headers) {
+      if (h.querySelector('.ws-category-name').textContent === 'Uncategorized') {
+        uncatHeader = h;
+        break;
+      }
+    }
+    if (!uncatHeader) return { error: 'no uncat header' };
+
+    // Simulate: user was dragging ws-C, drop target resolved to the Uncategorized
+    // header's UPPER half (meaning they were at the bottom of the previous category)
+    _dragType = 'ws';
+    _dragId = cWsId;
+    _dropTarget = { el: uncatHeader, inLowerHalf: false };
+
+    // Simulate: drop resolved to Uncategorized header's upper half
+    _dragType = 'ws';
+    _dragId = cWsId;
+    handleWsDrop(uncatHeader, false);
+
+    const layout = [];
+    for (const cat of document.querySelectorAll('.ws-category')) {
+      const name = cat.querySelector('.ws-category-name').textContent;
+      const items = Array.from(cat.querySelectorAll('.ws-sidebar-item .ws-name')).map(e => e.textContent);
+      layout.push({ category: name, workspaces: items });
+    }
+    return layout;
+  }, [wsIds[2], catId]);
+
+  const cat = result.find(g => g.category === PREFIX + '-cat');
+  const uncat = result.find(g => g.category === 'Uncategorized');
+
+  // C should be in the category (dropped at bottom of previous category, not into Uncategorized)
+  expect(cat.workspaces).toContain(PREFIX + '-C');
+  expect(uncat.workspaces).not.toContain(PREFIX + '-C');
+
+  // Clean up: move C back to uncategorized
+  await request.post(`${server.base}/api/workspaces/${wsIds[2]}/category`, { data: { category_id: null } });
+});
+
 test('deleting category moves workspaces to uncategorized', async ({ page, request }) => {
   // Create a temp category and move A into it
   const tmpRes = await request.post(`${server.base}/api/categories`, {

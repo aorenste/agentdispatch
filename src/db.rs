@@ -373,6 +373,16 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) {
     ).ok();
 }
 
+pub fn reorder_tabs(conn: &Connection, ids: &[i64]) {
+    for (i, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE workspace_tabs SET sort_order = ?1 WHERE id = ?2",
+            rusqlite::params![i as i64, id],
+        )
+        .ok();
+    }
+}
+
 pub fn reorder_workspaces(conn: &Connection, ids: &[i64]) {
     for (i, id) in ids.iter().enumerate() {
         conn.execute(

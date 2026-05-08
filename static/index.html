@@ -294,7 +294,7 @@
   .ws-category-arrow { font-size: 9px; width: 12px; }
   .ws-category-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .ws-category-count { color: var(--text-dim); opacity: 0.6; font-weight: 400; }
-  .ws-category-items { }
+  .ws-category-items { min-height: 4px; }
   .ws-category-items.drag-over-above,
   .ws-category-items.drag-over-below { background: rgba(99, 102, 241, 0.06); }
   .ws-sidebar-item {
@@ -411,6 +411,9 @@
   }
   .ws-subtab:hover { color: var(--text); }
   .ws-subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .ws-subtab.dragging { opacity: 0.4; }
+  .ws-subtab.drag-over-left { border-left: 2px solid var(--accent); }
+  .ws-subtab.drag-over-right { border-right: 2px solid var(--accent); }
   .ws-subtab.exited .ws-subtab-label { text-decoration: line-through; opacity: 0.6; }
   .ws-subtab.exited .ws-subtab-close { color: var(--red); }
   .ws-subtab-add {

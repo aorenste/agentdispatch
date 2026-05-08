@@ -267,6 +267,18 @@ pub async fn reorder_workspaces(
     HttpResponse::Ok().json(serde_json::json!({"status": "reordered"}))
 }
 
+#[post("/api/workspaces/{id}/tabs/reorder")]
+pub async fn reorder_tabs(
+    db: Db,
+    path: web::Path<i64>,
+    body: web::Json<ReorderRequest>,
+) -> HttpResponse {
+    let _ws_id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::reorder_tabs(&conn, &body.ids);
+    HttpResponse::Ok().json(serde_json::json!({"status": "reordered"}))
+}
+
 #[put("/api/workspaces/{id}")]
 pub async fn rename_workspace(
     db: Db,
