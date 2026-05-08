@@ -56,6 +56,10 @@ const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 const _wsWasSelected = {}; // workspace id -> was selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
+const _tabLastOutput = {}; // tab id -> last output timestamp (ms)
+const _tabDotState = {}; // tab id -> dot state
+const _tabWasSelected = {}; // tab id -> was selected last tick
+const _tabOutputGrace = {}; // tab id -> suppress output recording until this timestamp
 const _exitedTabs = new Set(); // tab ids whose pane has exited (kept until user dismisses)
 let _categories = [];
 let _dialogCallback = null;
@@ -238,8 +242,7 @@ function updateActivityDots() {
     const prev = _wsDotState[ws.id] || '';
     const isSelected = isWsSelected(_selectedWsId, ws.id);
     const wasSelected = _wsWasSelected[ws.id] || false;
-    const isBuilding = ws.status === 'building';
-    const r = tickDot(prev, _wsLastOutput[ws.id], now, isSelected, wasSelected, isBuilding);
+    const r = tickDot(prev, _wsLastOutput[ws.id], now, isSelected, wasSelected, false);
     _wsDotState[ws.id] = r.state;
     _wsLastOutput[ws.id] = r.outputMs;
     _wsWasSelected[ws.id] = isSelected;
@@ -247,6 +250,21 @@ function updateActivityDots() {
     const sidebar = document.getElementById('activity-ws-' + ws.id);
     if (sidebar) sidebar.className = 'activity-dot' + (r.state ? ' ' + r.state : '');
     if (r.notify) notifyIdle(ws.name);
+
+    if (ws.tabs && ws.id === _selectedWsId) {
+      for (const tab of ws.tabs) {
+        const tabPrev = _tabDotState[tab.id] || '';
+        const isTabSelected = _selectedWsSubtab === 'tab-' + tab.id;
+        const tabWasSelected = _tabWasSelected[tab.id] || false;
+        const tr = tickDot(tabPrev, _tabLastOutput[tab.id], now, isTabSelected, tabWasSelected, false);
+        _tabDotState[tab.id] = tr.state;
+        _tabLastOutput[tab.id] = tr.outputMs;
+        _tabWasSelected[tab.id] = isTabSelected;
+        if (tr.graceUntil) _tabOutputGrace[tab.id] = tr.graceUntil;
+        const tabDot = document.getElementById('activity-tab-' + tab.id);
+        if (tabDot) tabDot.className = 'activity-dot' + (tr.state ? ' ' + tr.state : '');
+      }
+    }
   }
 }
 
@@ -684,7 +702,7 @@ function renderSelectedWorkspace() {
   const tabButtons = ws.tabs.map(t => {
     const tabKey = 'tab-' + t.id;
     const exitedClass = _exitedTabs.has(t.id) ? ' exited' : '';
-    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" draggable="true" data-tab-id="${t.id}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
+    return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" draggable="true" data-tab-id="${t.id}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span id="activity-tab-${t.id}" class="activity-dot"></span><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span><span id="altscreen-${t.id}" class="altscreen-badge" style="display:none">FS</span></span></button>`;
   }).join('');
 
   const currentEntry = _selectedWsSubtab ? _tabTerminals[parseInt(_selectedWsSubtab.replace('tab-', ''))] : null;
@@ -910,11 +928,17 @@ function initTerminal(key, paneEl, opts) {
       }
       const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
       if (opts.workspaceId != null
-          && entry.connectedAt && Date.now() - entry.connectedAt > 2000
-          && shouldRecordOutput(
-              isWsSelected(_selectedWsId, opts.workspaceId),
-              Date.now(), _wsOutputGrace[opts.workspaceId])) {
-        _wsLastOutput[opts.workspaceId] = Date.now();
+          && entry.connectedAt && Date.now() - entry.connectedAt > 2000) {
+        const now = Date.now();
+        if (shouldRecordOutput(isWsSelected(_selectedWsId, opts.workspaceId), now, _wsOutputGrace[opts.workspaceId])) {
+          _wsLastOutput[opts.workspaceId] = now;
+        }
+        if (typeof key === 'number') {
+          const isTabSelected = isWsSelected(_selectedWsId, opts.workspaceId) && _selectedWsSubtab === 'tab-' + key;
+          if (shouldRecordOutput(isTabSelected, now, _tabOutputGrace[key])) {
+            _tabLastOutput[key] = now;
+          }
+        }
       }
       // Auto-scroll: use _autoScroll flag instead of checking viewportY vs
       // baseY on each write. The flag is only cleared by explicit user
