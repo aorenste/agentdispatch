@@ -536,6 +536,9 @@ function handleWsDrop(el, inLowerHalf) {
     toIdx = inCat.indexOf(targetW);
     if (inLowerHalf) toIdx++;
     inCat.splice(toIdx, 0, ws);
+    // Write reordered list back to _workspaces
+    const others = _workspaces.filter(w => (w.category_id || null) !== targetCatId);
+    _workspaces = others.concat(inCat);
     saveWorkspaceOrder(targetCatId);
     renderWorkspaces();
   } else if (el.classList.contains('ws-category-header') && !inLowerHalf) {

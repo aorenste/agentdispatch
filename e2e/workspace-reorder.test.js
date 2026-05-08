@@ -120,6 +120,43 @@ test('workspace stays in correct category after reorder within category', async 
   });
 });
 
+test('drag reorder within category via JS', async ({ page, request }) => {
+  // Ensure A,B in cat, C uncategorized, A before B
+  await request.post(`${server.base}/api/workspaces/${wsIds[0]}/category`, { data: { category_id: catId } });
+  await request.post(`${server.base}/api/workspaces/${wsIds[1]}/category`, { data: { category_id: catId } });
+  await request.post(`${server.base}/api/workspaces/${wsIds[2]}/category`, { data: { category_id: null } });
+  await request.post(`${server.base}/api/workspaces/reorder`, { data: { ids: [wsIds[0], wsIds[1]] } });
+  await loadPage(page);
+
+  // Verify initial order: A, B
+  let layout = await readSidebar(page);
+  let cat = layout.find(g => g.category === PREFIX + '-cat');
+  expect(cat.workspaces).toEqual([PREFIX + '-A', PREFIX + '-B']);
+
+  // Simulate drag B onto A's upper half (should place B before A)
+  const result = await page.evaluate(([bId, aId]) => {
+    const aEl = document.querySelector(`[data-ws-id="${aId}"]`);
+    if (!aEl) return { error: 'no A element' };
+    _dragType = 'ws';
+    _dragId = bId;
+    handleWsDrop(aEl, false); // upper half = insert before A
+
+    const cats = [];
+    for (const cat of document.querySelectorAll('.ws-category')) {
+      const name = cat.querySelector('.ws-category-name').textContent;
+      const items = Array.from(cat.querySelectorAll('.ws-sidebar-item .ws-name')).map(e => e.textContent);
+      cats.push({ category: name, workspaces: items });
+    }
+    return cats;
+  }, [wsIds[1], wsIds[0]]);
+
+  cat = result.find(g => g.category === PREFIX + '-cat');
+  expect(cat.workspaces).toEqual([PREFIX + '-B', PREFIX + '-A']);
+
+  // Restore order
+  await request.post(`${server.base}/api/workspaces/reorder`, { data: { ids: [wsIds[0], wsIds[1]] } });
+});
+
 test('drag workspace to bottom of category stays in that category', async ({ page, request }) => {
   // Ensure A,B in cat and C uncategorized
   await request.post(`${server.base}/api/workspaces/${wsIds[0]}/category`, { data: { category_id: catId } });

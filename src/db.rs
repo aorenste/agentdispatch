@@ -65,8 +65,9 @@ const MIGRATIONS: &[&str] = &[
         collapsed INTEGER NOT NULL DEFAULT 0
     );
     ALTER TABLE workspaces ADD COLUMN category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;",
-    // 14 -> 15: mouse_wheel_fs toggle per tab
-    "ALTER TABLE workspace_tabs ADD COLUMN mouse_wheel_fs INTEGER NOT NULL DEFAULT 0",
+    // 14 -> 15: mouse_wheel_fs toggle per tab (default on)
+    "ALTER TABLE workspace_tabs ADD COLUMN mouse_wheel_fs INTEGER NOT NULL DEFAULT 1;
+     UPDATE workspace_tabs SET mouse_wheel_fs = 1;",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -428,7 +429,7 @@ pub fn add_workspace_tab(conn: &Connection, workspace_id: i64, name: &str, tab_t
     )
     .expect("Failed to insert workspace tab");
     let id = conn.last_insert_rowid();
-    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string(), mouse_wheel_fs: false }
+    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string(), mouse_wheel_fs: true }
 }
 
 pub fn set_tab_mouse_wheel_fs(conn: &Connection, tab_id: i64, enabled: bool) {
