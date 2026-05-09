@@ -47,6 +47,7 @@ if (typeof window !== 'undefined') (function() {
 
 let evtSource = null;
 let buildHash = null;
+const AGENTDISPATCH_OSC = 7777;
 let _workspaces = [];
 let _selectedWsId = null;
 let _selectedWsSubtab = '';
@@ -699,6 +700,41 @@ async function closeTab(tabId) {
 }
 
 
+function handleAgentDispatchOsc(payload, opts) {
+  const sep = payload.indexOf(';');
+  const cmd = sep < 0 ? payload : payload.slice(0, sep);
+  const value = sep < 0 ? '' : payload.slice(sep + 1);
+  if (cmd === 'ws-name') {
+    const wsId = opts && opts.workspaceId;
+    if (wsId == null || !value) return;
+    const ws = _workspaces.find(w => w.id === wsId);
+    if (!ws || ws.name === value) return;
+    ws.name = value;
+    renderWorkspaces();
+    fetch(`/api/workspaces/${wsId}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: value}),
+    });
+  } else if (cmd === 'tab-name') {
+    const tabId = opts && opts.tabId;
+    if (tabId == null || !value) return;
+    let tab = null;
+    for (const ws of _workspaces) {
+      const t = ws.tabs.find(t => t.id === tabId);
+      if (t) { tab = t; break; }
+    }
+    if (!tab || tab.name === value) return;
+    tab.name = value;
+    renderSelectedWorkspace();
+    fetch(`/api/tabs/${tabId}`, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: value}),
+    });
+  }
+}
+
 async function renameWorkspace(wsId) {
   closeAllWsMenus();
   const ws = _workspaces.find(w => w.id === wsId);
@@ -928,6 +964,10 @@ function initTerminal(key, paneEl, opts) {
         bar.style.display = 'none';
       }
     }
+  });
+  term.parser.registerOscHandler(AGENTDISPATCH_OSC, (payload) => {
+    handleAgentDispatchOsc(payload, opts);
+    return true;
   });
   _tabTerminals[key] = entry;
 

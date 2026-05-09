@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# ad-ws-name — set the AgentDispatch workspace name from inside a workspace shell.
+# Usage: ad-ws-name <new name>
+#
+# By default emits an OSC 7777 escape sequence consumed by the AgentDispatch
+# xterm.js handler. Inside Emacs (M-x shell, term, vterm, ...) escape sequences
+# don't reach xterm.js, so we fall back to a direct HTTP call. The fallback
+# uses $TMUX_PANE (set natively by tmux on every pane) so the server can map
+# the pane back to its workspace; no custom env vars required.
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Usage: ad-ws-name <new name>" >&2
+    exit 1
+fi
+
+name="$*"
+
+send_osc() {
+    if [ -n "${TMUX-}" ]; then
+        printf '\033Ptmux;\033\033]7777;ws-name;%s\007\033\\' "$name"
+    else
+        printf '\033]7777;ws-name;%s\007' "$name"
+    fi
+}
+
+send_http() {
+    local port_file="${HOME}/.agentdispatch/port"
+    if [ ! -r "$port_file" ]; then
+        echo "ad-ws-name: $port_file not found — is the server running?" >&2
+        return 1
+    fi
+    if [ -z "${TMUX_PANE-}" ]; then
+        echo "ad-ws-name: \$TMUX_PANE not set; not running inside a tmux pane" >&2
+        return 1
+    fi
+    local port
+    port=$(cat "$port_file")
+    local esc
+    esc=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    local pane_esc
+    pane_esc=$(printf '%s' "$TMUX_PANE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    curl -fsS -X POST "http://127.0.0.1:${port}/api/rename-workspace-by-pane" \
+        -H 'Content-Type: application/json' \
+        --data "{\"pane_id\":\"${pane_esc}\",\"name\":\"${esc}\"}" >/dev/null
+}
+
+if [ -n "${INSIDE_EMACS-}" ]; then
+    send_http
+else
+    send_osc
+fi

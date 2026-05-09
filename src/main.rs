@@ -156,19 +156,30 @@ async fn main() -> std::io::Result<()> {
     }
 
     let (tx, _) = tokio::sync::broadcast::channel::<web::UpdateBatch>(64);
+    let (pane_title_tx, _) = tokio::sync::broadcast::channel::<terminal::PaneTitleUpdate>(256);
 
     let build_hash = web::build_hash();
     tlog!("Build hash: {}", build_hash);
 
     println!("http://localhost:{}", args.port);
 
+    // Write port to a well-known location so tools (e.g. ad-ws-name) can find us.
+    if let Ok(home) = std::env::var("HOME") {
+        let dir = std::path::PathBuf::from(home).join(".agentdispatch");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(dir.join("port"), args.port.to_string());
+        }
+    }
+
     let tx_data = actix_web::web::Data::new(tx);
+    let pane_title_tx_data = actix_web::web::Data::new(pane_title_tx);
     let hash_data = actix_web::web::Data::new(build_hash);
     let db_data = actix_web::web::Data::new(db_arc);
     let tmux_data = actix_web::web::Data::new(use_tmux);
     HttpServer::new(move || {
         App::new()
             .app_data(tx_data.clone())
+            .app_data(pane_title_tx_data.clone())
             .app_data(hash_data.clone())
             .app_data(db_data.clone())
             .app_data(tmux_data.clone())
@@ -187,6 +198,9 @@ async fn main() -> std::io::Result<()> {
             .service(projects::set_workspace_category)
             .service(projects::reorder_workspaces)
             .service(projects::rename_workspace)
+            .service(projects::rename_workspace_by_pane)
+            .service(projects::rename_tab_by_pane)
+            .service(projects::set_pane_title_by_pane)
             .service(projects::recreate_workspace)
             .service(projects::delete_workspace)
             .service(projects::reorder_tabs)

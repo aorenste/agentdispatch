@@ -414,6 +414,50 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
+/// Set the title (#{pane_title}) of a tmux pane. Equivalent to OSC 2 emitted
+/// from inside the pane — tmux notifies control-mode clients via
+/// %pane-title-changed, which the terminal handler forwards to the browser.
+pub fn set_pane_title(pane_id: &str, title: &str) -> Result<(), String> {
+    let output = tmux_base()
+        .args(["select-pane", "-t", pane_id, "-T", title])
+        .output()
+        .map_err(|e| format!("Failed to run tmux: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+/// Look up #{pane_title} for a given pane id (e.g. "%42").
+pub fn pane_title_for_pane(pane_id: &str) -> Option<String> {
+    let output = tmux_base()
+        .args(["display-message", "-t", pane_id, "-p", "#{pane_title}"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Some(title)
+}
+
+/// Look up the session and window that contain the given tmux pane id (e.g. "%42").
+/// Used to map a pane back to its workspace/tab when an in-pane tool needs to
+/// identify itself to the server.
+pub fn pane_location(pane_id: &str) -> Option<(String, String)> {
+    let output = tmux_base()
+        .args(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() == 3 && parts[0] == pane_id {
+            return Some((parts[1].trim().to_string(), parts[2].trim().to_string()));
+        }
+    }
+    None
+}
+
 pub fn first_pane_cwd(session: &str) -> Option<String> {
     let output = tmux_base()
         .args(["list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{pane_current_path}"])

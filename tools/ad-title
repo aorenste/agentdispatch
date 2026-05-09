@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# ad-title — set the visible pane title bar in AgentDispatch.
+# Usage: ad-title <new title>
+#
+# In a normal pane this just emits OSC 2 (set window title); tmux captures it
+# and updates #{pane_title}, which the server forwards to xterm.js. Inside
+# Emacs the escape sequence can't reach tmux, so we POST to the server which
+# runs `tmux select-pane -T` on our behalf.
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Usage: ad-title <new title>" >&2
+    exit 1
+fi
+
+title="$*"
+
+send_osc() {
+    printf '\033]2;%s\007' "$title"
+}
+
+send_http() {
+    local port_file="${HOME}/.agentdispatch/port"
+    if [ ! -r "$port_file" ]; then
+        echo "ad-title: $port_file not found — is the server running?" >&2
+        return 1
+    fi
+    if [ -z "${TMUX_PANE-}" ]; then
+        echo "ad-title: \$TMUX_PANE not set; not running inside a tmux pane" >&2
+        return 1
+    fi
+    local port
+    port=$(cat "$port_file")
+    local esc
+    esc=$(printf '%s' "$title" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    local pane_esc
+    pane_esc=$(printf '%s' "$TMUX_PANE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    local resp http_code
+    resp=$(curl -sS -w '\n%{http_code}' -X POST "http://127.0.0.1:${port}/api/set-pane-title-by-pane" \
+        -H 'Content-Type: application/json' \
+        --data "{\"pane_id\":\"${pane_esc}\",\"title\":\"${esc}\"}") || {
+        echo "ad-title: curl failed" >&2
+        return 1
+    }
+    http_code="${resp##*$'\n'}"
+    body="${resp%$'\n'*}"
+    if [ "$http_code" != "200" ]; then
+        echo "ad-title: server returned ${http_code}: ${body}" >&2
+        return 1
+    fi
+}
+
+if [ -n "${INSIDE_EMACS-}" ]; then
+    send_http
+else
+    send_osc
+fi

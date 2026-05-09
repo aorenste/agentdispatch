@@ -7,6 +7,8 @@ use serde::Deserialize;
 use crate::db;
 use crate::terminal::UseTmux;
 use crate::tmux;
+use crate::terminal::{PaneTitleTx, PaneTitleUpdate};
+use crate::web::{BuildHash, Tx, UpdateBatch};
 
 pub type Db = web::Data<Arc<Mutex<Connection>>>;
 
@@ -290,11 +292,119 @@ pub async fn rename_workspace(
     db: Db,
     path: web::Path<i64>,
     body: web::Json<RenameWorkspaceRequest>,
+    tx: Tx,
+    hash: BuildHash,
 ) -> HttpResponse {
     let id = path.into_inner();
-    let conn = db.lock().unwrap();
-    db::rename_workspace(&conn, id, &body.name);
+    {
+        let conn = db.lock().unwrap();
+        db::rename_workspace(&conn, id, &body.name);
+    }
+    let _ = tx.send(UpdateBatch { build_hash: hash.as_ref().clone() });
     HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
+}
+
+#[derive(Deserialize)]
+pub struct RenameByPaneRequest {
+    pane_id: String,
+    name: String,
+}
+
+/// Rename the workspace that owns the given tmux pane. Used by tools running
+/// inside a pane (e.g. `ad-ws-name` from Emacs) where escape-sequence
+/// signaling can't reach the browser. The caller passes `$TMUX_PANE` and the
+/// server resolves it to a workspace via tmux.
+#[post("/api/rename-workspace-by-pane")]
+pub async fn rename_workspace_by_pane(
+    db: Db,
+    body: web::Json<RenameByPaneRequest>,
+    tx: Tx,
+    hash: BuildHash,
+) -> HttpResponse {
+    let (session, _window) = match tmux::pane_location(&body.pane_id) {
+        Some(loc) => loc,
+        None => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("pane '{}' not found", body.pane_id),
+            }));
+        }
+    };
+    let ws_id = match session.strip_prefix("ws-").and_then(|s| s.parse::<i64>().ok()) {
+        Some(id) => id,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("session '{session}' is not a workspace"),
+            }));
+        }
+    };
+    {
+        let conn = db.lock().unwrap();
+        db::rename_workspace(&conn, ws_id, &body.name);
+    }
+    let _ = tx.send(UpdateBatch { build_hash: hash.as_ref().clone() });
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated", "workspace_id": ws_id}))
+}
+
+#[derive(Deserialize)]
+pub struct SetPaneTitleRequest {
+    pane_id: String,
+    title: String,
+}
+
+/// Set the visible pane title (#{pane_title}) for the given pane. Equivalent
+/// to OSC 2 emitted from inside the pane; tmux propagates the change to the
+/// browser via the existing %pane-title-changed pipeline.
+#[post("/api/set-pane-title-by-pane")]
+pub async fn set_pane_title_by_pane(
+    body: web::Json<SetPaneTitleRequest>,
+    pane_title_tx: PaneTitleTx,
+) -> HttpResponse {
+    match tmux::set_pane_title(&body.pane_id, &body.title) {
+        Ok(()) => {
+            let title = tmux::pane_title_for_pane(&body.pane_id)
+                .unwrap_or_else(|| body.title.clone());
+            // tmux's `select-pane -T` does not reliably fire %pane-title-changed
+            // to control-mode clients, so push the update via our own channel.
+            let _ = pane_title_tx.send(PaneTitleUpdate {
+                pane_id: body.pane_id.clone(),
+                title: title.clone(),
+            });
+            HttpResponse::Ok().json(serde_json::json!({"status": "updated", "title": title}))
+        }
+        Err(e) => HttpResponse::BadRequest().json(serde_json::json!({"error": e})),
+    }
+}
+
+/// Rename the tab whose tmux window contains the given pane.
+#[post("/api/rename-tab-by-pane")]
+pub async fn rename_tab_by_pane(
+    db: Db,
+    body: web::Json<RenameByPaneRequest>,
+    tx: Tx,
+    hash: BuildHash,
+) -> HttpResponse {
+    let (_session, window) = match tmux::pane_location(&body.pane_id) {
+        Some(loc) => loc,
+        None => {
+            return HttpResponse::NotFound().json(serde_json::json!({
+                "error": format!("pane '{}' not found", body.pane_id),
+            }));
+        }
+    };
+    let tab_id = match window.strip_prefix("tab-").and_then(|s| s.parse::<i64>().ok()) {
+        Some(id) => id,
+        None => {
+            return HttpResponse::BadRequest().json(serde_json::json!({
+                "error": format!("window '{window}' is not a tab"),
+            }));
+        }
+    };
+    {
+        let conn = db.lock().unwrap();
+        db::update_workspace_tab(&conn, tab_id, &body.name);
+    }
+    let _ = tx.send(UpdateBatch { build_hash: hash.as_ref().clone() });
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated", "tab_id": tab_id}))
 }
 
 #[derive(Deserialize)]
@@ -307,10 +417,15 @@ pub async fn update_tab(
     db: Db,
     path: web::Path<i64>,
     body: web::Json<RenameTabRequest>,
+    tx: Tx,
+    hash: BuildHash,
 ) -> HttpResponse {
     let tab_id = path.into_inner();
-    let conn = db.lock().unwrap();
-    db::update_workspace_tab(&conn, tab_id, &body.name);
+    {
+        let conn = db.lock().unwrap();
+        db::update_workspace_tab(&conn, tab_id, &body.name);
+    }
+    let _ = tx.send(UpdateBatch { build_hash: hash.as_ref().clone() });
     HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
 }
 

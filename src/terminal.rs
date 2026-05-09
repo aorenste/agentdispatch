@@ -6,11 +6,24 @@ use std::process::Command;
 use actix_web::{HttpRequest, HttpResponse, get, web};
 use nix::libc;
 use serde::Deserialize;
+use tokio::sync::broadcast;
 
 use crate::tmux;
 use crate::tmux_cc::{self, CcReader, CcEvent, CcWriter};
 
 pub type UseTmux = web::Data<bool>;
+
+/// Broadcast pushed by HTTP endpoints when a pane title is changed out-of-band
+/// (e.g. via `tmux select-pane -T`, which does not reliably fire
+/// `%pane-title-changed` to control-mode clients). Each terminal websocket
+/// subscribes and forwards updates whose pane_id matches its own.
+#[derive(Clone)]
+pub struct PaneTitleUpdate {
+    pub pane_id: String,
+    pub title: String,
+}
+
+pub type PaneTitleTx = web::Data<broadcast::Sender<PaneTitleUpdate>>;
 
 fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
@@ -60,6 +73,7 @@ pub async fn ws_terminal(
     query: web::Query<TerminalQuery>,
     use_tmux: UseTmux,
     db: crate::projects::Db,
+    pane_title_tx: PaneTitleTx,
 ) -> Result<HttpResponse, actix_web::Error> {
     let cwd = query.cwd.clone();
     let cmd = query.cmd.clone();
@@ -226,7 +240,7 @@ pub async fn ws_terminal(
                 }
             }
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen, pass_mouse);
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen, pass_mouse, pane_title_tx.subscribe());
         }
     }
 
@@ -346,6 +360,7 @@ fn spawn_cc_bridge(
     _init_rows: u16,
     initial_alt_screen: bool,
     pass_mouse: bool,
+    mut pane_title_rx: broadcast::Receiver<PaneTitleUpdate>,
 ) {
     let child_pid = child.id();
 
@@ -353,6 +368,7 @@ fn spawn_cc_bridge(
     let mut session_clone = session.clone();
     let tokio_fd_read = tokio_fd.clone();
     let read_pane_id = pane_id.clone();
+    let title_pane_id = pane_id.clone();
     let log_pane = pane_id.clone();
     let log_link = link_name.clone();
     let pty_to_ws = actix_web::rt::spawn(async move {
@@ -502,6 +518,18 @@ fn spawn_cc_bridge(
                 _ = ping_interval.tick() => {
                     if session_clone.ping(b"").await.is_err() {
                         break;
+                    }
+                }
+                update = pane_title_rx.recv() => {
+                    match update {
+                        Ok(u) if u.pane_id == title_pane_id => {
+                            let escaped = u.title.replace('\\', "\\\\").replace('"', "\\\"");
+                            let msg = format!("{{\"type\":\"pane_title\",\"title\":\"{escaped}\"}}");
+                            if session_clone.text(msg).await.is_err() { break 'outer; }
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => {}
                     }
                 }
             }

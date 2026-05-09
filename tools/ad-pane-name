@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# ad-pane-name — set the AgentDispatch tab name from inside a workspace shell.
+# Usage: ad-pane-name <new name>
+#
+# Mirror of ad-ws-name but targeting the tab (tmux window) instead of the
+# whole workspace. In a normal pane this emits an OSC 7777;tab-name;<value>
+# sequence consumed by the xterm.js handler. Inside Emacs (M-x shell, term,
+# vterm, ...) escape sequences don't reach xterm.js, so we POST to the server
+# using $TMUX_PANE for identification.
+set -euo pipefail
+
+if [ $# -lt 1 ]; then
+    echo "Usage: ad-pane-name <new title>" >&2
+    exit 1
+fi
+
+title="$*"
+
+send_osc() {
+    if [ -n "${TMUX-}" ]; then
+        printf '\033Ptmux;\033\033]7777;tab-name;%s\007\033\\' "$title"
+    else
+        printf '\033]7777;tab-name;%s\007' "$title"
+    fi
+}
+
+send_http() {
+    local port_file="${HOME}/.agentdispatch/port"
+    if [ ! -r "$port_file" ]; then
+        echo "ad-pane-name: $port_file not found — is the server running?" >&2
+        return 1
+    fi
+    if [ -z "${TMUX_PANE-}" ]; then
+        echo "ad-pane-name: \$TMUX_PANE not set; not running inside a tmux pane" >&2
+        return 1
+    fi
+    local port
+    port=$(cat "$port_file")
+    local esc
+    esc=$(printf '%s' "$title" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    local pane_esc
+    pane_esc=$(printf '%s' "$TMUX_PANE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    curl -fsS -X POST "http://127.0.0.1:${port}/api/rename-tab-by-pane" \
+        -H 'Content-Type: application/json' \
+        --data "{\"pane_id\":\"${pane_esc}\",\"name\":\"${esc}\"}" >/dev/null
+}
+
+if [ -n "${INSIDE_EMACS-}" ]; then
+    send_http
+else
+    send_osc
+fi
