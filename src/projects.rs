@@ -305,6 +305,23 @@ pub async fn rename_workspace(
 }
 
 #[derive(Deserialize)]
+pub struct UpdateNotesRequest {
+    notes: String,
+}
+
+#[put("/api/workspaces/{id}/notes")]
+pub async fn update_workspace_notes(
+    db: Db,
+    path: web::Path<i64>,
+    body: web::Json<UpdateNotesRequest>,
+) -> HttpResponse {
+    let id = path.into_inner();
+    let conn = db.lock().unwrap();
+    db::update_workspace_notes(&conn, id, &body.notes);
+    HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
+}
+
+#[derive(Deserialize)]
 pub struct RenameByPaneRequest {
     pane_id: String,
     name: String,
@@ -429,23 +446,6 @@ pub async fn update_tab(
     HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
 }
 
-#[derive(Deserialize)]
-pub struct SetMouseWheelRequest {
-    enabled: bool,
-}
-
-#[post("/api/tabs/{id}/mouse-wheel-fs")]
-pub async fn set_tab_mouse_wheel(
-    db: Db,
-    path: web::Path<i64>,
-    body: web::Json<SetMouseWheelRequest>,
-) -> HttpResponse {
-    let tab_id = path.into_inner();
-    let conn = db.lock().unwrap();
-    db::set_tab_mouse_wheel_fs(&conn, tab_id, body.enabled);
-    HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
-}
-
 #[delete("/api/tabs/{id}")]
 pub async fn delete_tab(
     db: Db,
@@ -495,6 +495,15 @@ mod tests {
 
     fn test_tmux_data() -> actix_web::web::Data<bool> {
         actix_web::web::Data::new(false)
+    }
+
+    fn test_tx_data() -> actix_web::web::Data<tokio::sync::broadcast::Sender<UpdateBatch>> {
+        let (tx, _) = tokio::sync::broadcast::channel::<UpdateBatch>(16);
+        actix_web::web::Data::new(tx)
+    }
+
+    fn test_hash_data() -> actix_web::web::Data<String> {
+        actix_web::web::Data::new("test-hash".to_string())
     }
 
     fn extract_workspaces(body: serde_json::Value) -> Vec<serde_json::Value> {
@@ -555,6 +564,8 @@ mod tests {
             App::new()
                 .app_data(db.clone())
                 .app_data(test_tmux_data())
+                .app_data(test_tx_data())
+                .app_data(test_hash_data())
                 .service(create_workspace)
                 .service(rename_workspace)
                 .service(list_workspaces),
@@ -580,12 +591,46 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn test_update_workspace_notes() {
+        let db = test_app_data();
+        let app = actix_web::test::init_service(
+            App::new()
+                .app_data(db.clone())
+                .app_data(test_tmux_data())
+                .service(create_workspace)
+                .service(update_workspace_notes)
+                .service(list_workspaces),
+        )
+        .await;
+
+        let req = actix_web::test::TestRequest::post()
+            .uri("/api/workspaces")
+            .set_json(serde_json::json!({}))
+            .to_request();
+        let resp: serde_json::Value = actix_web::test::call_and_read_body_json(&app, req).await;
+        let ws_id = resp["id"].as_i64().unwrap();
+        assert_eq!(resp["notes"], "");
+
+        let req = actix_web::test::TestRequest::put()
+            .uri(&format!("/api/workspaces/{ws_id}/notes"))
+            .set_json(serde_json::json!({"notes": "todo: ship it"}))
+            .to_request();
+        assert!(actix_web::test::call_service(&app, req).await.status().is_success());
+
+        let req = actix_web::test::TestRequest::get().uri("/api/workspaces").to_request();
+        let resp = extract_workspaces(actix_web::test::call_and_read_body_json(&app, req).await);
+        assert_eq!(resp[0]["notes"], "todo: ship it");
+    }
+
+    #[actix_web::test]
     async fn test_tab_crud() {
         let db = test_app_data();
         let app = actix_web::test::init_service(
             App::new()
                 .app_data(db.clone())
                 .app_data(test_tmux_data())
+                .app_data(test_tx_data())
+                .app_data(test_hash_data())
                 .service(create_workspace)
                 .service(create_tab)
                 .service(update_tab)

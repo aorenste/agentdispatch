@@ -66,6 +66,23 @@ let _categories = [];
 let _dialogCallback = null;
 let _dialogFields = [];
 
+const _wsNotesEntries = {}; // ws id -> { container, textarea, saveTimer, lastSavedValue }
+const NOTES_COLLAPSED_KEY = 'ws-notes-collapsed';
+const NOTES_WIDTH_KEY = 'ws-notes-width';
+const NOTES_SAVE_DELAY_MS = 3000;
+const NOTES_DEFAULT_WIDTH = 240;
+const NOTES_MIN_WIDTH = 140;
+const NOTES_MAX_WIDTH = 600;
+let _notesCollapsed = false;
+let _notesWidth = NOTES_DEFAULT_WIDTH;
+if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+  try {
+    _notesCollapsed = localStorage.getItem(NOTES_COLLAPSED_KEY) === 'true';
+    const savedW = parseInt(localStorage.getItem(NOTES_WIDTH_KEY), 10);
+    if (!isNaN(savedW)) _notesWidth = clampNotesWidth(savedW);
+  } catch {}
+}
+
 /* -- Pure logic (testable without DOM) -- */
 
 // morphdom callback: skip updating popover elements that are currently open
@@ -104,6 +121,10 @@ function getTerminalConfig() {
       selectionBackground: 'rgba(129, 140, 248, 0.3)',
     },
   };
+}
+
+function clampNotesWidth(w) {
+  return Math.max(NOTES_MIN_WIDTH, Math.min(NOTES_MAX_WIDTH, w));
 }
 
 function containsEraseDisplay(data) {
@@ -653,6 +674,119 @@ async function addShellPane(wsId) {
   renderSelectedWorkspace();
 }
 
+function getOrCreateNotesEntry(ws) {
+  if (_wsNotesEntries[ws.id]) return _wsNotesEntries[ws.id];
+  const container = document.createElement('div');
+  container.className = 'ws-notes-body';
+  const textarea = document.createElement('textarea');
+  textarea.className = 'ws-notes-textarea';
+  textarea.placeholder = 'Notes…';
+  textarea.spellcheck = false;
+  textarea.value = ws.notes || '';
+  const wsId = ws.id;
+  const entry = { container, textarea, saveTimer: null, lastSavedValue: ws.notes || '' };
+  textarea.addEventListener('input', () => scheduleNotesSave(wsId));
+  textarea.addEventListener('blur', () => flushNotesSave(wsId));
+  container.appendChild(textarea);
+  _wsNotesEntries[wsId] = entry;
+  return entry;
+}
+
+function syncNotesFromServer(ws) {
+  // Refresh textarea only if user has no unsaved typing — preserves cursor / pending edits.
+  const entry = _wsNotesEntries[ws.id];
+  if (!entry) return;
+  const serverNotes = ws.notes || '';
+  if (entry.textarea.value === entry.lastSavedValue && serverNotes !== entry.lastSavedValue) {
+    entry.textarea.value = serverNotes;
+    entry.lastSavedValue = serverNotes;
+  }
+}
+
+function scheduleNotesSave(wsId) {
+  const entry = _wsNotesEntries[wsId];
+  if (!entry) return;
+  if (entry.saveTimer) clearTimeout(entry.saveTimer);
+  entry.saveTimer = setTimeout(() => flushNotesSave(wsId), NOTES_SAVE_DELAY_MS);
+}
+
+function flushNotesSave(wsId) {
+  const entry = _wsNotesEntries[wsId];
+  if (!entry) return;
+  if (entry.saveTimer) {
+    clearTimeout(entry.saveTimer);
+    entry.saveTimer = null;
+  }
+  const value = entry.textarea.value;
+  if (value === entry.lastSavedValue) return;
+  fetch(`/api/workspaces/${wsId}/notes`, {
+    method: 'PUT',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({notes: value}),
+    keepalive: true,
+  }).then(res => {
+    if (res.ok) {
+      entry.lastSavedValue = value;
+      const ws = _workspaces.find(w => w.id === wsId);
+      if (ws) ws.notes = value;
+    } else {
+      scheduleNotesSave(wsId);
+    }
+  }).catch(() => scheduleNotesSave(wsId));
+}
+
+function flushAllNotes() {
+  for (const wsId of Object.keys(_wsNotesEntries)) {
+    flushNotesSave(parseInt(wsId));
+  }
+}
+
+function disposeNotesEntry(wsId) {
+  const entry = _wsNotesEntries[wsId];
+  if (!entry) return;
+  if (entry.saveTimer) {
+    clearTimeout(entry.saveTimer);
+    entry.saveTimer = null;
+  }
+  entry.container.remove();
+  delete _wsNotesEntries[wsId];
+}
+
+function toggleNotes() {
+  _notesCollapsed = !_notesCollapsed;
+  if (_selectedWsId != null) flushNotesSave(_selectedWsId);
+  try { localStorage.setItem(NOTES_COLLAPSED_KEY, _notesCollapsed ? 'true' : 'false'); } catch {}
+  renderSelectedWorkspace();
+  window.dispatchEvent(new Event('resize'));
+}
+
+function initNotesResizer() {
+  const resizer = document.getElementById('ws-notes-resizer');
+  const section = document.getElementById('ws-notes-section');
+  if (!resizer || !section) return;
+  resizer.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = section.getBoundingClientRect().width;
+    document.body.classList.add('ws-resizing');
+    resizer.classList.add('dragging');
+    const onMove = (ev) => {
+      _notesWidth = clampNotesWidth(startW + (ev.clientX - startX));
+      section.style.width = _notesWidth + 'px';
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('ws-resizing');
+      resizer.classList.remove('dragging');
+      try { localStorage.setItem(NOTES_WIDTH_KEY, String(_notesWidth)); } catch {}
+      window.dispatchEvent(new Event('resize'));
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
 function disposeTerminal(key) {
   const t = _tabTerminals[key];
   if (!t) return;
@@ -669,21 +803,6 @@ function confirmCloseTab(tabId, tabName) {
   } else {
     showConfirm(`Close "${tabName}"?`, () => closeTab(tabId), 'Close');
   }
-}
-
-async function toggleMouseWheel(tabId) {
-  const ws = _workspaces.find(w => w.id === _selectedWsId);
-  if (!ws) return;
-  const tab = ws.tabs.find(t => t.id === tabId);
-  if (!tab) return;
-  tab.mouse_wheel_fs = !tab.mouse_wheel_fs;
-  await fetch(`/api/tabs/${tabId}/mouse-wheel-fs`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ enabled: tab.mouse_wheel_fs }),
-  });
-  disposeTerminal(tabId);
-  renderSelectedWorkspace();
 }
 
 async function closeTab(tabId) {
@@ -847,29 +966,57 @@ function renderSelectedWorkspace() {
       stash.appendChild(entry.container);
     }
   }
+  for (const entry of Object.values(_wsNotesEntries)) {
+    if (entry.container.parentElement) {
+      stash.appendChild(entry.container);
+    }
+  }
+  syncNotesFromServer(ws);
   _selectedWsSubtab = normalizeWsSubtab(ws, _selectedWsSubtab);
   _wsSubtabs[ws.id] = _selectedWsSubtab;
 
   const tabButtons = ws.tabs.map(t => {
     const tabKey = 'tab-' + t.id;
     const exitedClass = _exitedTabs.has(t.id) ? ' exited' : '';
-    const mouseOn = t.mouse_wheel_fs;
-    const fsBadge = `<span id="altscreen-${t.id}" class="altscreen-badge" style="display:none" onclick="event.stopPropagation(); toggleMouseWheel(${t.id})" title="Click to ${mouseOn ? 'disable' : 'enable'} mouse wheel in fullscreen">FS${mouseOn ? '\u{1f5b1}' : ''}</span>`;
+    const fsBadge = `<span id="altscreen-${t.id}" class="altscreen-badge" style="display:none" title="Fullscreen (alternate-screen) mode">FS</span>`;
     return `<button class="ws-subtab${exitedClass} ${_selectedWsSubtab === tabKey ? 'active' : ''}" draggable="true" data-tab-id="${t.id}" onclick="switchWsSubtab('${tabKey}')"><span class="ws-subtab-inner"><span id="activity-tab-${t.id}" class="activity-dot"></span><span class="ws-subtab-close" onclick="event.stopPropagation(); confirmCloseTab(${t.id}, '${esc(t.name)}')">\u2715</span><span class="ws-subtab-label" ondblclick="event.stopPropagation(); renameTab(${t.id})">${esc(t.name)}</span>${fsBadge}</span></button>`;
   }).join('');
 
   const currentEntry = _selectedWsSubtab ? _tabTerminals[parseInt(_selectedWsSubtab.replace('tab-', ''))] : null;
   const currentTitle = currentEntry && currentEntry.paneTitle ? currentEntry.paneTitle : '';
 
+  const notesCollapsedClass = _notesCollapsed ? ' collapsed' : '';
+  const notesWidthStyle = _notesCollapsed ? '' : `style="width: ${_notesWidth}px"`;
+  const notesToggleArrow = _notesCollapsed ? '▶' : '◀';
+  const notesToggleTitle = _notesCollapsed ? 'Expand notes' : 'Collapse notes';
+  const notesTitle = _notesCollapsed ? '' : '<span class="ws-notes-title">Notes</span>';
   main.innerHTML = `
-    <div class="ws-subtabs">
-      ${tabButtons}
-      <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
+    <div class="ws-main-row">
+      <div class="ws-notes-section${notesCollapsedClass}" id="ws-notes-section" ${notesWidthStyle}>
+        <div class="ws-notes-header">
+          ${notesTitle}
+          <button class="ws-notes-toggle" onclick="toggleNotes()" title="${notesToggleTitle}">${notesToggleArrow}</button>
+        </div>
+        <div class="ws-notes-body-slot" id="ws-notes-body-slot"></div>
+      </div>
+      ${_notesCollapsed ? '' : '<div class="ws-notes-resizer" id="ws-notes-resizer"></div>'}
+      <div class="ws-content">
+        <div class="ws-subtabs">
+          ${tabButtons}
+          <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
+        </div>
+        <div class="pane-title-bar" id="pane-title-bar" style="${currentTitle ? '' : 'display:none'}">${esc(currentTitle)}</div>
+        <div class="pane-issue-bar" id="pane-issue-bar" style="display:none"></div>
+        <div class="ws-pane active" id="ws-active-pane"></div>
+      </div>
     </div>
-    <div class="pane-title-bar" id="pane-title-bar" style="${currentTitle ? '' : 'display:none'}">${esc(currentTitle)}</div>
-    <div class="pane-issue-bar" id="pane-issue-bar" style="display:none"></div>
-    <div class="ws-pane active" id="ws-active-pane"></div>
   `;
+  if (!_notesCollapsed) {
+    const slot = document.getElementById('ws-notes-body-slot');
+    const notesEntry = getOrCreateNotesEntry(ws);
+    slot.appendChild(notesEntry.container);
+  }
+  initNotesResizer();
   updateIssueBar(currentTitle);
 
   const paneEl = document.getElementById('ws-active-pane');
@@ -1326,6 +1473,7 @@ async function destroyWorkspace(id) {
   if (ws) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
   }
+  disposeNotesEntry(id);
   _workspaces = _workspaces.filter(w => w.id !== id);
   if (_selectedWsId === id) _selectedWsId = null;
   renderWorkspaces();
@@ -1592,6 +1740,7 @@ if (typeof document !== 'undefined') {
   connectSSE();
   initSidebarDragDrop();
   initSidebarResizer();
+  window.addEventListener('beforeunload', flushAllNotes);
 
   // Activity dot updater
   setInterval(updateActivityDots, 1000);
@@ -1621,5 +1770,6 @@ if (typeof module !== 'undefined' && module.exports) {
     shouldRecordOutput,
     morphdomShouldUpdate,
     clearPaneError,
+    clampNotesWidth,
   };
 }

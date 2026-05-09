@@ -129,27 +129,21 @@ fn parse_output_line(line: &[u8]) -> Option<(&[u8], &[u8])> {
 /// Filter escape sequences from terminal output.
 ///
 /// Stripped:
-/// - \e[?1000h/l, \e[?1002h/l, \e[?1003h/l, \e[?1006h/l — mouse tracking
-/// - \e[3J — clear scrollback buffer (protects user's scroll history)
+/// - \e[3J — clear scrollback buffer (protects user's scroll history) UNLESS
+///   it immediately follows \e[2J (Claude pairs them to clean up redraw spill).
 ///
-fn filter_escapes(data: &[u8], pass_mouse: bool) -> Vec<u8> {
+fn filter_escapes(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(data.len());
     let mut i = 0;
     let mut saw_erase_display = false;
     while i < data.len() {
         if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'[' {
-            // \e[2J — erase display: pass through and flag it so the
-            // immediately following \e[3J is also let through.
             if i + 3 < data.len() && data[i + 2] == b'2' && data[i + 3] == b'J' {
                 saw_erase_display = true;
                 result.extend_from_slice(&data[i..i + 4]);
                 i += 4;
                 continue;
             }
-            // \e[3J — clear scrollback buffer: strip UNLESS it immediately
-            // follows \e[2J. Claude writes 100+ lines per full redraw,
-            // overflowing the viewport into scrollback. The paired \e[3J
-            // cleans up this overflow; without it, duplicate frames accumulate.
             if i + 3 < data.len() && data[i + 2] == b'3' && data[i + 3] == b'J' {
                 if saw_erase_display {
                     saw_erase_display = false;
@@ -160,19 +154,7 @@ fn filter_escapes(data: &[u8], pass_mouse: bool) -> Vec<u8> {
                 i += 4;
                 continue;
             }
-            // Any other ESC[ sequence clears the \e[2J flag
             saw_erase_display = false;
-            if !pass_mouse && i + 4 < data.len() && data[i + 2] == b'?' {
-                let rest = &data[i + 3..];
-                if rest.starts_with(b"1000h") || rest.starts_with(b"1000l")
-                    || rest.starts_with(b"1002h") || rest.starts_with(b"1002l")
-                    || rest.starts_with(b"1003h") || rest.starts_with(b"1003l")
-                    || rest.starts_with(b"1006h") || rest.starts_with(b"1006l")
-                {
-                    i += 8;
-                    continue;
-                }
-            }
         } else {
             saw_erase_display = false;
         }
@@ -217,7 +199,6 @@ pub struct CcReader {
     window_id: Option<String>,
     saw_exit: bool,
     alternate_screen: bool,
-    pass_mouse: bool,
 }
 
 impl CcReader {
@@ -229,12 +210,7 @@ impl CcReader {
             window_id: None,
             saw_exit: false,
             alternate_screen: false,
-            pass_mouse: false,
         }
-    }
-
-    pub fn set_pass_mouse(&mut self, pass: bool) {
-        self.pass_mouse = pass;
     }
 
     /// Set the window ID to monitor for `%window-close` notifications.
@@ -306,7 +282,7 @@ impl CcReader {
                         if !decoded.is_empty() {
                             // Track alternate screen switches
                             self.scan_alternate_screen(&decoded);
-                            let cleaned = filter_escapes(&decoded, self.pass_mouse);
+                            let cleaned = filter_escapes(&decoded);
                             if !cleaned.is_empty() {
                                 return Some(CcEvent::Output {
                                     data: cleaned,
@@ -749,26 +725,20 @@ mod tests {
         }
     }
 
-    // -- mouse tracking stripped from output --
+    // -- mouse tracking passed through to xterm.js --
 
     #[test]
-    fn test_reader_strips_mouse_tracking_from_output() {
+    fn test_reader_passes_mouse_tracking_through() {
         let mut r = CcReader::new("%0".to_string());
-        // Feed %output containing mouse tracking enable sequences
-        // (as tmux would send when emacs enables mouse)
         r.feed(b"%output %0 \\033[?1000h\\033[?1002h\\033[?1006hHello\r\n");
         match r.next_event() {
             Some(CcEvent::Output { data, .. }) => {
-                // The output should NOT contain mouse tracking sequences
-                assert!(!data.windows(8).any(|w| w == b"\x1b[?1000h"),
-                    "output should not contain \\e[?1000h: {:?}", String::from_utf8_lossy(&data));
-                assert!(!data.windows(8).any(|w| w == b"\x1b[?1002h"),
-                    "output should not contain \\e[?1002h");
-                assert!(!data.windows(8).any(|w| w == b"\x1b[?1006h"),
-                    "output should not contain \\e[?1006h");
-                // But the actual content should still be there
+                assert!(data.windows(8).any(|w| w == b"\x1b[?1000h"),
+                    "expected \\e[?1000h in output: {:?}", String::from_utf8_lossy(&data));
+                assert!(data.windows(8).any(|w| w == b"\x1b[?1006h"),
+                    "expected \\e[?1006h in output");
                 assert!(data.windows(5).any(|w| w == b"Hello"),
-                    "output should still contain Hello");
+                    "expected Hello in output");
             }
             _ => panic!("expected Output"),
         }
@@ -794,57 +764,43 @@ mod tests {
     // -- filter_escapes --
 
     #[test]
-    fn test_strip_mouse_tracking() {
-        assert_eq!(filter_escapes(b"\x1b[?1000h", false), b"");
-        assert_eq!(filter_escapes(b"\x1b[?1002h", false), b"");
-        assert_eq!(filter_escapes(b"\x1b[?1003h", false), b"");
-        assert_eq!(filter_escapes(b"\x1b[?1006h", false), b"");
-        assert_eq!(filter_escapes(b"\x1b[?1000l", false), b"");
-    }
-
-    #[test]
-    fn test_pass_mouse_preserves_tracking() {
-        assert_eq!(filter_escapes(b"\x1b[?1000h", true), b"\x1b[?1000h");
-        assert_eq!(filter_escapes(b"\x1b[?1006h", true), b"\x1b[?1006h");
-    }
-
-    #[test]
-    fn test_strip_mouse_preserves_other() {
-        assert_eq!(filter_escapes(b"hello", false), b"hello");
-        assert_eq!(filter_escapes(b"\x1b[31m", false), b"\x1b[31m");
-        assert_eq!(filter_escapes(b"\x1b[?1049h", false), b"\x1b[?1049h");
-    }
-
-    #[test]
-    fn test_strip_mouse_mixed() {
+    fn test_passes_mouse_tracking_through() {
+        // Mouse tracking sequences must reach xterm.js so apps that opt into
+        // mouse mode (less --mouse, vim, etc.) can receive wheel/click events.
+        assert_eq!(filter_escapes(b"\x1b[?1000h"), b"\x1b[?1000h");
+        assert_eq!(filter_escapes(b"\x1b[?1006h"), b"\x1b[?1006h");
         let input = b"\x1b[?1049h\x1b[?1000h\x1b[?1002hHello\x1b[?1006h";
-        assert_eq!(filter_escapes(input, false), b"\x1b[?1049hHello");
-        assert_eq!(filter_escapes(input, true), input.as_slice());
+        assert_eq!(filter_escapes(input), input.as_slice());
+    }
+
+    #[test]
+    fn test_preserves_other_escape_sequences() {
+        assert_eq!(filter_escapes(b"hello"), b"hello");
+        assert_eq!(filter_escapes(b"\x1b[31m"), b"\x1b[31m");
+        assert_eq!(filter_escapes(b"\x1b[?1049h"), b"\x1b[?1049h");
     }
 
     // -- clear scrollback (\e[3J) stripped from output --
 
     #[test]
     fn test_strip_clear_scrollback() {
-        assert_eq!(filter_escapes(b"\x1b[3J", false), b"");
+        assert_eq!(filter_escapes(b"\x1b[3J"), b"");
     }
 
     #[test]
     fn test_strip_clear_scrollback_with_content() {
-        assert_eq!(filter_escapes(b"hello\x1b[3Jworld", false), b"helloworld");
+        assert_eq!(filter_escapes(b"hello\x1b[3Jworld"), b"helloworld");
     }
 
     #[test]
     fn test_erase_display_passes_through() {
         // \e[2J (erase display) must pass through — it's needed for repaint.
-        // The scrollback pollution comes from Claude writing 100+ lines that
-        // overflow the viewport, not from this sequence.
-        assert_eq!(filter_escapes(b"\x1b[2J", false), b"\x1b[2J");
+        assert_eq!(filter_escapes(b"\x1b[2J"), b"\x1b[2J");
     }
 
     #[test]
     fn test_erase_display_with_content() {
-        assert_eq!(filter_escapes(b"hello\x1b[2Jworld", false), b"hello\x1b[2Jworld");
+        assert_eq!(filter_escapes(b"hello\x1b[2Jworld"), b"hello\x1b[2Jworld");
     }
 
     #[test]
@@ -852,8 +808,7 @@ mod tests {
         // `clear` sends \e[H\e[2J\e[3J — \e[3J passes through because
         // it immediately follows \e[2J (full-redraw cleanup pattern)
         let input = b"\x1b[H\x1b[2J\x1b[3J";
-        let expected = b"\x1b[H\x1b[2J\x1b[3J";
-        assert_eq!(filter_escapes(input, false), expected);
+        assert_eq!(filter_escapes(input), input.as_slice());
     }
 
     #[test]
@@ -863,23 +818,22 @@ mod tests {
         // redraw. Without this, Claude's 100+ line redraws overflow the
         // viewport and accumulate duplicate frames in scrollback.
         let input = b"\x1b[2J\x1b[3J\x1b[H";
-        let expected = b"\x1b[2J\x1b[3J\x1b[H";
-        assert_eq!(filter_escapes(input, false), expected);
+        assert_eq!(filter_escapes(input), input.as_slice());
     }
 
     #[test]
     fn test_standalone_3j_still_stripped() {
         // \e[3J without preceding \e[2J should still be stripped
         // (e.g., from `clear` command or incremental sync blocks)
-        assert_eq!(filter_escapes(b"\x1b[3J", false), b"");
-        assert_eq!(filter_escapes(b"hello\x1b[3Jworld", false), b"helloworld");
+        assert_eq!(filter_escapes(b"\x1b[3J"), b"");
+        assert_eq!(filter_escapes(b"hello\x1b[3Jworld"), b"helloworld");
     }
 
     #[test]
     fn test_3j_after_gap_still_stripped() {
         // \e[3J separated from \e[2J by other content should be stripped
         assert_eq!(
-            filter_escapes(b"\x1b[2Jhello\x1b[3J", false),
+            filter_escapes(b"\x1b[2Jhello\x1b[3J"),
             b"\x1b[2Jhello"
         );
     }

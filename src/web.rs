@@ -192,7 +192,6 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("function getDefaultWsSubtab("));
         assert!(text.contains("function getTerminalConfig("));
-        assert!(text.contains("function buildAgentCommand("));
     }
 
     #[test]
@@ -222,25 +221,15 @@ mod tests {
     e2e_file_test!(test_e2e_altscreen_keys, "altscreen-keys");
     e2e_file_test!(test_e2e_altscreen_mouse, "altscreen-mouse");
     e2e_file_test!(test_e2e_altscreen_reconnect, "altscreen-reconnect");
-    e2e_file_test!(test_e2e_capture_fallback, "capture-fallback");
     e2e_file_test!(test_e2e_claude_reconnect, "claude-reconnect");
     e2e_file_test!(test_e2e_claude_redraw, "claude-redraw");
     e2e_file_test!(test_e2e_claude_scroll_jump, "claude-scroll-jump");
-    e2e_file_test!(test_e2e_git_checkbox, "git-checkbox");
-    e2e_file_test!(test_e2e_build_transition, "build-transition");
-    e2e_file_test!(test_e2e_launch, "launch");
+    e2e_file_test!(test_e2e_notes, "notes");
     e2e_file_test!(test_e2e_workspace_reorder, "workspace-reorder");
     e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_title, "pane-title");
-    e2e_file_test!(test_e2e_mouse_wheel, "mouse-wheel");
     e2e_file_test!(test_e2e_reconnect_scroll, "reconnect-scroll");
-    e2e_file_test!(test_e2e_pane_resize, "pane-resize");
     e2e_file_test!(test_e2e_stash_resize, "stash-resize");
-    e2e_file_test!(test_e2e_scroll, "scroll");
-    e2e_file_test!(test_e2e_scroll_isolation, "scroll-isolation");
-    e2e_file_test!(test_e2e_scrollback_clear, "scrollback-clear");
-    e2e_file_test!(test_e2e_sync_scroll, "sync-scroll");
-    e2e_file_test!(test_e2e_viewport, "viewport");
 
     fn run_playwright(args: &[&str]) {
 

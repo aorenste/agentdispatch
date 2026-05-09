@@ -408,6 +408,97 @@
     flex-direction: column;
     overflow: hidden;
   }
+  .ws-main-row {
+    display: flex;
+    flex-direction: row;
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+  }
+  .ws-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+  }
+  .ws-notes-section {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 auto;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    background: var(--bg-card);
+  }
+  .ws-notes-section.collapsed {
+    width: 32px !important;
+  }
+  .ws-notes-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    flex-shrink: 0;
+  }
+  .ws-notes-section.collapsed .ws-notes-header {
+    border-bottom: none;
+    padding: 6px 0;
+    justify-content: center;
+  }
+  .ws-notes-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ws-notes-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 2px 6px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .ws-notes-toggle:hover {
+    color: var(--text);
+    border-color: var(--text-muted);
+  }
+  .ws-notes-body-slot {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+  }
+  .ws-notes-section.collapsed .ws-notes-body-slot { display: none; }
+  .ws-notes-body { flex: 1; display: flex; min-height: 0; }
+  .ws-notes-textarea {
+    flex: 1;
+    border: none;
+    outline: none;
+    resize: none;
+    background: var(--bg-body);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 8px 10px;
+    line-height: 1.5;
+    width: 100%;
+  }
+  .ws-notes-textarea::placeholder { color: var(--text-muted); }
+  .ws-notes-resizer {
+    flex: 0 0 4px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.15s;
+  }
+  .ws-notes-resizer:hover, .ws-notes-resizer.dragging {
+    background: var(--accent);
+    opacity: 0.6;
+  }
   .ws-empty { color: var(--text-muted); text-align: center; padding: 40px 0; }
   .ws-subtabs {
     display: flex;
@@ -532,7 +623,6 @@
     margin-left: 5px;
     vertical-align: middle;
     letter-spacing: 0.5px;
-    cursor: pointer;
   }
 
   .ws-info div { margin: 4px 0; }

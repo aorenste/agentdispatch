@@ -30,22 +30,19 @@ test('mouse events do not reach the app in full-screen mode', async ({ page }) =
     await page.mouse.wheel(0, -100);
   }
 
-  // Poll until scroll has taken effect (first line shows file content)
+  // Verify less is rendering /etc/passwd content. xterm.js's alt buffer can
+  // have leading blank rows before `baseY`, so check the visible viewport
+  // (lines [baseY .. baseY+rows)), not getLine(0).
   await page.waitForFunction((key) => {
     const e = _tabTerminals[key];
     if (!e) return false;
-    const line = e.term.buffer.active.getLine(0);
-    return line && line.translateToString().trim().includes('root');
-  }, tabId);
-
-  const firstLine = await page.evaluate((key) => {
-    const e = _tabTerminals[key];
-    if (!e) return '';
     const buf = e.term.buffer.active;
-    const line = buf.getLine(0);
-    return line ? line.translateToString().trim() : '';
+    for (let i = buf.baseY; i < buf.baseY + e.term.rows; i++) {
+      const line = buf.getLine(i);
+      if (line && line.translateToString().includes('root:x:0:0')) return true;
+    }
+    return false;
   }, tabId);
-  expect(firstLine).toContain('root');
 
   await page.keyboard.press('q');
   await h.waitForAltScreen(page, false);

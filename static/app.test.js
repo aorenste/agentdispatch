@@ -246,4 +246,16 @@ describe('morphdomShouldUpdate', () => {
   });
 });
 
+describe('clampNotesWidth', () => {
+  test('clamps below minimum', () => {
+    assert.equal(app.clampNotesWidth(50), 140);
+  });
+  test('clamps above maximum', () => {
+    assert.equal(app.clampNotesWidth(9999), 600);
+  });
+  test('passes through in-range values', () => {
+    assert.equal(app.clampNotesWidth(300), 300);
+  });
+});
+
 

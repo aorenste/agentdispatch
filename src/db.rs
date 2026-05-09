@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 15;
+const CURRENT_VERSION: i64 = 17;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -68,6 +68,10 @@ const MIGRATIONS: &[&str] = &[
     // 14 -> 15: mouse_wheel_fs toggle per tab (default on)
     "ALTER TABLE workspace_tabs ADD COLUMN mouse_wheel_fs INTEGER NOT NULL DEFAULT 1;
      UPDATE workspace_tabs SET mouse_wheel_fs = 1;",
+    // 15 -> 16: per-workspace notes
+    "ALTER TABLE workspaces ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
+    // 16 -> 17: drop mouse_wheel_fs (toggle removed; mouse forwarding is always on)
+    "ALTER TABLE workspace_tabs DROP COLUMN mouse_wheel_fs",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -260,7 +264,6 @@ pub struct WorkspaceTab {
     pub sort_order: i64,
     pub name: String,
     pub tab_type: String,
-    pub mouse_wheel_fs: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -274,12 +277,13 @@ pub struct Workspace {
     pub build_variant: String,
     pub agent: String,
     pub category_id: Option<i64>,
+    pub notes: String,
     pub tabs: Vec<WorkspaceTab>,
 }
 
 pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
     let mut stmt = conn
-        .prepare("SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent, category_id FROM workspaces ORDER BY sort_order, id")
+        .prepare("SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent, category_id, notes FROM workspaces ORDER BY sort_order, id")
         .unwrap();
     let mut workspaces: Vec<Workspace> = stmt.query_map([], |row| {
         Ok(Workspace {
@@ -292,6 +296,7 @@ pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
             build_variant: row.get(6)?,
             agent: row.get(7)?,
             category_id: row.get(8)?,
+            notes: row.get(9)?,
             tabs: Vec::new(),
         })
     })
@@ -307,7 +312,7 @@ pub fn list_workspaces(conn: &Connection) -> Vec<Workspace> {
 
 pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
     conn.query_row(
-        "SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent, category_id FROM workspaces WHERE id = ?1",
+        "SELECT id, name, project, created_at, worktree_dir, status, build_variant, agent, category_id, notes FROM workspaces WHERE id = ?1",
         [id],
         |row| {
             Ok(Workspace {
@@ -320,6 +325,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
                 build_variant: row.get(6)?,
                 agent: row.get(7)?,
                 category_id: row.get(8)?,
+                notes: row.get(9)?,
                 tabs: Vec::new(),
             })
         },
@@ -329,7 +335,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
 
 pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<WorkspaceTab> {
     let mut stmt = conn
-        .prepare("SELECT id, sort_order, name, tab_type, mouse_wheel_fs FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
+        .prepare("SELECT id, sort_order, name, tab_type FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
         .unwrap();
     stmt.query_map([workspace_id], |row| {
         Ok(WorkspaceTab {
@@ -337,7 +343,6 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
             sort_order: row.get(1)?,
             name: row.get(2)?,
             tab_type: row.get(3)?,
-            mouse_wheel_fs: row.get::<_, i64>(4)? != 0,
         })
     })
     .unwrap()
@@ -358,7 +363,15 @@ pub fn add_workspace(conn: &Connection, name: &str, project: &str, worktree_dir:
     let created_at: String = conn
         .query_row("SELECT created_at FROM workspaces WHERE id = ?1", [id], |row| row.get(0))
         .unwrap();
-    Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), build_variant: build_variant.to_string(), agent: agent.to_string(), category_id: None, tabs: Vec::new() }
+    Workspace { id, name: name.to_string(), project: project.to_string(), created_at, worktree_dir: worktree_dir.map(String::from), status: status.to_string(), build_variant: build_variant.to_string(), agent: agent.to_string(), category_id: None, notes: String::new(), tabs: Vec::new() }
+}
+
+pub fn update_workspace_notes(conn: &Connection, id: i64, notes: &str) {
+    conn.execute(
+        "UPDATE workspaces SET notes = ?1 WHERE id = ?2",
+        rusqlite::params![notes, id],
+    )
+    .ok();
 }
 
 #[allow(dead_code)]
@@ -429,22 +442,7 @@ pub fn add_workspace_tab(conn: &Connection, workspace_id: i64, name: &str, tab_t
     )
     .expect("Failed to insert workspace tab");
     let id = conn.last_insert_rowid();
-    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string(), mouse_wheel_fs: true }
-}
-
-pub fn set_tab_mouse_wheel_fs(conn: &Connection, tab_id: i64, enabled: bool) {
-    conn.execute(
-        "UPDATE workspace_tabs SET mouse_wheel_fs = ?1 WHERE id = ?2",
-        rusqlite::params![enabled as i64, tab_id],
-    ).ok();
-}
-
-pub fn get_tab_mouse_wheel_fs(conn: &Connection, tab_id: i64) -> bool {
-    conn.query_row(
-        "SELECT mouse_wheel_fs FROM workspace_tabs WHERE id = ?1",
-        [tab_id],
-        |row| row.get::<_, i64>(0),
-    ).map(|v| v != 0).unwrap_or(false)
+    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string() }
 }
 
 pub fn update_workspace_tab(conn: &Connection, tab_id: i64, name: &str) {
@@ -714,6 +712,35 @@ mod tests {
         remove_workspace(&conn, ws.id);
         assert!(get_workspace(&conn, ws.id).is_none());
         assert!(list_workspace_tabs(&conn, ws.id).is_empty());
+    }
+
+    #[test]
+    fn test_workspace_notes_default_empty() {
+        let conn = test_db();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
+        assert_eq!(ws.notes, "");
+        let fetched = get_workspace(&conn, ws.id).unwrap();
+        assert_eq!(fetched.notes, "");
+    }
+
+    #[test]
+    fn test_update_workspace_notes() {
+        let conn = test_db();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
+
+        update_workspace_notes(&conn, ws.id, "hello\nworld");
+        let fetched = get_workspace(&conn, ws.id).unwrap();
+        assert_eq!(fetched.notes, "hello\nworld");
+
+        // Verify list_workspaces also returns notes
+        let listed = list_workspaces(&conn);
+        assert_eq!(listed[0].notes, "hello\nworld");
+
+        // Update again — overwrites
+        update_workspace_notes(&conn, ws.id, "");
+        assert_eq!(get_workspace(&conn, ws.id).unwrap().notes, "");
     }
 
     #[test]
