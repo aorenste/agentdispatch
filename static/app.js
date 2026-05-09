@@ -361,11 +361,12 @@ function moveWorkspaceToCategory(wsId, categoryId) {
   });
 }
 
-async function newWorkspace() {
+async function newWorkspace(categoryId) {
+  const body = categoryId ? {category_id: categoryId} : {};
   const res = await fetch('/api/workspaces', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({}),
+    body: JSON.stringify(body),
   });
   const data = await res.json();
   if (data.error) { showDialog(data.error); return; }
@@ -400,6 +401,7 @@ function renderCategorySection(cat, workspaces) {
   const menuHtml = isUncat ? '' : `
     <button class="ws-menu-btn" onclick="event.stopPropagation(); toggleCatMenu(${catId})">…</button>
     <div class="ws-popover" id="cat-menu-${catId}">
+      <div class="ws-popover-item" onclick="event.stopPropagation(); newWorkspace(${catId})">New Workspace</div>
       <div class="ws-popover-item" onclick="event.stopPropagation(); renameCategory(${catId})">Rename</div>
       <div class="ws-popover-item danger" onclick="event.stopPropagation(); deleteCategory(${catId})">Delete</div>
     </div>`;

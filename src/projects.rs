@@ -14,6 +14,8 @@ pub type Db = web::Data<Arc<Mutex<Connection>>>;
 pub struct NewWorkspaceRequest {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    category_id: Option<i64>,
 }
 
 #[post("/api/workspaces")]
@@ -29,8 +31,12 @@ pub async fn create_workspace(
             .filter(|n| !n.trim().is_empty())
             .map(|n| n.trim().to_string())
             .unwrap_or_else(|| db::next_workspace_name(&conn, "ws"));
-        let ws = db::add_workspace(&conn, &ws_name, "", None, "ready", "", "");
+        let mut ws = db::add_workspace(&conn, &ws_name, "", None, "ready", "", "");
         let tab = db::add_workspace_tab(&conn, ws.id, "shell", "shell");
+        if let Some(cat_id) = body.category_id {
+            db::set_workspace_category(&conn, ws.id, Some(cat_id));
+            ws.category_id = Some(cat_id);
+        }
         (ws, tab)
     };
     let (ws, tab) = ws;
