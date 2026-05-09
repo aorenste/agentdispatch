@@ -700,6 +700,58 @@ async function closeTab(tabId) {
 }
 
 
+const DEFAULT_GITHUB_REPO = 'pytorch/pytorch';
+
+function findIssueRefs(title) {
+  if (!title) return [];
+  const matches = [];
+  // Optional org/repo prefix; bare #N falls back to DEFAULT_GITHUB_REPO.
+  // GitHub's /issues/N URL redirects to /pull/N when the number is a PR.
+  const re = /(?:([\w.-]+\/[\w.-]+))?#(\d+)/g;
+  let m;
+  while ((m = re.exec(title)) !== null) {
+    const repo = m[1] || DEFAULT_GITHUB_REPO;
+    matches.push({
+      label: m[1] ? `${m[1]}#${m[2]}` : `#${m[2]}`,
+      url: `https://github.com/${repo}/issues/${m[2]}`,
+    });
+  }
+  const seen = new Set();
+  return matches.filter(r => seen.has(r.url) ? false : (seen.add(r.url), true));
+}
+
+function updateIssueBar(title) {
+  const bar = document.getElementById('pane-issue-bar');
+  if (!bar) return;
+  const ws = _selectedWsId != null ? _workspaces.find(w => w.id === _selectedWsId) : null;
+  const haystack = `${ws ? ws.name : ''} ${title || ''}`;
+  const refs = findIssueRefs(haystack);
+  if (refs.length === 0) {
+    bar.style.display = 'none';
+    bar.innerHTML = '';
+    return;
+  }
+  bar.innerHTML = refs.map(r =>
+    `<a href="${esc(r.url)}" onclick="openIssueLink(event, '${escAttr(r.url)}'); return false;">${esc(r.label)}</a>`
+  ).join('');
+  bar.style.display = '';
+}
+
+function openIssueLink(e, url) {
+  e.preventDefault();
+  // Synthesize a real anchor click. Browsers (especially Chrome PWA / standalone)
+  // treat this as user-initiated navigation, which is the only path that
+  // reliably gives the new tab foreground focus.
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 function handleAgentDispatchOsc(payload, opts) {
   const sep = payload.indexOf(';');
   const cmd = sep < 0 ? payload : payload.slice(0, sep);
@@ -815,8 +867,10 @@ function renderSelectedWorkspace() {
       <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
     </div>
     <div class="pane-title-bar" id="pane-title-bar" style="${currentTitle ? '' : 'display:none'}">${esc(currentTitle)}</div>
+    <div class="pane-issue-bar" id="pane-issue-bar" style="display:none"></div>
     <div class="ws-pane active" id="ws-active-pane"></div>
   `;
+  updateIssueBar(currentTitle);
 
   const paneEl = document.getElementById('ws-active-pane');
   if (!_selectedWsSubtab) {
@@ -963,6 +1017,7 @@ function initTerminal(key, paneEl, opts) {
       } else {
         bar.style.display = 'none';
       }
+      updateIssueBar(title);
     }
   });
   term.parser.registerOscHandler(AGENTDISPATCH_OSC, (payload) => {
@@ -1017,6 +1072,7 @@ function initTerminal(key, paneEl, opts) {
             } else {
               bar.style.display = 'none';
             }
+            updateIssueBar(entry.paneTitle);
           }
         } catch {}
         return;
