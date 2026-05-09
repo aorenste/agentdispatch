@@ -210,6 +210,39 @@ test('drag workspace to bottom of category stays in that category', async ({ pag
   await request.post(`${server.base}/api/workspaces/${wsIds[2]}/category`, { data: { category_id: null } });
 });
 
+test('category menu opens on click and stays open', async ({ page, request }) => {
+  await loadPage(page);
+
+  // Track if toggleCategory gets called (it shouldn't - stopPropagation)
+  await page.evaluate(() => {
+    window._toggleCategoryCalled = false;
+    const orig = window.toggleCategory;
+    window.toggleCategory = function(...args) {
+      window._toggleCategoryCalled = true;
+      return orig.apply(this, args);
+    };
+  });
+
+  const catHeader = page.locator('.ws-category-header').filter({ hasText: PREFIX + '-cat' });
+  const menuBtn = catHeader.locator('.ws-menu-btn');
+  await menuBtn.click();
+
+  // Wait a beat for any async effects
+  await page.waitForTimeout(200);
+
+  // toggleCategory should NOT have been called
+  const toggleCalled = await page.evaluate(() => window._toggleCategoryCalled);
+  expect(toggleCalled).toBe(false);
+
+  // The popover should be visible on screen (not just display:block but actually in viewport)
+  const popover = page.locator(`#cat-menu-${catId}`);
+  await expect(popover).toBeVisible();
+  const box = await popover.boundingBox();
+  expect(box).toBeTruthy();
+  expect(box.width).toBeGreaterThan(0);
+  expect(box.height).toBeGreaterThan(0);
+});
+
 test('deleting category moves workspaces to uncategorized', async ({ page, request }) => {
   // Create a temp category and move A into it
   const tmpRes = await request.post(`${server.base}/api/categories`, {
