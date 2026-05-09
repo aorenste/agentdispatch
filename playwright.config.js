@@ -2,7 +2,7 @@ const { defineConfig } = require('@playwright/test');
 
 module.exports = defineConfig({
   testDir: './e2e',
-  timeout: 120000,  // safety bail-out for genuine hangs (WebSocket stuck, etc.)
+  timeout: 20000,  // safety bail-out for genuine hangs; real tests run in <5s
   retries: 0,
   workers: 1,
   use: {

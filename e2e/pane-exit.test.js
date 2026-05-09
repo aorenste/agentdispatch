@@ -22,7 +22,7 @@ test('Shell tab is marked exited (not deleted) when shell exits', async ({ page 
   await connectToTerminal(page);
 
   // Verify the tab button exists
-  await page.waitForSelector(`.ws-subtab:has-text("Shell")`);
+  await page.waitForSelector(`.ws-subtab:has-text("shell")`);
 
   // Type exit to close the shell
   await typeCmd(page, 'exit');
@@ -31,7 +31,7 @@ test('Shell tab is marked exited (not deleted) when shell exits', async ({ page 
   await page.waitForFunction(() =>
     [...document.querySelectorAll('.ws-subtab')]
       .some(el => el.classList.contains('exited')
-        && el.querySelector('.ws-subtab-label')?.textContent === 'Shell')
+        && el.querySelector('.ws-subtab-label')?.textContent === 'shell')
   );
 
   // Tab still exists in the API — it's only a visual mark, not a deletion.

@@ -479,6 +479,17 @@ fn spawn_cc_bridge(
                                     }
                                     CcEvent::Exit => {
                                         tlog!("[terminal] {log_link} pane={log_pane}: %exit (session ended)");
+                                        // %exit fires both for window destruction (shell exited) AND for
+                                        // server-side linked-session cleanup (e.g. WebSocket disconnect).
+                                        // Distinguish by checking whether the underlying window survives.
+                                        let wid = registered_window_id.clone();
+                                        let still_alive = tokio::task::spawn_blocking(move || tmux::window_exists(&wid))
+                                            .await
+                                            .unwrap_or(false);
+                                        if !still_alive {
+                                            tlog!("[terminal] {log_link} pane={log_pane}: window gone after %exit, sending pane_exit");
+                                            let _ = session_clone.text(r#"{"type":"pane_exit"}"#.to_string()).await;
+                                        }
                                         break 'outer;
                                     }
                                     CcEvent::WindowClosed => {

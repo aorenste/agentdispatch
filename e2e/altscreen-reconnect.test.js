@@ -51,7 +51,6 @@ test('display updates after quitting FS app post-reload', async ({ page, request
   const freshTabId = freshTab.id;
 
   await page.goto(server.base + '/');
-  await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
   await page.click('text=FreshShell');
@@ -69,7 +68,6 @@ test('display updates after quitting FS app post-reload', async ({ page, request
   );
 
   await page.reload();
-  await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: proj }).click();
   await page.click('text=FreshShell');

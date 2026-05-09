@@ -42,7 +42,6 @@ test('scrollback survives page reload', async ({ page }) => {
   await page.goto(base() + '/');
 
   // Reconnect to the same workspace/tab
-  await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: PROJECT }).click();
   await page.waitForSelector('.xterm-screen');

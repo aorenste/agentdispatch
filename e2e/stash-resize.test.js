@@ -26,7 +26,6 @@ test.afterAll(async ({ request }) => {
 test('stashing terminal does not widen its columns', async ({ page }) => {
   // Navigate to workspace 1, connect terminal
   await page.goto(server.base + '/');
-  await page.click('text=Workspaces');
   await page.waitForSelector('.ws-sidebar-item');
   await page.locator('.ws-sidebar-item').filter({ hasText: PROJ1 }).click();
   await page.waitForSelector('.xterm-screen');
