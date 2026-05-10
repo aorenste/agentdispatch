@@ -1171,6 +1171,22 @@ function initTerminal(key, paneEl, opts) {
     handleAgentDispatchOsc(payload, opts);
     return true;
   });
+  // OSC 52: terminal clipboard. Apps (e.g. claude) emit this to copy text to
+  // the OS clipboard; without a handler, xterm.js drops it. Format:
+  // <selectors>;<base64-or-?>. We ignore queries (?) — paste is browser-side.
+  term.parser.registerOscHandler(52, (payload) => {
+    const sep = payload.indexOf(';');
+    if (sep < 0) return false;
+    const data = payload.slice(sep + 1);
+    if (!data || data === '?') return false;
+    try {
+      const text = atob(data);
+      if (text && navigator.clipboard) {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
+    } catch {}
+    return true;
+  });
   _tabTerminals[key] = entry;
 
   function connectWs() {

@@ -225,6 +225,7 @@ mod tests {
     e2e_file_test!(test_e2e_claude_redraw, "claude-redraw");
     e2e_file_test!(test_e2e_claude_scroll_jump, "claude-scroll-jump");
     e2e_file_test!(test_e2e_notes, "notes");
+    e2e_file_test!(test_e2e_osc52, "osc52");
     e2e_file_test!(test_e2e_workspace_reorder, "workspace-reorder");
     e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_title, "pane-title");

@@ -221,6 +221,11 @@ pub fn ensure_server_config() {
     let _ = tmux_base()
         .args(["set-option", "-ga", "terminal-features", "xterm*:hyperlinks"])
         .output();
+    // Forward clipboard writes (OSC 52) to the terminal even when apps use
+    // `tmux set-buffer` (claude does this). xterm.js handles OSC 52 below.
+    let _ = tmux_base()
+        .args(["set-option", "-g", "set-clipboard", "on"])
+        .output();
 }
 
 pub fn new_session(session: &str, window: &str, cwd: &str, cmd: Option<&str>) -> Result<(), String> {
