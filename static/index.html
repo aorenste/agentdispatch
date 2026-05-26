@@ -544,6 +544,9 @@
   .ws-subtab-label { cursor: default; }
   .ws-subtab .ws-subtab-label:hover { text-decoration: underline; text-decoration-style: dotted; }
   .pane-title-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
     padding: 2px 8px;
     font-size: 11px;
     color: var(--text-dim);
@@ -551,7 +554,19 @@
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
     overflow: hidden;
+  }
+  .pane-title-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .pane-cwd-text {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.7;
   }
   .pane-issue-bar {
     padding: 2px 8px;

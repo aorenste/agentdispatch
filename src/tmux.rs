@@ -172,8 +172,12 @@ fn tmux_base() -> Command {
 }
 
 pub fn has_session(session: &str) -> bool {
+    // `=name` forces exact match; otherwise tmux fuzzy-matches by prefix and
+    // e.g. `has-session -t ws-1` would also match a still-alive linked client
+    // session named `ws-1--tab-1-0`.
+    let target = format!("={session}");
     tmux_base()
-        .args(["has-session", "-t", session])
+        .args(["has-session", "-t", &target])
         .output()
         .is_ok_and(|o| o.status.success())
 }
@@ -642,6 +646,17 @@ pub fn pane_title(session: &str, window: &str) -> Option<String> {
     if !output.status.success() { return None; }
     let title = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if title.is_empty() { None } else { Some(title) }
+}
+
+pub fn pane_current_path(session: &str, window: &str) -> Option<String> {
+    let target = format!("{session}:{window}");
+    let output = tmux_base()
+        .args(["list-panes", "-t", &target, "-F", "#{pane_current_path}"])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() { None } else { Some(path) }
 }
 
 pub fn pane_mouse_mode(session: &str, window: &str) -> Vec<u8> {

@@ -258,4 +258,101 @@ describe('clampNotesWidth', () => {
   });
 });
 
+describe('relativizeHome', () => {
+  test('returns "~" when path equals home', () => {
+    assert.equal(app.relativizeHome('/home/alice', '/home/alice'), '~');
+  });
+  test('rewrites prefix to ~/', () => {
+    assert.equal(app.relativizeHome('/home/alice/code/repo', '/home/alice'), '~/code/repo');
+  });
+  test('does not rewrite when home is not a path-boundary prefix', () => {
+    // /home/alicebar should NOT become ~bar
+    assert.equal(app.relativizeHome('/home/alicebar/x', '/home/alice'), '/home/alicebar/x');
+  });
+  test('passes through when home empty', () => {
+    assert.equal(app.relativizeHome('/var/log', ''), '/var/log');
+  });
+  test('empty path returns empty', () => {
+    assert.equal(app.relativizeHome('', '/home/alice'), '');
+  });
+  test('non-prefix path passes through', () => {
+    assert.equal(app.relativizeHome('/etc/hosts', '/home/alice'), '/etc/hosts');
+  });
+});
+
+describe('parseOsc7', () => {
+  test('extracts path from file://host/path', () => {
+    assert.equal(app.parseOsc7('file://devbox/data/users/alice'), '/data/users/alice');
+  });
+  test('decodes percent-encoding', () => {
+    assert.equal(app.parseOsc7('file:///home/alice/my%20dir'), '/home/alice/my dir');
+  });
+  test('returns null for non-file URIs', () => {
+    assert.equal(app.parseOsc7('http://example.com/foo'), null);
+  });
+  test('returns null for empty payload', () => {
+    assert.equal(app.parseOsc7(''), null);
+    assert.equal(app.parseOsc7(null), null);
+  });
+});
+
+describe('findIssueRefs', () => {
+  test('returns empty for empty/null input', () => {
+    assert.deepEqual(app.findIssueRefs(''), []);
+    assert.deepEqual(app.findIssueRefs(null), []);
+  });
+
+  test('matches bare GitHub #N as pytorch/pytorch issue', () => {
+    const refs = app.findIssueRefs('fixing #123');
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].label, '#123');
+    assert.equal(refs[0].url, 'https://github.com/pytorch/pytorch/issues/123');
+  });
+
+  test('matches owner/repo#N', () => {
+    const refs = app.findIssueRefs('see facebook/react#456');
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].label, 'facebook/react#456');
+    assert.equal(refs[0].url, 'https://github.com/facebook/react/issues/456');
+  });
+
+  test('matches Meta task identifier T<digits>', () => {
+    const refs = app.findIssueRefs('working on T270693054');
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].label, 'T270693054');
+    assert.equal(refs[0].url, 'https://www.internalfb.com/tasks/T270693054');
+  });
+
+  test('matches multiple task IDs in one string', () => {
+    const refs = app.findIssueRefs('fix T1 and T22; also T270693054');
+    const labels = refs.map(r => r.label);
+    assert.deepEqual(labels.sort(), ['T1', 'T22', 'T270693054'].sort());
+  });
+
+  test('matches PR and task in same string', () => {
+    const refs = app.findIssueRefs('PR #99 closes T270693054');
+    assert.equal(refs.length, 2);
+    const urls = refs.map(r => r.url);
+    assert.ok(urls.includes('https://github.com/pytorch/pytorch/issues/99'));
+    assert.ok(urls.includes('https://www.internalfb.com/tasks/T270693054'));
+  });
+
+  test('does NOT match T inside an identifier', () => {
+    // Avoid false positives on e.g. T-shirt, GoT123 (capital T inside a word).
+    assert.deepEqual(app.findIssueRefs('aT123 boundary check'), []);
+    assert.deepEqual(app.findIssueRefs('GoT1234'), []);
+  });
+
+  test('matches T at start of string', () => {
+    const refs = app.findIssueRefs('T270693054: title text');
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].label, 'T270693054');
+  });
+
+  test('dedupes identical references', () => {
+    const refs = app.findIssueRefs('T1 T1 T1');
+    assert.equal(refs.length, 1);
+  });
+});
+
 

@@ -47,6 +47,7 @@ if (typeof window !== 'undefined') (function() {
 
 let evtSource = null;
 let buildHash = null;
+let _home = '';
 const AGENTDISPATCH_OSC = 7777;
 let _workspaces = [];
 let _selectedWsId = null;
@@ -127,6 +128,26 @@ function clampNotesWidth(w) {
   return Math.max(NOTES_MIN_WIDTH, Math.min(NOTES_MAX_WIDTH, w));
 }
 
+// Replace a leading $HOME with "~". Returns the original path if home is
+// empty or not a prefix. Match must be on a path boundary so /home/foobar
+// doesn't get rewritten when home is /home/foo.
+function relativizeHome(path, home) {
+  if (!path) return '';
+  if (!home) return path;
+  if (path === home) return '~';
+  if (path.startsWith(home + '/')) return '~' + path.slice(home.length);
+  return path;
+}
+
+// OSC 7 payload is file://hostname/abspath — extract the abspath portion.
+function parseOsc7(payload) {
+  if (!payload) return null;
+  const m = /^file:\/\/[^/]*(\/.*)$/.exec(payload);
+  if (!m) return null;
+  try { return decodeURIComponent(m[1]); }
+  catch { return m[1]; }
+}
+
 function containsEraseDisplay(data) {
   // \e[2J = bytes 0x1b 0x5b 0x32 0x4a
   for (let i = 0; i <= data.length - 4; i++) {
@@ -163,6 +184,7 @@ function connectSSE() {
       return;
     }
     buildHash = data.build_hash;
+    if (typeof data.home === 'string') _home = data.home;
     document.getElementById('conn-overlay').classList.remove('active');
     status.textContent = 'Connected';
     status.className = 'connected';
@@ -824,19 +846,39 @@ const DEFAULT_GITHUB_REPO = 'pytorch/pytorch';
 function findIssueRefs(title) {
   if (!title) return [];
   const matches = [];
-  // Optional org/repo prefix; bare #N falls back to DEFAULT_GITHUB_REPO.
+  // GitHub-style refs: optional owner/repo prefix; bare #N → DEFAULT_GITHUB_REPO.
   // GitHub's /issues/N URL redirects to /pull/N when the number is a PR.
-  const re = /(?:([\w.-]+\/[\w.-]+))?#(\d+)/g;
+  const ghRe = /(?:([\w.-]+\/[\w.-]+))?#(\d+)/g;
   let m;
-  while ((m = re.exec(title)) !== null) {
+  while ((m = ghRe.exec(title)) !== null) {
     const repo = m[1] || DEFAULT_GITHUB_REPO;
     matches.push({
       label: m[1] ? `${m[1]}#${m[2]}` : `#${m[2]}`,
       url: `https://github.com/${repo}/issues/${m[2]}`,
     });
   }
+  // Meta task identifiers: T followed by digits (e.g. T270693054).
+  const taskRe = /\bT(\d+)\b/g;
+  while ((m = taskRe.exec(title)) !== null) {
+    matches.push({
+      label: `T${m[1]}`,
+      url: `https://www.internalfb.com/tasks/T${m[1]}`,
+    });
+  }
   const seen = new Set();
   return matches.filter(r => seen.has(r.url) ? false : (seen.add(r.url), true));
+}
+
+function renderTitleBar(entry) {
+  const bar = document.getElementById('pane-title-bar');
+  if (!bar) return;
+  const titleEl = document.getElementById('pane-title-text');
+  const cwdEl = document.getElementById('pane-cwd-text');
+  const title = entry.paneTitle || '';
+  const cwd = entry.paneCwd || '';
+  if (titleEl) titleEl.textContent = title;
+  if (cwdEl) cwdEl.textContent = cwd;
+  bar.style.display = (title || cwd) ? '' : 'none';
 }
 
 function updateIssueBar(title) {
@@ -984,6 +1026,7 @@ function renderSelectedWorkspace() {
 
   const currentEntry = _selectedWsSubtab ? _tabTerminals[parseInt(_selectedWsSubtab.replace('tab-', ''))] : null;
   const currentTitle = currentEntry && currentEntry.paneTitle ? currentEntry.paneTitle : '';
+  const currentCwd = currentEntry ? (currentEntry.paneCwd || '') : '';
 
   const notesCollapsedClass = _notesCollapsed ? ' collapsed' : '';
   const notesWidthStyle = _notesCollapsed ? '' : `style="width: ${_notesWidth}px"`;
@@ -1005,7 +1048,7 @@ function renderSelectedWorkspace() {
           ${tabButtons}
           <button class="ws-subtab ws-subtab-add" onclick="addShellPane(${ws.id})">+</button>
         </div>
-        <div class="pane-title-bar" id="pane-title-bar" style="${currentTitle ? '' : 'display:none'}">${esc(currentTitle)}</div>
+        <div class="pane-title-bar" id="pane-title-bar" style="${currentTitle || currentCwd ? '' : 'display:none'}"><span class="pane-title-text" id="pane-title-text">${esc(currentTitle)}</span><span class="pane-cwd-text" id="pane-cwd-text">${esc(currentCwd)}</span></div>
         <div class="pane-issue-bar" id="pane-issue-bar" style="display:none"></div>
         <div class="ws-pane active" id="ws-active-pane"></div>
       </div>
@@ -1152,20 +1195,22 @@ function initTerminal(key, paneEl, opts) {
   term.open(container);
   fitAddon.fit();
 
-  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true, paneTitle: '' };
+  const entry = { term, ws: null, fitAddon, container, resizeObserver: null, opts, disposed: false, connected: false, connectWs: null, altScreen: false, _autoScroll: true, paneTitle: '', paneCwd: '' };
 
   term.onTitleChange((title) => {
     entry.paneTitle = title;
-    const bar = document.getElementById('pane-title-bar');
-    if (bar && entry.container.closest('#ws-active-pane')) {
-      if (title) {
-        bar.textContent = title;
-        bar.style.display = '';
-      } else {
-        bar.style.display = 'none';
-      }
+    if (entry.container.closest('#ws-active-pane')) {
+      renderTitleBar(entry);
       updateIssueBar(title);
     }
+  });
+  // OSC 7: working directory (file://host/abspath). Shells emit on cd.
+  term.parser.registerOscHandler(7, (payload) => {
+    const abs = parseOsc7(payload);
+    if (abs == null) return false;
+    entry.paneCwd = relativizeHome(abs, _home);
+    if (entry.container.closest('#ws-active-pane')) renderTitleBar(entry);
+    return true;
   });
   term.parser.registerOscHandler(AGENTDISPATCH_OSC, (payload) => {
     handleAgentDispatchOsc(payload, opts);
@@ -1227,16 +1272,18 @@ function initTerminal(key, paneEl, opts) {
         try {
           const msg = JSON.parse(e.data);
           entry.paneTitle = msg.title || '';
-          const bar = document.getElementById('pane-title-bar');
-          if (bar && entry.container.closest('#ws-active-pane')) {
-            if (entry.paneTitle) {
-              bar.textContent = entry.paneTitle;
-              bar.style.display = '';
-            } else {
-              bar.style.display = 'none';
-            }
+          if (entry.container.closest('#ws-active-pane')) {
+            renderTitleBar(entry);
             updateIssueBar(entry.paneTitle);
           }
+        } catch {}
+        return;
+      }
+      if (typeof e.data === 'string' && e.data.startsWith('{"type":"pane_cwd"')) {
+        try {
+          const msg = JSON.parse(e.data);
+          entry.paneCwd = relativizeHome(msg.cwd || '', _home);
+          if (entry.container.closest('#ws-active-pane')) renderTitleBar(entry);
         } catch {}
         return;
       }
@@ -1787,5 +1834,8 @@ if (typeof module !== 'undefined' && module.exports) {
     morphdomShouldUpdate,
     clearPaneError,
     clampNotesWidth,
+    findIssueRefs,
+    relativizeHome,
+    parseOsc7,
   };
 }

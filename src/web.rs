@@ -40,6 +40,7 @@ pub type BuildHash = web::Data<String>;
 #[derive(Serialize)]
 struct InitPayload {
     build_hash: String,
+    home: String,
 }
 
 #[get("/icon.svg")]
@@ -68,7 +69,10 @@ pub async fn events(
     tx: Tx,
     hash: BuildHash,
 ) -> HttpResponse {
-    let init = InitPayload { build_hash: hash.as_ref().clone() };
+    let init = InitPayload {
+        build_hash: hash.as_ref().clone(),
+        home: std::env::var("HOME").unwrap_or_default(),
+    };
     let init_data = serde_json::to_string(&init).unwrap();
     let mut rx = tx.subscribe();
 
@@ -226,6 +230,8 @@ mod tests {
     e2e_file_test!(test_e2e_claude_scroll_jump, "claude-scroll-jump");
     e2e_file_test!(test_e2e_notes, "notes");
     e2e_file_test!(test_e2e_osc52, "osc52");
+    e2e_file_test!(test_e2e_pane_cwd, "pane-cwd");
+    e2e_file_test!(test_e2e_recreate_cwd, "recreate-cwd");
     e2e_file_test!(test_e2e_workspace_reorder, "workspace-reorder");
     e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_title, "pane-title");

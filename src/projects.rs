@@ -141,6 +141,15 @@ pub async fn set_workspace_category(db: Db, path: web::Path<i64>, body: web::Jso
     HttpResponse::Ok().json(serde_json::json!({"status": "updated"}))
 }
 
+/// Pick a usable cwd for starting a new tmux window. Returns `saved` if it's
+/// a non-empty, existing directory, otherwise falls back to `home`.
+fn pick_cwd(saved: &str, home: &str) -> String {
+    if !saved.is_empty() && std::path::Path::new(saved).is_dir() {
+        return saved.to_string();
+    }
+    home.to_string()
+}
+
 fn adopt_orphan_windows(conn: &rusqlite::Connection) {
     let workspaces = db::list_workspaces(conn);
     for ws in &workspaces {
@@ -235,21 +244,41 @@ pub async fn recreate_workspace(
     }
 
     let tmux_session = format!("ws-{ws_id}");
+
+    // Snapshot each tab's current cwd from tmux before killing the session, so
+    // the recreated shells start where the user left off.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let tabs = {
+        let conn = db.lock().unwrap();
+        db::list_workspace_tabs(&conn, ws_id)
+    };
+    if tmux::has_session(&tmux_session) {
+        let conn = db.lock().unwrap();
+        for tab in &tabs {
+            let tmux_window = format!("tab-{}", tab.id);
+            if let Some(path) = tmux::pane_current_path(&tmux_session, &tmux_window) {
+                db::update_workspace_tab_cwd(&conn, tab.id, &path);
+            }
+        }
+    }
+
     tmux::kill_session(&tmux_session);
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    // Re-read tabs to pick up the fresh cwds.
     let tabs = {
         let conn = db.lock().unwrap();
         db::list_workspace_tabs(&conn, ws_id)
     };
     for tab in &tabs {
         let tmux_window = format!("tab-{}", tab.id);
-        if tmux::has_session(&tmux_session) {
-            if let Err(e) = tmux::new_window(&tmux_session, &tmux_window, &home, None) {
-                tlog!("Failed to recreate tmux window tab-{}: {e}", tab.id);
-            }
-        } else if let Err(e) = tmux::new_session(&tmux_session, &tmux_window, &home, None) {
-            tlog!("Failed to create tmux session for tab-{}: {e}", tab.id);
+        let cwd = pick_cwd(&tab.cwd, &home);
+        let result = if tmux::has_session(&tmux_session) {
+            tmux::new_window(&tmux_session, &tmux_window, &cwd, None)
+        } else {
+            tmux::new_session(&tmux_session, &tmux_window, &cwd, None)
+        };
+        if let Err(e) = result {
+            tlog!("[recreate] tab-{}: failed to create in {cwd}: {e}", tab.id);
         }
     }
     if !tmux::has_session(&tmux_session) {
@@ -495,6 +524,31 @@ mod tests {
 
     fn test_tmux_data() -> actix_web::web::Data<bool> {
         actix_web::web::Data::new(false)
+    }
+
+    #[test]
+    fn test_pick_cwd_uses_saved_when_dir_exists() {
+        let dir = std::env::temp_dir();
+        assert_eq!(pick_cwd(dir.to_str().unwrap(), "/home/x"), dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn test_pick_cwd_falls_back_when_empty() {
+        assert_eq!(pick_cwd("", "/home/x"), "/home/x");
+    }
+
+    #[test]
+    fn test_pick_cwd_falls_back_when_missing_dir() {
+        assert_eq!(pick_cwd("/definitely/not/a/real/path/zzzz", "/home/x"), "/home/x");
+    }
+
+    #[test]
+    fn test_pick_cwd_falls_back_when_path_is_a_file() {
+        let dir = std::env::temp_dir();
+        let f = dir.join(format!("pick_cwd_test_{}", std::process::id()));
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(pick_cwd(f.to_str().unwrap(), "/home/x"), "/home/x");
+        let _ = std::fs::remove_file(&f);
     }
 
     fn test_tx_data() -> actix_web::web::Data<tokio::sync::broadcast::Sender<UpdateBatch>> {

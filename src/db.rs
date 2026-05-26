@@ -12,7 +12,7 @@ pub fn init_db(path: &Path) -> Connection {
     conn
 }
 
-const CURRENT_VERSION: i64 = 17;
+const CURRENT_VERSION: i64 = 18;
 
 const MIGRATIONS: &[&str] = &[
     // 0 -> 1: projects table
@@ -72,6 +72,8 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE workspaces ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
     // 16 -> 17: drop mouse_wheel_fs (toggle removed; mouse forwarding is always on)
     "ALTER TABLE workspace_tabs DROP COLUMN mouse_wheel_fs",
+    // 17 -> 18: persist per-tab cwd so workspaces restart in their last dir
+    "ALTER TABLE workspace_tabs ADD COLUMN cwd TEXT NOT NULL DEFAULT ''",
 ];
 
 fn run_migrations(conn: &Connection) {
@@ -264,6 +266,7 @@ pub struct WorkspaceTab {
     pub sort_order: i64,
     pub name: String,
     pub tab_type: String,
+    pub cwd: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -335,7 +338,7 @@ pub fn get_workspace(conn: &Connection, id: i64) -> Option<Workspace> {
 
 pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<WorkspaceTab> {
     let mut stmt = conn
-        .prepare("SELECT id, sort_order, name, tab_type FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
+        .prepare("SELECT id, sort_order, name, tab_type, cwd FROM workspace_tabs WHERE workspace_id = ?1 ORDER BY sort_order")
         .unwrap();
     stmt.query_map([workspace_id], |row| {
         Ok(WorkspaceTab {
@@ -343,6 +346,7 @@ pub fn list_workspace_tabs(conn: &Connection, workspace_id: i64) -> Vec<Workspac
             sort_order: row.get(1)?,
             name: row.get(2)?,
             tab_type: row.get(3)?,
+            cwd: row.get(4)?,
         })
     })
     .unwrap()
@@ -442,7 +446,14 @@ pub fn add_workspace_tab(conn: &Connection, workspace_id: i64, name: &str, tab_t
     )
     .expect("Failed to insert workspace tab");
     let id = conn.last_insert_rowid();
-    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string() }
+    WorkspaceTab { id, sort_order: max_order + 1, name: name.to_string(), tab_type: tab_type.to_string(), cwd: String::new() }
+}
+
+pub fn update_workspace_tab_cwd(conn: &Connection, tab_id: i64, cwd: &str) {
+    conn.execute(
+        "UPDATE workspace_tabs SET cwd = ?1 WHERE id = ?2",
+        rusqlite::params![cwd, tab_id],
+    ).ok();
 }
 
 pub fn update_workspace_tab(conn: &Connection, tab_id: i64, name: &str) {
@@ -792,6 +803,23 @@ mod tests {
         update_workspace_tab(&conn, tab.id, "new");
         let tabs = list_workspace_tabs(&conn, ws.id);
         assert_eq!(tabs[0].name, "new");
+    }
+
+    #[test]
+    fn test_workspace_tab_cwd_default_empty_and_persist() {
+        let conn = test_db();
+        add_project(&conn, "proj", "/tmp", true, "Claude", false, false, "", "").unwrap();
+        let ws = add_workspace(&conn, "ws1", "proj", None, "ready", "", "");
+        let tab = add_workspace_tab(&conn, ws.id, "shell", "shell");
+        assert_eq!(tab.cwd, "");
+        assert_eq!(list_workspace_tabs(&conn, ws.id)[0].cwd, "");
+
+        update_workspace_tab_cwd(&conn, tab.id, "/data/users/alice/repo");
+        assert_eq!(list_workspace_tabs(&conn, ws.id)[0].cwd, "/data/users/alice/repo");
+
+        // Overwriting works
+        update_workspace_tab_cwd(&conn, tab.id, "/tmp/other");
+        assert_eq!(list_workspace_tabs(&conn, ws.id)[0].cwd, "/tmp/other");
     }
 
     #[test]

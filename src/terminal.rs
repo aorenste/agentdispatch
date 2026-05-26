@@ -63,7 +63,7 @@ enum SessionMode {
     /// Direct shell — raw PTY passthrough
     Direct,
     /// tmux control mode — parse %output, send-keys -H
-    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool, initial_title: Option<String>, tmux_session: String, tmux_window: String },
+    TmuxControl { pane_id: String, link_name: String, window_id: String, initial_alt_screen: bool, initial_title: Option<String>, initial_cwd: Option<String>, tmux_session: String, tmux_window: String },
 }
 
 #[get("/api/terminal")]
@@ -73,6 +73,7 @@ pub async fn ws_terminal(
     query: web::Query<TerminalQuery>,
     use_tmux: UseTmux,
     pane_title_tx: PaneTitleTx,
+    db: crate::projects::Db,
 ) -> Result<HttpResponse, actix_web::Error> {
     let cwd = query.cwd.clone();
     let cmd = query.cmd.clone();
@@ -101,13 +102,24 @@ pub async fn ws_terminal(
             let (c, a, pane_id, link_name, window_id) = tmux::attach_args(&tmux_session, &tmux_window)?;
             let initial_alt_screen = tmux::is_alternate_screen(&tmux_session, &tmux_window);
             let initial_title = tmux::pane_title(&tmux_session, &tmux_window);
-            tlog!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen} title={initial_title:?}");
-            Ok((c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title))
+            let initial_cwd = tmux::pane_current_path(&tmux_session, &tmux_window);
+            tlog!("[terminal] {tmux_session}:{tmux_window} pane={pane_id} window={window_id} alt_screen={initial_alt_screen} title={initial_title:?} cwd={initial_cwd:?}");
+            Ok((c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title, initial_cwd))
         }).await.map_err(|e| actix_web::error::ErrorInternalServerError(format!("{e}")))?
           .map_err(|e| actix_web::error::ErrorNotFound(e))?;
 
-        let (c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title) = result;
-        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, tmux_session: tmux_session2, tmux_window: tmux_window2 })
+        let (c, a, pane_id, link_name, window_id, initial_alt_screen, initial_title, initial_cwd) = result;
+
+        // Persist initial cwd so recreate / server-restart can restore it.
+        if let (Some(path), Some(tab_id_num)) = (
+            initial_cwd.as_deref(),
+            tab_id.as_deref().and_then(|t| t.strip_prefix("tab-")).and_then(|s| s.parse::<i64>().ok()),
+        ) {
+            let conn = db.lock().unwrap();
+            crate::db::update_workspace_tab_cwd(&conn, tab_id_num, path);
+        }
+
+        (c, a, SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, initial_cwd, tmux_session: tmux_session2, tmux_window: tmux_window2 })
     } else {
         let shell = user_shell();
         let args = if let Some(ref run_cmd) = cmd {
@@ -206,7 +218,7 @@ pub async fn ws_terminal(
         SessionMode::Direct => {
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
-        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, tmux_session, tmux_window } => {
+        SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, initial_cwd, tmux_session, tmux_window } => {
             let initial_content = tmux::capture_pane_with_cursor(&pane_id);
 
             // Send initial resize
@@ -217,6 +229,13 @@ pub async fn ws_terminal(
             if let Some(ref title) = initial_title {
                 let escaped = title.replace('\\', "\\\\").replace('"', "\\\"");
                 let msg = format!("{{\"type\":\"pane_title\",\"title\":\"{escaped}\"}}");
+                let _ = session.text(msg).await;
+            }
+
+            // Send initial pane cwd if known
+            if let Some(ref cwd) = initial_cwd {
+                let escaped = cwd.replace('\\', "\\\\").replace('"', "\\\"");
+                let msg = format!("{{\"type\":\"pane_cwd\",\"cwd\":\"{escaped}\"}}");
                 let _ = session.text(msg).await;
             }
 
