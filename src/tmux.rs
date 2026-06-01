@@ -478,8 +478,14 @@ pub fn list_sessions() -> Vec<String> {
 /// Set the title (#{pane_title}) of a tmux pane. Equivalent to OSC 2 emitted
 /// from inside the pane — tmux notifies control-mode clients via
 /// %pane-title-changed, which the terminal handler forwards to the browser.
-pub fn set_pane_title(pane_id: &str, title: &str) -> Result<(), String> {
-    let sock = socket_for_pane(pane_id).ok_or_else(|| format!("pane {pane_id} not found"))?;
+/// Set a pane's title. `socket`, when known (e.g. from an in-pane tool's
+/// `$TMUX`), scopes the call to the right server; otherwise we search every
+/// server, which is ambiguous for colliding pane ids.
+pub fn set_pane_title(socket: Option<&str>, pane_id: &str, title: &str) -> Result<(), String> {
+    let sock = match socket {
+        Some(s) => s.to_string(),
+        None => socket_for_pane(pane_id).ok_or_else(|| format!("pane {pane_id} not found"))?,
+    };
     let output = tmux_base_sock(&sock)
         .args(["select-pane", "-t", pane_id, "-T", title])
         .output()
@@ -491,9 +497,13 @@ pub fn set_pane_title(pane_id: &str, title: &str) -> Result<(), String> {
     }
 }
 
-/// Look up #{pane_title} for a given pane id (e.g. "%42").
-pub fn pane_title_for_pane(pane_id: &str) -> Option<String> {
-    let sock = socket_for_pane(pane_id)?;
+/// Look up #{pane_title} for a given pane id (e.g. "%42"). `socket` scopes the
+/// lookup to a single server when known.
+pub fn pane_title_for_pane(socket: Option<&str>, pane_id: &str) -> Option<String> {
+    let sock = match socket {
+        Some(s) => s.to_string(),
+        None => socket_for_pane(pane_id)?,
+    };
     let output = tmux_base_sock(&sock)
         .args(["display-message", "-t", pane_id, "-p", "#{pane_title}"])
         .output()
@@ -522,22 +532,33 @@ fn socket_for_pane(pane_id: &str) -> Option<String> {
     None
 }
 
+/// Look up the session and window that contain `pane_id` on a single tmux
+/// server. Pane ids (`%N`) are only unique within a server, so callers that
+/// know the workspace socket (e.g. an in-pane tool passing its `$TMUX`) must
+/// scope the lookup here — otherwise a colliding id resolves to the wrong
+/// workspace.
+pub fn pane_location_on(sock: &str, pane_id: &str) -> Option<(String, String)> {
+    let o = tmux_base_sock(sock)
+        .args(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"])
+        .output()
+        .ok()?;
+    if !o.status.success() { return None; }
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() == 3 && parts[0] == pane_id {
+            return Some((parts[1].trim().to_string(), parts[2].trim().to_string()));
+        }
+    }
+    None
+}
+
 /// Look up the session and window that contain the given tmux pane id (e.g. "%42").
-/// Used to map a pane back to its workspace/tab when an in-pane tool needs to
-/// identify itself to the server. Searches every per-workspace server.
+/// Searches every per-workspace server; ambiguous if the same id exists on more
+/// than one server — prefer `pane_location_on` when the socket is known.
 pub fn pane_location(pane_id: &str) -> Option<(String, String)> {
     for sock in list_ws_sockets() {
-        let output = tmux_base_sock(&sock)
-            .args(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"])
-            .output()
-            .ok();
-        let Some(o) = output else { continue };
-        if !o.status.success() { continue; }
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            let parts: Vec<&str> = line.splitn(3, '\t').collect();
-            if parts.len() == 3 && parts[0] == pane_id {
-                return Some((parts[1].trim().to_string(), parts[2].trim().to_string()));
-            }
+        if let Some(loc) = pane_location_on(&sock, pane_id) {
+            return Some(loc);
         }
     }
     None

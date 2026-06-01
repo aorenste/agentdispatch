@@ -413,6 +413,19 @@ pub async fn update_workspace_notes(
 pub struct RenameByPaneRequest {
     pane_id: String,
     name: String,
+    /// tmux socket name (from the caller's `$TMUX`). Pane ids collide across
+    /// per-workspace servers, so this scopes resolution to the right one.
+    #[serde(default)]
+    socket: Option<String>,
+}
+
+/// Resolve a pane id to (session, window). Prefer the caller-supplied socket
+/// (unambiguous); fall back to searching all servers for older callers.
+fn resolve_pane(socket: &Option<String>, pane_id: &str) -> Option<(String, String)> {
+    match socket {
+        Some(s) => tmux::pane_location_on(s, pane_id),
+        None => tmux::pane_location(pane_id),
+    }
 }
 
 /// Rename the workspace that owns the given tmux pane. Used by tools running
@@ -426,7 +439,7 @@ pub async fn rename_workspace_by_pane(
     tx: Tx,
     hash: BuildHash,
 ) -> HttpResponse {
-    let (session, _window) = match tmux::pane_location(&body.pane_id) {
+    let (session, _window) = match resolve_pane(&body.socket, &body.pane_id) {
         Some(loc) => loc,
         None => {
             return HttpResponse::NotFound().json(serde_json::json!({
@@ -454,6 +467,8 @@ pub async fn rename_workspace_by_pane(
 pub struct SetPaneTitleRequest {
     pane_id: String,
     title: String,
+    #[serde(default)]
+    socket: Option<String>,
 }
 
 /// Set the visible pane title (#{pane_title}) for the given pane. Equivalent
@@ -464,9 +479,10 @@ pub async fn set_pane_title_by_pane(
     body: web::Json<SetPaneTitleRequest>,
     pane_title_tx: PaneTitleTx,
 ) -> HttpResponse {
-    match tmux::set_pane_title(&body.pane_id, &body.title) {
+    let sock = body.socket.as_deref();
+    match tmux::set_pane_title(sock, &body.pane_id, &body.title) {
         Ok(()) => {
-            let title = tmux::pane_title_for_pane(&body.pane_id)
+            let title = tmux::pane_title_for_pane(sock, &body.pane_id)
                 .unwrap_or_else(|| body.title.clone());
             // tmux's `select-pane -T` does not reliably fire %pane-title-changed
             // to control-mode clients, so push the update via our own channel.
@@ -488,7 +504,7 @@ pub async fn rename_tab_by_pane(
     tx: Tx,
     hash: BuildHash,
 ) -> HttpResponse {
-    let (_session, window) = match tmux::pane_location(&body.pane_id) {
+    let (_session, window) = match resolve_pane(&body.socket, &body.pane_id) {
         Some(loc) => loc,
         None => {
             return HttpResponse::NotFound().json(serde_json::json!({

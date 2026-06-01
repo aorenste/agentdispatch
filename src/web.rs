@@ -240,6 +240,7 @@ mod tests {
     e2e_file_test!(test_e2e_stash_resize, "stash-resize");
     e2e_file_test!(test_e2e_issue_link_focus, "issue-link-focus");
     e2e_file_test!(test_e2e_tmux_isolation, "tmux-isolation");
+    e2e_file_test!(test_e2e_rename_by_pane, "rename-by-pane");
 
     fn run_playwright(args: &[&str]) {
 
