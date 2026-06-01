@@ -289,6 +289,65 @@ pub async fn recreate_workspace(
     HttpResponse::Ok().json(serde_json::json!({"status": "recreated"}))
 }
 
+/// Recreate just one tab's tmux window. Snapshots its cwd first so the new
+/// shell starts where the user left off, and leaves sibling tabs untouched.
+#[post("/api/tabs/{id}/recreate")]
+pub async fn recreate_tab(
+    db: Db,
+    path: web::Path<i64>,
+    use_tmux: UseTmux,
+) -> HttpResponse {
+    let tab_id = path.into_inner();
+
+    let ws_id = {
+        let conn = db.lock().unwrap();
+        match db::get_workspace_id_for_tab(&conn, tab_id) {
+            Some(id) => id,
+            None => return HttpResponse::NotFound().json(serde_json::json!({"error": "tab not found"})),
+        }
+    };
+
+    if !**use_tmux {
+        return HttpResponse::Ok().json(serde_json::json!({"status": "ok"}));
+    }
+
+    let tmux_session = format!("ws-{ws_id}");
+    let tmux_window = format!("tab-{tab_id}");
+
+    // Snapshot the tab's current cwd before killing the window.
+    if tmux::has_session(&tmux_session) && tmux::has_window(&tmux_session, &tmux_window) {
+        if let Some(path) = tmux::pane_current_path(&tmux_session, &tmux_window) {
+            let conn = db.lock().unwrap();
+            db::update_workspace_tab_cwd(&conn, tab_id, &path);
+        }
+        tmux::kill_window(&tmux_session, &tmux_window);
+    }
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let saved_cwd = {
+        let conn = db.lock().unwrap();
+        db::list_workspace_tabs(&conn, ws_id)
+            .into_iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.cwd)
+            .unwrap_or_default()
+    };
+    let cwd = pick_cwd(&saved_cwd, &home);
+
+    let result = if tmux::has_session(&tmux_session) {
+        tmux::new_window(&tmux_session, &tmux_window, &cwd, None)
+    } else {
+        // Session got killed (sibling tab also died?). Recreate from scratch.
+        tmux::new_session(&tmux_session, &tmux_window, &cwd, None)
+    };
+    if let Err(e) = result {
+        tlog!("[recreate_tab] tab-{tab_id}: failed to create in {cwd}: {e}");
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": format!("Failed to recreate tab: {e}")}));
+    }
+    HttpResponse::Ok().json(serde_json::json!({"status": "recreated"}))
+}
+
 #[derive(Deserialize)]
 pub struct ReorderRequest {
     ids: Vec<i64>,

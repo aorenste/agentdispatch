@@ -7,6 +7,22 @@ const BINARY = path.join(__dirname, '..', 'target', 'test', 'debug', 'agentdispa
 
 let nextPort = 9100;
 
+/** Kill every tmux server whose socket matches the per-workspace prefix
+ *  (`{prefix}` and `{prefix}-w*`). Each workspace runs on its own tmux server. */
+function killAllSockets(prefix) {
+  try {
+    const fs = require('fs');
+    const dir = `/tmp/tmux-${process.getuid()}`;
+    for (const name of fs.readdirSync(dir)) {
+      if (name === prefix || name.startsWith(prefix + '-w')) {
+        try {
+          require('child_process').execSync(`tmux -L ${name} kill-server 2>/dev/null || true`, { stdio: 'ignore' });
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
 /** Find a free port by binding and releasing */
 function getFreePort() {
   return new Promise((resolve, reject) => {
@@ -63,13 +79,8 @@ async function startServer() {
   const socket = `agentdispatch-e2e-${port}`;
   const db = `/tmp/agentdispatch-e2e-${port}.db`;
 
-  // Kill stale tmux server from previous failed runs
-  try {
-    require('child_process').execSync(
-      `tmux -L ${socket} kill-server 2>/dev/null || true`,
-      { stdio: 'ignore' }
-    );
-  } catch {}
+  // Kill stale tmux servers (per-workspace sockets) from previous failed runs
+  killAllSockets(socket);
 
   // Clean stale DB
   for (const suffix of ['', '-wal', '-shm']) {
@@ -84,7 +95,7 @@ async function startServer() {
   // Last-resort cleanup: if the process exits without stopServer (e.g. SIGTERM
   // from the outer timeout wrapper), kill tmux + server to prevent orphans.
   process.on('exit', () => {
-    try { require('child_process').execSync(`tmux -L ${socket} kill-server 2>/dev/null || true`, { stdio: 'ignore' }); } catch {}
+    killAllSockets(socket);
     try { proc.kill('SIGKILL'); } catch {}
   });
 
@@ -100,13 +111,8 @@ async function startServer() {
 
 function stopServer(server) {
   if (!server) return;
-  // Kill tmux server FIRST — this ensures no child processes survive
-  try {
-    require('child_process').execSync(
-      `tmux -L ${server.socket} kill-server 2>/dev/null || true`,
-      { stdio: 'ignore', timeout: 5000 }
-    );
-  } catch {}
+  // Kill tmux servers FIRST (all per-workspace sockets) so no children survive
+  killAllSockets(server.socket);
   // Kill the server process and wait for it to exit
   server.proc.kill('SIGKILL');
   // Clean up DB files

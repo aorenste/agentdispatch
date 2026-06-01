@@ -203,6 +203,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::rename_tab_by_pane)
             .service(projects::set_pane_title_by_pane)
             .service(projects::recreate_workspace)
+            .service(projects::recreate_tab)
             .service(projects::delete_workspace)
             .service(projects::reorder_tabs)
             .service(projects::create_tab)

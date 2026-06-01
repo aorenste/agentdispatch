@@ -30,6 +30,18 @@ test('title bar shows ~/ relative cwd on connect', async ({ page }) => {
   expect(cwd === '~' || (cwd && cwd.startsWith('~'))).toBe(true);
 });
 
+test('plain `cd` (no OSC 7) updates the cwd display via server-side polling', async ({ page }) => {
+  await h.connectToTerminal(page);
+
+  // Plain cd — no OSC 7 emitted, no PROMPT_COMMAND configured.
+  await h.typeCmd(page, 'cd /tmp');
+
+  await page.waitForFunction(() => {
+    const el = document.getElementById('pane-cwd-text');
+    return el && el.textContent === '/tmp';
+  }, null, { timeout: 8000 });
+});
+
 test('OSC 7 from shell updates the cwd display', async ({ page }) => {
   await h.connectToTerminal(page);
 

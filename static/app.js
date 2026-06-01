@@ -892,8 +892,10 @@ function updateIssueBar(title) {
     bar.innerHTML = '';
     return;
   }
+  // onmousedown preventDefault stops the link from grabbing keyboard focus on
+  // click (which would pull focus off the terminal pane); the click still fires.
   bar.innerHTML = refs.map(r =>
-    `<a href="${esc(r.url)}" onclick="openIssueLink(event, '${escAttr(r.url)}'); return false;">${esc(r.label)}</a>`
+    `<a href="${esc(r.url)}" onmousedown="event.preventDefault()" onclick="openIssueLink(event, '${escAttr(r.url)}'); return false;">${esc(r.label)}</a>`
   ).join('');
   bar.style.display = '';
 }
@@ -1326,11 +1328,13 @@ function initTerminal(key, paneEl, opts) {
       entry.connectError = true;
       const overlay = document.createElement('div');
       overlay.className = 'pane-error-overlay';
-      overlay.innerHTML = 'Connection failed \u2014 session may no longer exist.'
-        + (opts.workspaceId != null
-          ? '<br><button class="btn-primary" style="margin-top:8px;margin-right:8px" onclick="this.disabled=true;this.textContent=\'Recreating\u2026\';recreateWorkspace(' + opts.workspaceId + ')">Recreate</button>'
-            + '<button class="btn-danger" style="margin-top:8px" onclick="this.disabled=true;this.textContent=\'Destroying\u2026\';destroyWorkspace(' + opts.workspaceId + ')">Destroy Workspace</button>'
-          : '');
+      const tabAction = (typeof key === 'number')
+        ? '<br><button class="btn-primary" style="margin-top:8px;margin-right:8px" onclick="this.disabled=true;this.textContent=\'Recreating\u2026\';recreateTab(' + key + ')">Recreate Pane</button>'
+        : '';
+      const wsAction = (opts.workspaceId != null)
+        ? '<button class="btn-danger" style="margin-top:8px" onclick="this.disabled=true;this.textContent=\'Destroying\u2026\';destroyWorkspace(' + opts.workspaceId + ')">Destroy Workspace</button>'
+        : '';
+      overlay.innerHTML = 'Connection failed \u2014 session may no longer exist.' + tabAction + wsAction;
       container.style.position = 'relative';
       container.appendChild(overlay);
     };
@@ -1515,6 +1519,17 @@ function closeAllWsMenus() {
 
 function closeTermContextMenu() {
   document.querySelectorAll('.term-context-menu').forEach(el => el.remove());
+}
+
+async function recreateTab(tabId) {
+  disposeTerminal(tabId);
+  const res = await fetch(`/api/tabs/${tabId}/recreate`, {method: 'POST'});
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert('Recreate failed: ' + (err.error || res.statusText));
+    return;
+  }
+  renderSelectedWorkspace();
 }
 
 async function recreateWorkspace(id) {

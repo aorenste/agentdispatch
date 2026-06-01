@@ -1,14 +1,59 @@
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Prefix shared by all of this server's tmux sockets. Each workspace runs on
+/// its own tmux server (socket `{prefix}-w{ws_id}`) so a tmux crash only takes
+/// down that one workspace's panes instead of every pane (tmux 3.5a segfaults
+/// under bursts of kill-session). Tests override the prefix to stay isolated.
 fn socket_name() -> String {
     std::env::var("AGENTDISPATCH_TMUX_SOCKET").unwrap_or_else(|_| "agentdispatch".to_string())
 }
 
-/// Full filesystem path of the tmux socket file we use.
-pub fn socket_path() -> String {
+/// The tmux socket name for a workspace's dedicated server.
+pub fn ws_socket(ws_id: i64) -> String {
+    format!("{}-w{ws_id}", socket_name())
+}
+
+/// Derive a workspace's socket from a session name like `ws-197` or a linked
+/// session `ws-197--tab-222-5` (both live on workspace 197's server).
+fn socket_for_session(session: &str) -> String {
+    match session
+        .strip_prefix("ws-")
+        .and_then(|s| s.split('-').next())
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        Some(ws_id) => ws_socket(ws_id),
+        // Fallback: not a workspace session — use the bare prefix so the call
+        // still targets *some* server rather than panicking.
+        None => socket_name(),
+    }
+}
+
+/// Directory holding this user's tmux sockets.
+fn socket_dir() -> String {
     let uid = unsafe { nix::libc::getuid() };
-    format!("/tmp/tmux-{uid}/{}", socket_name())
+    format!("/tmp/tmux-{uid}")
+}
+
+/// All existing per-workspace socket names (`{prefix}-w*`) found on disk.
+fn list_ws_sockets() -> Vec<String> {
+    let prefix = format!("{}-w", socket_name());
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(socket_dir()) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(&prefix) {
+                    out.push(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Full filesystem path of the (prefix) tmux socket, for diagnostics/watching.
+pub fn socket_path() -> String {
+    format!("{}/{}", socket_dir(), socket_name())
 }
 
 static ATTACH_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -65,7 +110,7 @@ fn clean_stale_socket() {
     // times to ride out transient hiccups. Only unlink if every attempt
     // agrees the server is gone.
     for attempt in 1..=3 {
-        let output = tmux_base().args(["list-sessions"]).output();
+        let output = tmux_base_sock(&socket_name()).args(["list-sessions"]).output();
         match output {
             Ok(o) if o.status.success() => {
                 tlog!(
@@ -135,29 +180,23 @@ pub fn log_startup_diagnostics() {
         Err(e) => tlog!("tmux diag: tmux -V failed: {e}"),
     }
 
-    let ls = tmux_base().args(["list-sessions"]).output();
-    match ls {
-        Ok(o) if o.status.success() => {
-            let body = String::from_utf8_lossy(&o.stdout);
-            let count = body.lines().count();
-            tlog!("tmux diag: server reachable, {count} session(s)");
-            for line in body.lines() {
-                tlog!("tmux diag:   {line}");
-            }
+    let sockets = list_ws_sockets();
+    tlog!("tmux diag: {} per-workspace socket(s): {sockets:?}", sockets.len());
+    for sock in &sockets {
+        for line in list_sessions_on(sock) {
+            tlog!("tmux diag:   [{sock}] {line}");
         }
-        Ok(o) => tlog!(
-            "tmux diag: list-sessions failed ({}): {}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => tlog!("tmux diag: list-sessions run error: {e}"),
     }
 }
 
-fn tmux_base() -> Command {
+/// tmux command targeting the server for `session`'s workspace.
+fn tmux_for(session: &str) -> Command {
+    tmux_base_sock(&socket_for_session(session))
+}
+
+fn tmux_base_sock(sock: &str) -> Command {
     let mut cmd = Command::new("tmux");
-    let sock = socket_name();
-    cmd.args(["-L", &sock, "-f", "/dev/null"]);
+    cmd.args(["-L", sock, "-f", "/dev/null"]);
     // Clean environment for tmux server processes
     cmd.env_remove("TMUX");
     cmd.env_remove("TMUX_PANE");
@@ -176,7 +215,7 @@ pub fn has_session(session: &str) -> bool {
     // e.g. `has-session -t ws-1` would also match a still-alive linked client
     // session named `ws-1--tab-1-0`.
     let target = format!("={session}");
-    tmux_base()
+    tmux_for(session)
         .args(["has-session", "-t", &target])
         .output()
         .is_ok_and(|o| o.status.success())
@@ -184,7 +223,7 @@ pub fn has_session(session: &str) -> bool {
 
 pub fn has_window(session: &str, window: &str) -> bool {
     let target = format!("{session}:{window}");
-    tmux_base()
+    tmux_for(session)
         .args(["display-message", "-t", &target, "-p", "#{window_id}"])
         .output()
         .is_ok_and(|o| o.status.success())
@@ -195,8 +234,8 @@ pub fn has_window(session: &str, window: &str) -> bool {
 /// linked session dies (tmux broadcasts that its windows were unlinked from
 /// the dying session, even though they remain in the main session). This
 /// helper distinguishes the two so callers can ignore spurious notifications.
-pub fn window_exists(window_id: &str) -> bool {
-    let output = tmux_base()
+pub fn window_exists(session: &str, window_id: &str) -> bool {
+    let output = tmux_for(session)
         .args(["list-windows", "-a", "-F", "#{window_id}"])
         .output();
     match output {
@@ -212,22 +251,22 @@ pub fn window_exists(window_id: &str) -> bool {
 /// Apply global tmux options needed for the web UI.
 /// In control mode (-C) most settings are irrelevant since tmux doesn't render
 /// to the terminal. We only set history-limit for scrollback.
-pub fn ensure_server_config() {
-    let _ = tmux_base()
+pub fn ensure_server_config(session: &str) {
+    let _ = tmux_for(session)
         .args(["set-option", "-g", "history-limit", "10000"])
         .output();
     // Allow apps to send OSC/DCS sequences through tmux (e.g. OSC 8 hyperlinks).
     // "all" passes unrecognized sequences through without requiring DCS wrappers.
-    let _ = tmux_base()
+    let _ = tmux_for(session)
         .args(["set-option", "-g", "allow-passthrough", "all"])
         .output();
     // Enable hyperlink support so tmux processes OSC 8 and includes it in output.
-    let _ = tmux_base()
+    let _ = tmux_for(session)
         .args(["set-option", "-ga", "terminal-features", "xterm*:hyperlinks"])
         .output();
     // Forward clipboard writes (OSC 52) to the terminal even when apps use
     // `tmux set-buffer` (claude does this). xterm.js handles OSC 52 below.
-    let _ = tmux_base()
+    let _ = tmux_for(session)
         .args(["set-option", "-g", "set-clipboard", "on"])
         .output();
 }
@@ -250,7 +289,7 @@ pub fn new_session_ex(session: &str, window: &str, cwd: &str, cmd: Option<&str>,
         };
         args.push(&shell_cmd);
     }
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to run tmux: {e}"))?;
@@ -263,11 +302,11 @@ pub fn new_session_ex(session: &str, window: &str, cwd: &str, cmd: Option<&str>,
         // init_pane_status returns None — check_building_workspaces handles this
         // by looking for a status file written by the wrapper command.
         let target = format!("{session}:{window}");
-        let _ = tmux_base()
+        let _ = tmux_for(session)
             .args(["set-option", "-t", &target, "remain-on-exit", "on"])
             .output();
     }
-    ensure_server_config();
+    ensure_server_config(session);
     Ok(())
 }
 
@@ -282,29 +321,32 @@ pub fn new_window(session: &str, window: &str, cwd: &str, cmd: Option<&str>) -> 
         shell_cmd = format!("bash -lc '{escaped}; exec bash -l'");
         args.push(&shell_cmd);
     }
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(&args)
         .output()
         .map_err(|e| format!("Failed to run tmux: {e}"))?;
     if output.status.success() {
-        ensure_server_config();
+        ensure_server_config(session);
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
     }
 }
 
+/// Kill every per-workspace tmux server (used by `--reset`).
 pub fn kill_server() {
-    let _ = tmux_base()
-        .args(["kill-server"])
-        .output();
+    for sock in list_ws_sockets() {
+        let _ = tmux_base_sock(&sock).args(["kill-server"]).output();
+    }
+    // Also tear down the bare-prefix server if one somehow exists.
+    let _ = tmux_base_sock(&socket_name()).args(["kill-server"]).output();
 }
 
 #[track_caller]
 pub fn kill_session(session: &str) {
     let caller = std::panic::Location::caller();
     tlog!("[tmux] kill_session {session} (called from {}:{})", caller.file(), caller.line());
-    let _ = tmux_base()
+    let _ = tmux_for(session)
         .args(["kill-session", "-t", session])
         .output();
 }
@@ -314,7 +356,7 @@ pub fn kill_window(session: &str, window: &str) {
     let caller = std::panic::Location::caller();
     let target = format!("{session}:{window}");
     tlog!("[tmux] kill_window {target} (called from {}:{})", caller.file(), caller.line());
-    let _ = tmux_base()
+    let _ = tmux_for(session)
         .args(["kill-window", "-t", &target])
         .output();
 }
@@ -330,7 +372,7 @@ pub fn kill_window(session: &str, window: &str) {
 /// Query the pane ID and window ID for a given session:window.
 fn get_pane_and_window_id(session: &str, window: &str) -> Result<(String, String), String> {
     let target = format!("{session}:{window}");
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-panes", "-t", &target, "-F", "#{pane_id} #{window_id}"])
         .output()
         .map_err(|e| format!("Failed to query pane id: {e}"))?;
@@ -353,22 +395,23 @@ fn get_pane_and_window_id(session: &str, window: &str) -> Result<(String, String
 pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, String, String, String), String> {
     let id = ATTACH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let link_name = format!("{session}--{window}-{id}");
+    let sock = socket_for_session(session);
 
     // Kill ALL stale linked sessions for this session+window.
     // Stale linked sessions from previous server runs keep their clients
     // "attached", constraining the pane size and preventing SIGWINCH.
     let prefix = format!("{session}--{window}-");
-    for sess_name in list_sessions() {
+    for sess_name in list_sessions_on(&sock) {
         if sess_name.starts_with(&prefix) {
             tlog!("[tmux] attach_args: killing stale linked session {sess_name}");
-            let _ = tmux_base()
+            let _ = tmux_base_sock(&sock)
                 .args(["kill-session", "-t", &sess_name])
                 .output();
         }
     }
 
     // Create linked session targeting the main session
-    let output = tmux_base()
+    let output = tmux_base_sock(&sock)
         .args(["new-session", "-d", "-s", &link_name, "-t", session])
         .output()
         .map_err(|e| format!("Failed to create linked session: {e}"))?;
@@ -378,7 +421,7 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
 
     // Select the desired window
     let target_window = format!("{link_name}:{window}");
-    let _ = tmux_base()
+    let _ = tmux_base_sock(&sock)
         .args(["select-window", "-t", &target_window])
         .output();
 
@@ -394,7 +437,7 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
     Ok((
         "tmux".to_string(),
         vec![
-            "-L".to_string(), socket_name(),
+            "-L".to_string(), sock,
             "-f".to_string(), "/dev/null".to_string(),
             "-C".to_string(),
             "attach".to_string(),
@@ -406,9 +449,9 @@ pub fn attach_args(session: &str, window: &str) -> Result<(String, Vec<String>, 
     ))
 }
 
-/// List all agentdispatch tmux sessions. Returns session names.
-pub fn list_sessions() -> Vec<String> {
-    let output = tmux_base()
+/// List sessions on a single tmux socket. Returns session names.
+pub fn list_sessions_on(sock: &str) -> Vec<String> {
+    let output = tmux_base_sock(sock)
         .args(["list-sessions", "-F", "#{session_name}"])
         .output();
     match output {
@@ -423,11 +466,21 @@ pub fn list_sessions() -> Vec<String> {
     }
 }
 
+/// List all agentdispatch tmux sessions across every per-workspace server.
+pub fn list_sessions() -> Vec<String> {
+    let mut out = Vec::new();
+    for sock in list_ws_sockets() {
+        out.extend(list_sessions_on(&sock));
+    }
+    out
+}
+
 /// Set the title (#{pane_title}) of a tmux pane. Equivalent to OSC 2 emitted
 /// from inside the pane — tmux notifies control-mode clients via
 /// %pane-title-changed, which the terminal handler forwards to the browser.
 pub fn set_pane_title(pane_id: &str, title: &str) -> Result<(), String> {
-    let output = tmux_base()
+    let sock = socket_for_pane(pane_id).ok_or_else(|| format!("pane {pane_id} not found"))?;
+    let output = tmux_base_sock(&sock)
         .args(["select-pane", "-t", pane_id, "-T", title])
         .output()
         .map_err(|e| format!("Failed to run tmux: {e}"))?;
@@ -440,7 +493,8 @@ pub fn set_pane_title(pane_id: &str, title: &str) -> Result<(), String> {
 
 /// Look up #{pane_title} for a given pane id (e.g. "%42").
 pub fn pane_title_for_pane(pane_id: &str) -> Option<String> {
-    let output = tmux_base()
+    let sock = socket_for_pane(pane_id)?;
+    let output = tmux_base_sock(&sock)
         .args(["display-message", "-t", pane_id, "-p", "#{pane_title}"])
         .output()
         .ok()?;
@@ -449,26 +503,48 @@ pub fn pane_title_for_pane(pane_id: &str) -> Option<String> {
     Some(title)
 }
 
+/// Find which per-workspace tmux server owns a given pane id (`%N`). Pane ids
+/// are only unique within a server, so we search every workspace socket.
+fn socket_for_pane(pane_id: &str) -> Option<String> {
+    for sock in list_ws_sockets() {
+        let output = tmux_base_sock(&sock)
+            .args(["list-panes", "-a", "-F", "#{pane_id}"])
+            .output()
+            .ok();
+        if let Some(o) = output {
+            if o.status.success()
+                && String::from_utf8_lossy(&o.stdout).lines().any(|l| l.trim() == pane_id)
+            {
+                return Some(sock);
+            }
+        }
+    }
+    None
+}
+
 /// Look up the session and window that contain the given tmux pane id (e.g. "%42").
 /// Used to map a pane back to its workspace/tab when an in-pane tool needs to
-/// identify itself to the server.
+/// identify itself to the server. Searches every per-workspace server.
 pub fn pane_location(pane_id: &str) -> Option<(String, String)> {
-    let output = tmux_base()
-        .args(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"])
-        .output()
-        .ok()?;
-    if !output.status.success() { return None; }
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts: Vec<&str> = line.splitn(3, '\t').collect();
-        if parts.len() == 3 && parts[0] == pane_id {
-            return Some((parts[1].trim().to_string(), parts[2].trim().to_string()));
+    for sock in list_ws_sockets() {
+        let output = tmux_base_sock(&sock)
+            .args(["list-panes", "-a", "-F", "#{pane_id}\t#{session_name}\t#{window_name}"])
+            .output()
+            .ok();
+        let Some(o) = output else { continue };
+        if !o.status.success() { continue; }
+        for line in String::from_utf8_lossy(&o.stdout).lines() {
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 && parts[0] == pane_id {
+                return Some((parts[1].trim().to_string(), parts[2].trim().to_string()));
+            }
         }
     }
     None
 }
 
 pub fn first_pane_cwd(session: &str) -> Option<String> {
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-panes", "-s", "-t", session, "-F", "#{window_name}\t#{pane_current_path}"])
         .output();
     if let Ok(o) = output {
@@ -489,14 +565,14 @@ pub fn first_pane_cwd(session: &str) -> Option<String> {
 
 pub fn rename_window(session: &str, old_name: &str, new_name: &str) {
     let target = format!("{session}:{old_name}");
-    tmux_base()
+    tmux_for(session)
         .args(["rename-window", "-t", &target, new_name])
         .output()
         .ok();
 }
 
 pub fn list_windows(session: &str) -> Vec<String> {
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-windows", "-t", session, "-F", "#{window_name}"])
         .output();
     match output {
@@ -514,15 +590,15 @@ pub fn list_windows(session: &str) -> Vec<String> {
 /// Capture scrollback history + visible content of a pane with cursor position.
 /// On reconnect this restores both the visible screen and scrollback so the
 /// user can scroll up to see previous output.
-pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
+pub fn capture_pane_with_cursor(session: &str, pane_id: &str) -> Option<Vec<u8>> {
     // 1. Capture scrollback (lines above the visible area)
-    let scrollback = tmux_base()
+    let scrollback = tmux_for(session)
         .args(["capture-pane", "-t", pane_id, "-p", "-e", "-S", "-"])
         .output()
         .ok();
 
     // 2. Capture visible area
-    let content = tmux_base()
+    let content = tmux_for(session)
         .args(["capture-pane", "-t", pane_id, "-p", "-e"])
         .output()
         .ok()?;
@@ -531,7 +607,7 @@ pub fn capture_pane_with_cursor(pane_id: &str) -> Option<Vec<u8>> {
     }
 
     // 3. Capture cursor position
-    let cursor = tmux_base()
+    let cursor = tmux_for(session)
         .args(["list-panes", "-t", pane_id, "-F", "#{cursor_x} #{cursor_y} #{cursor_flag} #{pane_height}"])
         .output()
         .ok()?;
@@ -639,7 +715,7 @@ fn assemble_capture_output(
 /// Query whether a pane is currently in alternate screen mode.
 pub fn pane_title(session: &str, window: &str) -> Option<String> {
     let target = format!("{session}:{window}");
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-panes", "-t", &target, "-F", "#{pane_title}"])
         .output()
         .ok()?;
@@ -650,7 +726,7 @@ pub fn pane_title(session: &str, window: &str) -> Option<String> {
 
 pub fn pane_current_path(session: &str, window: &str) -> Option<String> {
     let target = format!("{session}:{window}");
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-panes", "-t", &target, "-F", "#{pane_current_path}"])
         .output()
         .ok()?;
@@ -661,7 +737,7 @@ pub fn pane_current_path(session: &str, window: &str) -> Option<String> {
 
 pub fn pane_mouse_mode(session: &str, window: &str) -> Vec<u8> {
     let target = format!("{session}:{window}");
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-panes", "-t", &target, "-F", "#{mouse_any_flag} #{mouse_button_flag} #{mouse_standard_flag} #{mouse_sgr_flag}"])
         .output();
     let mut seqs = Vec::new();
@@ -682,7 +758,7 @@ pub fn pane_mouse_mode(session: &str, window: &str) -> Vec<u8> {
 
 pub fn is_alternate_screen(session: &str, window: &str) -> bool {
     let target = format!("{session}:{window}");
-    let output = tmux_base()
+    let output = tmux_for(session)
         .args(["list-panes", "-t", &target, "-F", "#{alternate_on}"])
         .output();
     match output {

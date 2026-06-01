@@ -219,7 +219,7 @@ pub async fn ws_terminal(
             spawn_direct_bridge(session, msg_stream, tokio_fd, master_fd_raw, child);
         }
         SessionMode::TmuxControl { pane_id, link_name, window_id, initial_alt_screen, initial_title, initial_cwd, tmux_session, tmux_window } => {
-            let initial_content = tmux::capture_pane_with_cursor(&pane_id);
+            let initial_content = tmux::capture_pane_with_cursor(&tmux_session, &pane_id);
 
             // Send initial resize
             let resize_cmd = tmux_cc::encode_resize(init_cols, init_rows);
@@ -247,7 +247,10 @@ pub async fn ws_terminal(
                 let _ = session.binary(mouse_flags).await;
             }
 
-            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen, pane_title_tx.subscribe());
+            let tab_id_num = tab_id.as_deref()
+                .and_then(|t| t.strip_prefix("tab-"))
+                .and_then(|s| s.parse::<i64>().ok());
+            spawn_cc_bridge(session, msg_stream, tokio_fd, master_fd_raw, child, pane_id, link_name, window_id, initial_content, init_cols, init_rows, initial_alt_screen, pane_title_tx.subscribe(), tmux_session, tmux_window, initial_cwd, tab_id_num, db.get_ref().clone());
         }
     }
 
@@ -367,6 +370,11 @@ fn spawn_cc_bridge(
     _init_rows: u16,
     initial_alt_screen: bool,
     mut pane_title_rx: broadcast::Receiver<PaneTitleUpdate>,
+    tmux_session: String,
+    tmux_window: String,
+    initial_cwd: Option<String>,
+    tab_id_num: Option<i64>,
+    db: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
 ) {
     let child_pid = child.id();
 
@@ -433,6 +441,14 @@ fn spawn_cc_bridge(
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
         ping_interval.tick().await;
 
+        // Poll tmux for `#{pane_current_path}` changes — covers `cd` in shells
+        // that don't emit OSC 7. tmux already knows the cwd via /proc.
+        let mut cwd_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        cwd_interval.tick().await;
+        let mut last_known_cwd = initial_cwd.clone();
+        let cwd_session = tmux_session.clone();
+        let cwd_window = tmux_window.clone();
+
         // Register to receive cross-reader notifications when OUR window
         // is unlinked (tmux only delivers that event to grouped peers).
         let registered_window_id = window_id.clone();
@@ -446,7 +462,8 @@ fn spawn_cc_bridge(
                     // (tmux broadcasts it as "unlinked from the dying session"). Verify
                     // the window is truly gone before reporting the pane as exited.
                     let wid = registered_window_id.clone();
-                    let still_alive = tokio::task::spawn_blocking(move || tmux::window_exists(&wid))
+                    let wsess = tmux_session.clone();
+                    let still_alive = tokio::task::spawn_blocking(move || tmux::window_exists(&wsess, &wid))
                         .await
                         .unwrap_or(false);
                     if still_alive {
@@ -502,7 +519,8 @@ fn spawn_cc_bridge(
                                         // server-side linked-session cleanup (e.g. WebSocket disconnect).
                                         // Distinguish by checking whether the underlying window survives.
                                         let wid = registered_window_id.clone();
-                                        let still_alive = tokio::task::spawn_blocking(move || tmux::window_exists(&wid))
+                                        let wsess = tmux_session.clone();
+                                        let still_alive = tokio::task::spawn_blocking(move || tmux::window_exists(&wsess, &wid))
                                             .await
                                             .unwrap_or(false);
                                         if !still_alive {
@@ -534,6 +552,25 @@ fn spawn_cc_bridge(
                 _ = ping_interval.tick() => {
                     if session_clone.ping(b"").await.is_err() {
                         break;
+                    }
+                }
+                _ = cwd_interval.tick() => {
+                    let s = cwd_session.clone();
+                    let w = cwd_window.clone();
+                    let current = tokio::task::spawn_blocking(move || tmux::pane_current_path(&s, &w))
+                        .await
+                        .ok()
+                        .flatten();
+                    if current.is_some() && current != last_known_cwd {
+                        let path = current.as_deref().unwrap();
+                        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
+                        let msg = format!("{{\"type\":\"pane_cwd\",\"cwd\":\"{escaped}\"}}");
+                        if session_clone.text(msg).await.is_err() { break 'outer; }
+                        if let Some(tab_id) = tab_id_num {
+                            let conn = db.lock().unwrap();
+                            crate::db::update_workspace_tab_cwd(&conn, tab_id, path);
+                        }
+                        last_known_cwd = current;
                     }
                 }
                 update = pane_title_rx.recv() => {

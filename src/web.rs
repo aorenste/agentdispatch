@@ -232,11 +232,14 @@ mod tests {
     e2e_file_test!(test_e2e_osc52, "osc52");
     e2e_file_test!(test_e2e_pane_cwd, "pane-cwd");
     e2e_file_test!(test_e2e_recreate_cwd, "recreate-cwd");
+    e2e_file_test!(test_e2e_recreate_tab, "recreate-tab");
     e2e_file_test!(test_e2e_workspace_reorder, "workspace-reorder");
     e2e_file_test!(test_e2e_pane_exit, "pane-exit");
     e2e_file_test!(test_e2e_pane_title, "pane-title");
     e2e_file_test!(test_e2e_reconnect_scroll, "reconnect-scroll");
     e2e_file_test!(test_e2e_stash_resize, "stash-resize");
+    e2e_file_test!(test_e2e_issue_link_focus, "issue-link-focus");
+    e2e_file_test!(test_e2e_tmux_isolation, "tmux-isolation");
 
     fn run_playwright(args: &[&str]) {
 
