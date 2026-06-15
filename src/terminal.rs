@@ -7,6 +7,7 @@ use actix_web::{HttpRequest, HttpResponse, get, web};
 use nix::libc;
 use serde::Deserialize;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use crate::tmux;
 use crate::tmux_cc::{self, CcReader, CcEvent, CcWriter};
@@ -378,6 +379,15 @@ fn spawn_cc_bridge(
 ) {
     let child_pid = child.id();
 
+    // Links the two halves' lifetimes. Whichever task exits first cancels the
+    // token; the other observes it and tears down too. Without this, when the
+    // PTY half dies (e.g. the workspace's tmux server segfaults) the WebSocket
+    // read half would block forever in `msg_stream.recv()`, never reaping the
+    // child (zombie) or killing the tmux link session.
+    let cancel = CancellationToken::new();
+    let cancel_reader = cancel.clone();
+    let cancel_writer = cancel;
+
     // PTY → WebSocket: parse tmux control mode output via CcReader
     let mut session_clone = session.clone();
     let tokio_fd_read = tokio_fd.clone();
@@ -456,6 +466,10 @@ fn spawn_cc_bridge(
 
         'outer: loop {
             tokio::select! {
+                _ = cancel_reader.cancelled() => {
+                    // The WebSocket write half exited; tear down so cleanup runs.
+                    break 'outer;
+                }
                 _ = own_close.notified() => {
                     // A peer observed %unlinked-window-close for our window. That event
                     // fires both for real destruction AND when a linked session dies
@@ -588,6 +602,9 @@ fn spawn_cc_bridge(
             }
         }
         tmux_cc::unregister_window_close(&registered_window_id);
+        // Unblock the WebSocket→PTY task so it reaps the child and kills the
+        // link session even if it's parked in `msg_stream.recv()`.
+        cancel_reader.cancel();
         let _ = session_clone.close(None).await;
     });
 
@@ -597,7 +614,15 @@ fn spawn_cc_bridge(
     actix_web::rt::spawn(async move {
         use actix_ws::Message;
 
-        while let Some(Ok(msg)) = msg_stream.recv().await {
+        loop {
+            // Race the next message against cancellation: if the PTY half dies,
+            // `recv()` would otherwise block forever and the cleanup below
+            // (reaping the child, killing the link session) would never run.
+            let msg = match until_cancelled(&cancel_writer, msg_stream.recv()).await {
+                Some(Some(Ok(msg))) => msg,
+                // Cancelled (PTY half died), stream ended, or protocol error.
+                _ => break,
+            };
             match msg {
                 Message::Text(text) => {
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -628,9 +653,30 @@ fn spawn_cc_bridge(
         );
         let _ = child.wait();
         tmux::kill_session(&link_name);
-        pty_to_ws.abort();
+        // Unblock the PTY→WebSocket task gracefully so it runs its own cleanup
+        // (e.g. `unregister_window_close`); dropping the handle just detaches it.
+        cancel_writer.cancel();
+        drop(pty_to_ws);
         let _ = session.close(None).await;
     });
+}
+
+/// Await `fut`, but bail out early (returning `None`) if `cancel` fires first.
+///
+/// This ties the WebSocket→PTY read loop's lifetime to the PTY half. When the
+/// PTY dies (e.g. the per-workspace tmux server segfaults), the reader task
+/// cancels the token; without this race the writer task would block forever in
+/// `msg_stream.recv().await` and never reach `child.wait()` — leaking the tmux
+/// control-mode client as an un-reaped zombie, leaking the tmux link session,
+/// and stranding the socket in `CLOSE-WAIT`.
+async fn until_cancelled<T>(
+    cancel: &CancellationToken,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::select! {
+        _ = cancel.cancelled() => None,
+        v = fut => Some(v),
+    }
 }
 
 /// Async write to the PTY fd.
@@ -666,6 +712,43 @@ async fn async_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reproduces the zombie/CLOSE-WAIT wedge. The WebSocket→PTY task spends its
+    /// life awaiting `msg_stream.recv()`. When the PTY half dies it cancels the
+    /// shared token; the read loop MUST then unblock so its cleanup (`child.wait()`,
+    /// `kill_session`) runs. We model the forever-pending `recv()` with
+    /// `std::future::pending()`: if `until_cancelled` ignores the token, this hangs
+    /// forever and the timeout fails the test — exactly the production symptom
+    /// (un-reaped `tmux -C` clients, keystrokes going nowhere).
+    #[tokio::test]
+    async fn test_until_cancelled_unblocks_when_peer_half_dies() {
+        let cancel = CancellationToken::new();
+        // PTY half observed EOF (tmux server crashed) and signalled teardown.
+        cancel.cancel();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            until_cancelled(&cancel, std::future::pending::<u8>()),
+        )
+        .await;
+
+        match result {
+            Err(_) => panic!(
+                "until_cancelled hung after cancellation — the websocket read loop \
+                 would never reap its child (zombie) or kill the link session"
+            ),
+            Ok(v) => assert_eq!(v, None, "cancellation must surface as None"),
+        }
+    }
+
+    /// The happy path: when nothing is cancelled, the awaited future's value is
+    /// passed straight through, so normal keystroke delivery is unaffected.
+    #[tokio::test]
+    async fn test_until_cancelled_passes_value_through() {
+        let cancel = CancellationToken::new();
+        let v = until_cancelled(&cancel, async { 42u8 }).await;
+        assert_eq!(v, Some(42));
+    }
 
     /// Reproduces the partial-write duplication bug. With a small kernel
     /// buffer and a slow reader, write_all hits WouldBlock partway through.
