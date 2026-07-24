@@ -76,11 +76,16 @@ const NOTES_MIN_WIDTH = 140;
 const NOTES_MAX_WIDTH = 600;
 let _notesCollapsed = false;
 let _notesWidth = NOTES_DEFAULT_WIDTH;
+
+const SIDEBAR_COLLAPSED_KEY = 'ws-sidebar-collapsed';
+let _sidebarCollapsed = false;
+
 if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
   try {
     _notesCollapsed = localStorage.getItem(NOTES_COLLAPSED_KEY) === 'true';
     const savedW = parseInt(localStorage.getItem(NOTES_WIDTH_KEY), 10);
     if (!isNaN(savedW)) _notesWidth = clampNotesWidth(savedW);
+    _sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === 'true';
   } catch {}
 }
 
@@ -463,20 +468,42 @@ function renderCategorySection(cat, workspaces) {
 
 function renderWorkspaces() {
   const sidebar = document.getElementById('ws-sidebar');
-  const toolbar = '<div class="ws-toolbar"><div class="ws-new-btn" onclick="newWorkspace()">+ Workspace</div><div class="ws-new-btn" onclick="addCategory()">+ Category</div></div>';
+  const resizer = document.getElementById('ws-resizer');
+  sidebar.classList.toggle('collapsed', _sidebarCollapsed);
+  if (resizer) resizer.style.display = _sidebarCollapsed ? 'none' : '';
 
-  const grouped = {};
-  for (const ws of _workspaces) {
-    const key = ws.category_id || null;
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(ws);
-  }
+  // stopPropagation on the fold controls is load-bearing: toggleSidebar()
+  // re-renders synchronously, and morphdom reuses the toolbar node in-place,
+  // turning it into the collapsed bar (which itself carries onclick=toggleSidebar).
+  // Without stopPropagation the still-bubbling click would then hit that reused
+  // ancestor and toggle a second time, undoing the fold.
+  let html;
+  if (_sidebarCollapsed) {
+    // Folded: a thin strip whose whole area is a click target to re-expand.
+    html = '<div class="ws-collapsed-bar" onclick="event.stopPropagation(); toggleSidebar()" title="Show workspaces">'
+      + '<span class="ws-expand-btn">▶</span>'
+      + '<span class="ws-collapsed-label">Workspaces</span>'
+      + '</div>';
+  } else {
+    const toolbar = '<div class="ws-toolbar">'
+      + '<div class="ws-new-btn" onclick="newWorkspace()">+ Workspace</div>'
+      + '<div class="ws-new-btn" onclick="addCategory()">+ Category</div>'
+      + '<div class="ws-collapse-btn" onclick="event.stopPropagation(); toggleSidebar()" title="Hide workspaces">◀</div>'
+      + '</div>';
 
-  let html = toolbar;
-  for (const cat of _categories) {
-    html += renderCategorySection(cat, grouped[cat.id] || []);
+    const grouped = {};
+    for (const ws of _workspaces) {
+      const key = ws.category_id || null;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(ws);
+    }
+
+    html = toolbar;
+    for (const cat of _categories) {
+      html += renderCategorySection(cat, grouped[cat.id] || []);
+    }
+    html += renderCategorySection(null, grouped[null] || []);
   }
-  html += renderCategorySection(null, grouped[null] || []);
 
   const tmp = document.createElement('div');
   tmp.innerHTML = html;
@@ -668,6 +695,16 @@ function clampSidebarWidth(w) {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, w));
 }
 
+// Fold the workspace list out of the way (and back). Persisted in localStorage;
+// re-render rebuilds the sidebar and a resize event lets terminals refit to the
+// reclaimed width.
+function toggleSidebar() {
+  _sidebarCollapsed = !_sidebarCollapsed;
+  try { localStorage.setItem(SIDEBAR_COLLAPSED_KEY, _sidebarCollapsed ? 'true' : 'false'); } catch {}
+  renderWorkspaces();
+  window.dispatchEvent(new Event('resize'));
+}
+
 function selectWorkspace(id) {
   _selectedWsId = id;
   const ws = _workspaces.find(w => w.id === id);
@@ -707,7 +744,7 @@ function getOrCreateNotesEntry(ws) {
   textarea.value = ws.notes || '';
   const wsId = ws.id;
   const entry = { container, textarea, saveTimer: null, lastSavedValue: ws.notes || '' };
-  textarea.addEventListener('input', () => scheduleNotesSave(wsId));
+  textarea.addEventListener('input', () => { scheduleNotesSave(wsId); updateNotesToggle(wsId); });
   textarea.addEventListener('blur', () => flushNotesSave(wsId));
   container.appendChild(textarea);
   _wsNotesEntries[wsId] = entry;
@@ -723,6 +760,16 @@ function syncNotesFromServer(ws) {
     entry.textarea.value = serverNotes;
     entry.lastSavedValue = serverNotes;
   }
+}
+
+// Reactively turn the notes toggle arrow green when the (selected) workspace's
+// notes are non-empty. Called on each keystroke since typing doesn't re-render.
+function updateNotesToggle(wsId) {
+  if (_selectedWsId !== wsId) return;
+  const btn = document.querySelector('.ws-notes-toggle');
+  const entry = _wsNotesEntries[wsId];
+  if (!btn || !entry) return;
+  btn.classList.toggle('has-notes', entry.textarea.value.trim().length > 0);
 }
 
 function scheduleNotesSave(wsId) {
@@ -1035,12 +1082,17 @@ function renderSelectedWorkspace() {
   const notesToggleArrow = _notesCollapsed ? '▶' : '◀';
   const notesToggleTitle = _notesCollapsed ? 'Expand notes' : 'Collapse notes';
   const notesTitle = _notesCollapsed ? '' : '<span class="ws-notes-title">Notes</span>';
+  // Green toggle arrow when notes are present. Prefer the live (possibly
+  // unsaved) textarea value; fall back to the saved ws.notes when collapsed.
+  const _notesEntry = _wsNotesEntries[ws.id];
+  const _notesText = _notesEntry && _notesEntry.textarea ? _notesEntry.textarea.value : (ws.notes || '');
+  const notesToggleClass = _notesText.trim() ? ' has-notes' : '';
   main.innerHTML = `
     <div class="ws-main-row">
       <div class="ws-notes-section${notesCollapsedClass}" id="ws-notes-section" ${notesWidthStyle}>
         <div class="ws-notes-header">
           ${notesTitle}
-          <button class="ws-notes-toggle" onclick="toggleNotes()" title="${notesToggleTitle}">${notesToggleArrow}</button>
+          <button class="ws-notes-toggle${notesToggleClass}" onclick="toggleNotes()" title="${notesToggleTitle}">${notesToggleArrow}</button>
         </div>
         <div class="ws-notes-body-slot" id="ws-notes-body-slot"></div>
       </div>
@@ -1186,6 +1238,17 @@ function initTerminal(key, paneEl, opts) {
   const termConfig = getTerminalConfig();
   if (opts.readOnly) termConfig.disableStdin = true;
   const term = new Terminal(termConfig);
+
+  // Align xterm.js glyph widths with tmux and modern fonts: emoji such as ✅
+  // (U+2705) and 🤖 (U+1F916) are width 2. Without the unicode11 addon xterm
+  // falls back to its built-in Unicode v6 table (width 1), so every line with
+  // such a glyph drifts a column — misdrawing Claude's boxes/tables and, on
+  // full-width lines, autowrapping so the bottom bar shoves the screen up.
+  // Must be set before any content is written. See e2e/xterm-redraw-frame.test.js.
+  if (typeof Unicode11Addon !== 'undefined') {
+    term.loadAddon(new Unicode11Addon.Unicode11Addon());
+    term.unicode.activeVersion = '11';
+  }
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);

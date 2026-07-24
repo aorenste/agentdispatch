@@ -11,6 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-serialize@0.13.0/lib/addon-serialize.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/morphdom@2.7.4/dist/morphdom-umd.min.js"></script>
 <style>
   :root {
@@ -257,6 +258,40 @@
     background: var(--bg-card);
     overflow-y: auto;
   }
+  /* Folded sidebar: collapse to a thin strip with just an expand affordance. */
+  .ws-sidebar.collapsed {
+    width: 28px !important;
+    overflow: hidden;
+  }
+  .ws-collapse-btn {
+    display: flex;
+    align-items: center;
+    padding: 6px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+    border-left: 1px solid var(--border);
+  }
+  .ws-collapse-btn:hover { background: rgba(99, 102, 241, 0.08); color: var(--text); }
+  .ws-collapsed-bar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 0;
+    height: 100%;
+    cursor: pointer;
+    color: var(--accent);
+  }
+  .ws-collapsed-bar:hover { background: rgba(99, 102, 241, 0.08); }
+  .ws-expand-btn { font-size: 12px; }
+  .ws-collapsed-label {
+    writing-mode: vertical-rl;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+  }
   .ws-resizer {
     flex: 0 0 8px;
     margin: 0 4px;
@@ -468,6 +503,9 @@
     color: var(--text);
     border-color: var(--text-muted);
   }
+  /* Green toggle when the workspace has notes (gray when empty). */
+  .ws-notes-toggle.has-notes { color: var(--green); }
+  .ws-notes-toggle.has-notes:hover { color: var(--green); border-color: var(--green); }
   .ws-notes-body-slot {
     flex: 1;
     display: flex;

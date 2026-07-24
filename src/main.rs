@@ -1,6 +1,6 @@
 #![deny(warnings)]
 
-/// Global log file handle. Initialized by `init_log_file` at startup.
+/// Global log file handle. Initialized by `init_logging` at startup.
 /// `tlog!` writes to this AND stderr so diagnostics survive across runs.
 pub static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
     std::sync::OnceLock::new();
@@ -18,20 +18,84 @@ macro_rules! tlog {
         let m = (secs / 60) % 60;
         let s = secs % 60;
         let ms = now.subsec_millis();
-        let prefix = format!("{h:02}:{m:02}:{s:02}.{ms:03} ");
-        let body = format!($($arg)*);
-        {
-            let mut stderr = std::io::stderr().lock();
-            let _ = write!(stderr, "{prefix}");
-            let _ = writeln!(stderr, "{body}");
-        }
+        // One preformatted line so every sink writes identical bytes at once.
+        let line = format!("{h:02}:{m:02}:{s:02}.{ms:03} {}\n", format_args!($($arg)*));
+        // Mirror to stderr WITHOUT blocking the caller. A stalled console (full
+        // pty buffer, paused/scrolled terminal, dead ssh) must never wedge the
+        // request path — see `mirror_to_stderr` / `AsyncLineWriter`.
+        $crate::mirror_to_stderr(&line);
+        // The durable log file is a regular file, so its write can't block on a
+        // stalled terminal; keep it synchronous so the log stays crash-complete.
         if let Some(f) = $crate::LOG_FILE.get() {
             if let Ok(mut f) = f.lock() {
-                let _ = write!(f, "{prefix}");
-                let _ = writeln!(f, "{body}");
+                let _ = f.write_all(line.as_bytes());
             }
         }
     }};
+}
+
+/// Bounded queue capacity for the async stderr mirror. Lines beyond this are
+/// dropped while the terminal is stalled (the durable file log is unaffected).
+const STDERR_LOG_CAP: usize = 4096;
+
+/// Background stderr mirror. Installed by `init_logging`; until then
+/// `mirror_to_stderr` falls back to a direct (startup-only) write.
+static STDERR_WRITER: std::sync::OnceLock<AsyncLineWriter> = std::sync::OnceLock::new();
+
+/// Drains preformatted log lines to a sink on a dedicated thread. `emit` is
+/// non-blocking (it drops on a full queue), so a sink that stalls — e.g. a
+/// terminal whose pty output buffer is full and isn't being drained — can only
+/// ever block this one thread, never the threads producing log lines.
+///
+/// This is the fix for the whole-server wedge: `tlog!` used to write to
+/// `std::io::Stderr` under its process-global lock, so a stalled console froze
+/// that lock and every concurrent `tlog!` — including the `tmux` calls that gate
+/// terminal attach (`attach_args`, `kill_session`) — hung forever, making every
+/// pane report "Connection failed" until the server was restarted.
+struct AsyncLineWriter {
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+}
+
+impl AsyncLineWriter {
+    /// Spawn the writer thread. `cap` bounds how many lines may queue while the
+    /// sink is stalled before further lines are dropped.
+    fn new<W>(mut sink: W, cap: usize) -> Self
+    where
+        W: std::io::Write + Send + 'static,
+    {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(cap);
+        std::thread::Builder::new()
+            .name("log-stderr".to_string())
+            .spawn(move || {
+                // Loops until every sender drops. A stalled `write_all` blocks
+                // only this thread; producers keep running (their lines queue,
+                // then drop once `cap` is reached).
+                for line in rx {
+                    let _ = sink.write_all(&line);
+                    let _ = sink.flush();
+                }
+            })
+            .expect("failed to spawn log-stderr thread");
+        Self { tx }
+    }
+
+    /// Enqueue a line without blocking; drop it if the queue is full.
+    fn emit(&self, line: &[u8]) {
+        let _ = self.tx.try_send(line.to_vec());
+    }
+}
+
+/// Hand a preformatted log line to the background stderr writer without
+/// blocking. Before `init_logging` runs (early startup / unit tests) there is
+/// no writer thread yet; volume is tiny and there's no concurrency then, so a
+/// direct write is safe.
+pub(crate) fn mirror_to_stderr(line: &str) {
+    if let Some(writer) = STDERR_WRITER.get() {
+        writer.emit(line.as_bytes());
+    } else {
+        use std::io::Write as _;
+        let _ = std::io::stderr().write_all(line.as_bytes());
+    }
 }
 
 mod db;
@@ -44,11 +108,19 @@ mod web;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// Open the log file in append mode and install it as the global sink.
-/// Also writes a header with PID and startup timestamp so separate runs
-/// are easy to tell apart in the file.
-fn init_log_file(path: &std::path::Path) {
+/// Set up logging: start the background stderr mirror thread, open the log file
+/// in append mode, and install it as the durable sink. A header with PID and
+/// startup timestamp is written so separate runs are easy to tell apart.
+///
+/// The stderr mirror runs on its own thread so a stalled console can never wedge
+/// the callers of `tlog!` (see `AsyncLineWriter`).
+fn init_logging(path: &std::path::Path) {
     use std::io::Write as _;
+
+    // Install the async stderr mirror first so even startup diagnostics use the
+    // non-blocking path.
+    let _ = STDERR_WRITER.set(AsyncLineWriter::new(std::io::stderr(), STDERR_LOG_CAP));
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -112,7 +184,7 @@ async fn main() -> std::io::Result<()> {
         p.set_extension("log");
         p
     });
-    init_log_file(&log_path);
+    init_logging(&log_path);
     tlog!("agentdispatch starting (pid={}, log={})", std::process::id(), log_path.display());
 
     if args.reset {
@@ -214,4 +286,83 @@ async fn main() -> std::io::Result<()> {
     .bind(("127.0.0.1", args.port))?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    /// A sink whose `write` blocks until explicitly released — models a terminal
+    /// whose pty output buffer is full and is not being drained (exactly the
+    /// production wedge: fd 2 pointed at a stalled console).
+    struct StalledSink {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Write for StalledSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let (lock, cvar) = &*self.gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cvar.wait(released).unwrap();
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression test for the whole-server wedge. When the stderr sink stalls,
+    /// enqueuing a log line must NOT block the caller. Before the fix, `tlog!`
+    /// wrote to `std::io::Stderr` under its process-global lock, so a stalled
+    /// terminal froze that lock and every concurrent `tlog!` hung — including the
+    /// tmux calls (`attach_args`, `kill_session`) that gate terminal attach, so
+    /// every pane reported "Connection failed" until a restart.
+    ///
+    /// With the async writer, `emit` drops on a full queue instead of blocking,
+    /// so the producer finishes promptly even though the sink is wedged. If
+    /// `emit` ever blocks again, the producer never signals done and this test
+    /// fails on the timeout.
+    #[test]
+    fn test_emit_never_blocks_when_sink_stalls() {
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        // Tiny queue so it fills almost immediately once the sink stalls.
+        let writer = Arc::new(AsyncLineWriter::new(
+            StalledSink { gate: gate.clone() },
+            4,
+        ));
+
+        // The writer thread grabs the first line and blocks in the stalled sink;
+        // the bounded queue then fills and stays full. Every `emit` must still
+        // return promptly. Run them from a worker thread so a hang can't wedge
+        // the test thread — we detect it via the timeout below.
+        let w = writer.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for i in 0..1000 {
+                w.emit(format!("line {i}\n").as_bytes());
+            }
+            let _ = done_tx.send(());
+        });
+
+        let outcome = done_rx.recv_timeout(Duration::from_secs(5));
+
+        // Release the sink so the writer thread can drain and exit cleanly.
+        {
+            let (lock, cvar) = &*gate;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+
+        assert!(
+            outcome.is_ok(),
+            "emit() blocked on a stalled stderr sink — logging would wedge \
+             request handlers (the terminal-attach path calls tlog!)"
+        );
+    }
 }

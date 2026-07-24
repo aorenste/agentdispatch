@@ -110,6 +110,34 @@ test('Notes persist across workspace re-selection without overwriting unsaved in
   await expect(page.locator('#ws-notes-body-slot .ws-notes-textarea')).toHaveValue('typing in ws2');
 });
 
+test('Notes toggle is green (has-notes) only when the workspace has notes', async ({ page, request }) => {
+  const wsRes = await request.post(`${server.base}/api/workspaces`, {
+    data: { name: `${PROJECT}-greentoggle` },
+  });
+  const ws = await wsRes.json();
+
+  await page.goto(server.base + '/');
+  await page.locator('.ws-sidebar-item').filter({ hasText: ws.name }).click();
+
+  // Empty notes → toggle is NOT green.
+  const toggle = page.locator('.ws-notes-toggle');
+  await expect(toggle).not.toHaveClass(/has-notes/);
+
+  // Type notes → toggle becomes green (uses live textarea value, no save needed).
+  await page.locator('#ws-notes-body-slot .ws-notes-textarea').fill('some notes');
+  await expect(toggle).toHaveClass(/has-notes/);
+
+  // Clear notes → toggle reverts to gray.
+  await page.locator('#ws-notes-body-slot .ws-notes-textarea').fill('');
+  await expect(toggle).not.toHaveClass(/has-notes/);
+
+  // Persisted notes show green after a fresh load while collapsed too.
+  await request.put(`${server.base}/api/workspaces/${ws.id}/notes`, { data: { notes: 'persisted' } });
+  await page.reload();
+  await page.locator('.ws-sidebar-item').filter({ hasText: ws.name }).click();
+  await expect(page.locator('.ws-notes-toggle')).toHaveClass(/has-notes/);
+});
+
 test('Notes section can be collapsed and re-expanded; state persists in localStorage', async ({ page, request }) => {
   const wsRes = await request.post(`${server.base}/api/workspaces`, {
     data: { name: `${PROJECT}-collapse` },
