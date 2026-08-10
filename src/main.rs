@@ -235,11 +235,26 @@ async fn main() -> std::io::Result<()> {
 
     println!("http://localhost:{}", args.port);
 
-    // Write port to a well-known location so tools (e.g. ad-ws-name) can find us.
-    if let Ok(home) = std::env::var("HOME") {
-        let dir = std::path::PathBuf::from(home).join(".agentdispatch");
-        if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(dir.join("port"), args.port.to_string());
+    // Write port to a well-known location so tools (e.g. ad-title, ad-ws-name)
+    // can find us. Test/embedded instances set AGENTDISPATCH_PORT_FILE to an
+    // isolated path so they never clobber the user's real ~/.agentdispatch/port
+    // (running the e2e suite used to overwrite it with throwaway ports, breaking
+    // ad-title with "Connection refused").
+    match std::env::var("AGENTDISPATCH_PORT_FILE") {
+        Ok(port_file) if !port_file.is_empty() => {
+            let p = std::path::PathBuf::from(port_file);
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(p, args.port.to_string());
+        }
+        _ => {
+            if let Ok(home) = std::env::var("HOME") {
+                let dir = std::path::PathBuf::from(home).join(".agentdispatch");
+                if std::fs::create_dir_all(&dir).is_ok() {
+                    let _ = std::fs::write(dir.join("port"), args.port.to_string());
+                }
+            }
         }
     }
 

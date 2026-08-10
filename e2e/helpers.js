@@ -88,7 +88,9 @@ async function startServer() {
   }
 
   const proc = spawn(BINARY, ['--db', db, '--port', String(port)], {
-    env: { ...process.env, AGENTDISPATCH_TMUX_SOCKET: socket },
+    // AGENTDISPATCH_PORT_FILE isolates the port file to this test instance so it
+    // never clobbers the user's real ~/.agentdispatch/port (which ad-title reads).
+    env: { ...process.env, AGENTDISPATCH_TMUX_SOCKET: socket, AGENTDISPATCH_PORT_FILE: db + '.port' },
     stdio: 'pipe',
   });
 
@@ -115,8 +117,8 @@ function stopServer(server) {
   killAllSockets(server.socket);
   // Kill the server process and wait for it to exit
   server.proc.kill('SIGKILL');
-  // Clean up DB files
-  for (const suffix of ['', '-wal', '-shm']) {
+  // Clean up DB files and the isolated port file
+  for (const suffix of ['', '-wal', '-shm', '.port']) {
     try { require('fs').unlinkSync(server.db + suffix); } catch {}
   }
 }
