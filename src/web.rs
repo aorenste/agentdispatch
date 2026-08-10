@@ -1,5 +1,5 @@
 use actix_web::{HttpResponse, get, web};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 #[derive(Clone, Serialize)]
@@ -113,6 +113,69 @@ pub async fn events(
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("X-Accel-Buffering", "no"))
         .streaming(stream)
+}
+
+/// One machine in the federation. Same `peers.json` is deployed to every box;
+/// the browser loads the list, treats the origin it loaded from as "local", and
+/// fans out API/SSE/WebSocket connections to the rest directly (no server-to-
+/// server traffic). Config file: `$AGENTDISPATCH_PEERS_FILE` or
+/// `~/.agentdispatch/peers.json`, a JSON array of `{ "name", "url" }`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PeerInfo {
+    pub name: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+struct SelfInfo {
+    name: String,
+}
+
+#[derive(Serialize)]
+struct PeersPayload {
+    #[serde(rename = "self")]
+    self_: SelfInfo,
+    peers: Vec<PeerInfo>,
+}
+
+/// This machine's hostname, for labeling the "local" group in the UI.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_else(|| "local".to_string())
+}
+
+fn peers_file() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("AGENTDISPATCH_PEERS_FILE") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".agentdispatch").join("peers.json"))
+}
+
+fn load_peers() -> Vec<PeerInfo> {
+    let Some(path) = peers_file() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Vec<PeerInfo>>(&text).unwrap_or_default()
+}
+
+/// Federation directory: this machine's identity plus the configured peers.
+#[get("/api/peers")]
+pub async fn peers() -> HttpResponse {
+    HttpResponse::Ok().json(PeersPayload {
+        self_: SelfInfo { name: hostname() },
+        peers: load_peers(),
+    })
 }
 
 #[cfg(test)]

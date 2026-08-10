@@ -58,6 +58,22 @@ const _wsLastOutput = {}; // workspace id -> last output timestamp (ms)
 const _wsDotState = {}; // workspace id -> last dot class ('', 'recent', 'idle')
 const _wsWasSelected = {}; // workspace id -> was selected last tick
 const _wsOutputGrace = {}; // workspace id -> suppress output recording until this timestamp
+
+// -- Multi-machine federation --------------------------------------------------
+// Each machine runs its own agentdispatch server. The browser loads /api/peers,
+// fans out to every machine, and merges the results into one view — the servers
+// never talk to each other. Workspace/tab ids are per-DB autoincrement, so ids
+// from remote machines are offset by a per-machine stride to stay unique in the
+// client; _idRoute maps an offset id back to { base, real } so API/WebSocket
+// calls are routed to the owning machine. base '' == the origin we loaded from.
+const MACHINE_STRIDE = 100000000;
+let _machines = [{ id: 'local', name: 'local', base: '', offset: 0 }];
+let _peersLoaded = false;
+const _idRoute = {}; // offset id -> { base, real }
+function routeOf(id) { return _idRoute[id] || { base: '', real: id }; }
+function wsApi(id, suffix) { const r = routeOf(id); return r.base + '/api/workspaces/' + r.real + (suffix || ''); }
+function tabApi(id, suffix) { const r = routeOf(id); return r.base + '/api/tabs/' + r.real + (suffix || ''); }
+function shortName(n) { return n ? String(n).split('.')[0] : n; }
 const _tabLastOutput = {}; // tab id -> last output timestamp (ms)
 const _tabDotState = {}; // tab id -> dot state
 const _tabWasSelected = {}; // tab id -> was selected last tick
@@ -228,14 +244,82 @@ function escAttr(s) {
   return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-async function fetchWorkspaces() {
+async function fetchPeers() {
   try {
-    const res = await fetch('/api/workspaces');
+    const res = await fetch('/api/peers');
     const data = await res.json();
-    _workspaces = data.workspaces || [];
-    _categories = data.categories || [];
-    renderWorkspaces();
-  } catch {}
+    const machines = [{ id: 'local', name: shortName(data.self && data.self.name) || 'local', base: '', offset: 0 }];
+    let k = 1;
+    for (const p of (data.peers || [])) {
+      let origin;
+      try { origin = new URL(p.url, location.href).origin; } catch { continue; }
+      if (origin === location.origin) continue; // that's us
+      machines.push({ id: 'm' + k, name: shortName(p.name) || origin, base: origin, offset: k * MACHINE_STRIDE });
+      k++;
+    }
+    _machines = machines;
+  } catch {
+    _machines = [{ id: 'local', name: 'local', base: '', offset: 0 }];
+  }
+  _peersLoaded = true;
+}
+
+async function fetchWorkspaces() {
+  if (!_peersLoaded) await fetchPeers();
+  const results = await Promise.all(_machines.map(async (m) => {
+    try {
+      const res = await fetch(m.base + '/api/workspaces');
+      const data = await res.json();
+      m.offline = false;
+      return { m, data };
+    } catch {
+      m.offline = true;
+      return { m, data: null };
+    }
+  }));
+  for (const key of Object.keys(_idRoute)) delete _idRoute[key];
+  const merged = [];
+  let localCategories = [];
+  for (const { m, data } of results) {
+    if (!data) continue;
+    if (m.id === 'local') localCategories = data.categories || [];
+    for (const ws of (data.workspaces || [])) {
+      const realWs = ws.id;
+      ws._machine = { id: m.id, name: m.name, base: m.base };
+      ws._realId = realWs;
+      ws.id = realWs + m.offset;
+      _idRoute[ws.id] = { base: m.base, real: realWs };
+      // Categories are per-machine; only the local machine keeps its category
+      // grouping — remote workspaces render flat under their machine header.
+      if (m.id !== 'local') ws.category_id = null;
+      for (const t of (ws.tabs || [])) {
+        const realTab = t.id;
+        t._realId = realTab;
+        t.id = realTab + m.offset;
+        _idRoute[t.id] = { base: m.base, real: realTab };
+      }
+      merged.push(ws);
+    }
+  }
+  _workspaces = merged;
+  _categories = localCategories;
+  renderWorkspaces();
+  connectPeerSSEs();
+}
+
+// One SSE stream per remote machine, so remote workspace/status changes push
+// into the merged view just like the local machine's own /api/events.
+function connectPeerSSEs() {
+  for (const m of _machines) {
+    if (m.id === 'local' || m._sse) continue;
+    try {
+      const es = new EventSource(m.base + '/api/events');
+      es.addEventListener('update', () => fetchWorkspaces());
+      es.addEventListener('init', () => { fetchWorkspaces(); reconnectAllTerminals(); });
+      es.onerror = () => { m.offline = true; };
+      m._sse = es;
+    } catch {}
+  }
 }
 
 
@@ -403,7 +487,7 @@ function toggleCategory(id) {
 function moveWorkspaceToCategory(wsId, categoryId) {
   const ws = _workspaces.find(w => w.id === wsId);
   if (ws) ws.category_id = categoryId;
-  fetch(`/api/workspaces/${wsId}/category`, {
+  fetch(wsApi(wsId, '/category'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({category_id: categoryId}),
@@ -466,6 +550,20 @@ function renderCategorySection(cat, workspaces) {
   </div>`;
 }
 
+// Render one machine's workspaces, grouped by that machine's categories.
+function renderMachineGroup(wsList, cats) {
+  const grouped = {};
+  for (const ws of wsList) {
+    const key = ws.category_id || null;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(ws);
+  }
+  let h = '';
+  for (const cat of cats) h += renderCategorySection(cat, grouped[cat.id] || []);
+  h += renderCategorySection(null, grouped[null] || []);
+  return h;
+}
+
 function renderWorkspaces() {
   const sidebar = document.getElementById('ws-sidebar');
   const resizer = document.getElementById('ws-resizer');
@@ -491,18 +589,23 @@ function renderWorkspaces() {
       + '<div class="ws-collapse-btn" onclick="event.stopPropagation(); toggleSidebar()" title="Hide workspaces">◀</div>'
       + '</div>';
 
-    const grouped = {};
-    for (const ws of _workspaces) {
-      const key = ws.category_id || null;
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(ws);
-    }
-
     html = toolbar;
-    for (const cat of _categories) {
-      html += renderCategorySection(cat, grouped[cat.id] || []);
+    const multi = _machines.length > 1;
+    for (const m of _machines) {
+      const wsList = _workspaces.filter(w => w._machine && w._machine.id === m.id);
+      if (multi) {
+        html += `<div class="ws-machine-header" title="${esc(m.base || 'local')}"`
+          + ` style="padding:6px 10px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);border-top:1px solid var(--border);margin-top:4px">`
+          + `${esc(m.name)}${m.offline ? ' · offline' : ''}</div>`;
+      }
+      if (m.id === 'local') {
+        html += renderMachineGroup(wsList, _categories);
+      } else if (m.offline) {
+        html += '<div style="padding:6px 12px;font-size:12px;color:var(--text-muted)">unreachable</div>';
+      } else {
+        html += wsList.map(renderWsItem).join('');
+      }
     }
-    html += renderCategorySection(null, grouped[null] || []);
   }
 
   const tmp = document.createElement('div');
@@ -722,7 +825,7 @@ async function addShellPane(wsId) {
   const ws = _workspaces.find(w => w.id === wsId);
   const shellCount = ws ? ws.tabs.filter(t => t.tab_type === 'shell').length : 0;
   const name = 'Shell ' + (shellCount + 1);
-  const res = await fetch(`/api/workspaces/${wsId}/tabs`, {
+  const res = await fetch(wsApi(wsId, '/tabs'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name, tab_type: 'shell'}),
@@ -788,7 +891,7 @@ function flushNotesSave(wsId) {
   }
   const value = entry.textarea.value;
   if (value === entry.lastSavedValue) return;
-  fetch(`/api/workspaces/${wsId}/notes`, {
+  fetch(wsApi(wsId, '/notes'), {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({notes: value}),
@@ -878,7 +981,7 @@ async function closeTab(tabId) {
   console.log('[closeTab]', tabId, 'called from:', new Error().stack);
   disposeTerminal(tabId);
   _exitedTabs.delete(tabId);
-  await fetch(`/api/tabs/${tabId}`, {method: 'DELETE'});
+  await fetch(tabApi(tabId), {method: 'DELETE'});
   const ws = _workspaces.find(w => w.id === _selectedWsId);
   if (ws) ws.tabs = ws.tabs.filter(t => t.id !== tabId);
   if (_selectedWsSubtab === 'tab-' + tabId) {
@@ -973,7 +1076,7 @@ function handleAgentDispatchOsc(payload, opts) {
     if (!ws || ws.name === value) return;
     ws.name = value;
     renderWorkspaces();
-    fetch(`/api/workspaces/${wsId}`, {
+    fetch(wsApi(wsId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: value}),
@@ -989,7 +1092,7 @@ function handleAgentDispatchOsc(payload, opts) {
     if (!tab || tab.name === value) return;
     tab.name = value;
     renderSelectedWorkspace();
-    fetch(`/api/tabs/${tabId}`, {
+    fetch(tabApi(tabId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: value}),
@@ -1006,7 +1109,7 @@ async function renameWorkspace(wsId) {
   ], async (values) => {
     const name = values['ws-name'];
     if (!name) return;
-    await fetch(`/api/workspaces/${wsId}`, {
+    await fetch(wsApi(wsId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name}),
@@ -1025,7 +1128,7 @@ async function renameTab(tabId) {
   ], async (values) => {
     const name = values['tab-name'];
     if (!name) return;
-    await fetch(`/api/tabs/${tabId}`, {
+    await fetch(tabApi(tabId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name}),
@@ -1181,10 +1284,10 @@ function initTabDragDrop() {
     toIdx = ws.tabs.findIndex(t => t.id === targetTabId);
     if (inRightHalf) toIdx++;
     ws.tabs.splice(toIdx, 0, moved);
-    fetch(`/api/workspaces/${ws.id}/tabs/reorder`, {
+    fetch(wsApi(ws.id, '/tabs/reorder'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ ids: ws.tabs.map(t => t.id) }),
+      body: JSON.stringify({ ids: ws.tabs.map(t => routeOf(t.id).real) }),
     });
     renderSelectedWorkspace();
   });
@@ -1300,15 +1403,23 @@ function initTerminal(key, paneEl, opts) {
   _tabTerminals[key] = entry;
 
   function connectWs() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // Route the terminal WebSocket to the machine that owns this pane, using the
+    // machine-local (real) ids. opts.workspaceId/opts.tabId are the client-side
+    // offset ids; translate them back for the owning server.
+    const route = routeOf(opts.workspaceId);
+    const target = route.base ? new URL(route.base) : location;
+    const proto = target.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams();
     if (opts.cwd) params.set('cwd', opts.cwd);
     if (opts.cmd) params.set('cmd', opts.cmd);
-    if (opts.workspaceId != null) params.set('workspace_id', opts.workspaceId);
-    if (opts.tabId) params.set('tab_id', opts.tabId);
+    if (opts.workspaceId != null) params.set('workspace_id', route.real);
+    if (opts.tabId) {
+      const m = /^tab-(\d+)$/.exec(opts.tabId);
+      params.set('tab_id', m ? 'tab-' + routeOf(parseInt(m[1])).real : opts.tabId);
+    }
     params.set('cols', term.cols);
     params.set('rows', term.rows);
-    const wsUrl = proto + '//' + location.host + '/api/terminal' + '?' + params.toString();
+    const wsUrl = proto + '//' + target.host + '/api/terminal' + '?' + params.toString();
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     entry.ws = ws;
@@ -1586,7 +1697,7 @@ function closeTermContextMenu() {
 
 async function recreateTab(tabId) {
   disposeTerminal(tabId);
-  const res = await fetch(`/api/tabs/${tabId}/recreate`, {method: 'POST'});
+  const res = await fetch(tabApi(tabId, '/recreate'), {method: 'POST'});
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     alert('Recreate failed: ' + (err.error || res.statusText));
@@ -1600,7 +1711,7 @@ async function recreateWorkspace(id) {
   if (ws) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
   }
-  const res = await fetch(`/api/workspaces/${id}/recreate`, {method: 'POST'});
+  const res = await fetch(wsApi(id, '/recreate'), {method: 'POST'});
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     alert('Recreate failed: ' + (err.error || res.statusText));
@@ -1618,7 +1729,7 @@ async function destroyWorkspace(id) {
   _workspaces = _workspaces.filter(w => w.id !== id);
   if (_selectedWsId === id) _selectedWsId = null;
   renderWorkspaces();
-  await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
+  await fetch(wsApi(id), {method: 'DELETE'});
   fetchWorkspaces();
 }
 

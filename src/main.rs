@@ -145,8 +145,13 @@ fn init_logging(path: &std::path::Path) {
     let _ = LOG_FILE.set(std::sync::Mutex::new(file));
 }
 
-use actix_web::{App, HttpServer};
+use actix_web::body::BoxBody;
+use actix_web::dev::{Service as _, ServiceResponse};
+use actix_web::http::header::{self, HeaderValue};
+use actix_web::{App, Error, HttpResponse, HttpServer};
 use clap::Parser;
+use std::future::Future;
+use std::pin::Pin;
 
 #[derive(Parser)]
 #[command(name = "agentdispatch", about = "Agent dispatch server")]
@@ -154,6 +159,13 @@ struct Args {
     /// Port to listen on
     #[arg(short, long, default_value_t = 8915)]
     port: u16,
+
+    /// Host/interface to bind. Defaults to localhost. Set to 0.0.0.0 (or a
+    /// specific interface) to expose on the network for multi-machine
+    /// federation — do that only behind a trusted overlay/VPN, as the terminal
+    /// API is currently unauthenticated.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
 
     /// Path to SQLite database file
     #[arg(long, default_value = "agentdispatch.db")]
@@ -265,6 +277,47 @@ async fn main() -> std::io::Result<()> {
     let tmux_data = actix_web::web::Data::new(use_tmux);
     HttpServer::new(move || {
         App::new()
+            // Reflect the request Origin so the browser can merge workspaces from
+            // several machines into one view (federation). Simple GET/SSE and
+            // WebSocket only need this header; there are no credentialed/cookie
+            // requests (auth, when enabled, is a token — not cookies).
+            .wrap_fn(|req, srv| {
+                let origin = req
+                    .headers()
+                    .get(header::ORIGIN)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_owned());
+                // Short-circuit CORS preflight so cross-origin PUT/DELETE/POST
+                // (remote workspace mutations from the merged UI) are allowed.
+                let fut: Pin<Box<dyn Future<Output = Result<ServiceResponse<BoxBody>, Error>>>> =
+                    if req.method() == actix_web::http::Method::OPTIONS {
+                        let sr = req.into_response(HttpResponse::NoContent().finish());
+                        Box::pin(async move { Ok(sr) })
+                    } else {
+                        let call = srv.call(req);
+                        Box::pin(async move { Ok(call.await?.map_into_boxed_body()) })
+                    };
+                async move {
+                    let mut res = fut.await?;
+                    let h = res.headers_mut();
+                    if let Some(o) = origin {
+                        if let Ok(v) = HeaderValue::from_str(&o) {
+                            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+                            h.insert(header::VARY, HeaderValue::from_static("Origin"));
+                        }
+                    }
+                    h.insert(
+                        header::ACCESS_CONTROL_ALLOW_METHODS,
+                        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+                    );
+                    h.insert(
+                        header::ACCESS_CONTROL_ALLOW_HEADERS,
+                        HeaderValue::from_static("Content-Type, Authorization"),
+                    );
+                    h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
+                    Ok(res)
+                }
+            })
             .app_data(tx_data.clone())
             .app_data(pane_title_tx_data.clone())
             .app_data(hash_data.clone())
@@ -274,6 +327,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::app_js)
             .service(web::index)
             .service(web::events)
+            .service(web::peers)
             .service(terminal::ws_terminal)
             .service(projects::create_workspace)
             .service(projects::list_workspaces)
@@ -298,7 +352,7 @@ async fn main() -> std::io::Result<()> {
             .service(projects::delete_tab)
             .service(projects::client_log)
     })
-    .bind(("127.0.0.1", args.port))?
+    .bind((args.host.as_str(), args.port))?
     .run()
     .await
 }
