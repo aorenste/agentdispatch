@@ -20,7 +20,20 @@ send_osc() {
 }
 
 send_http() {
-    local port_file="${HOME}/.agentdispatch/port"
+    # Resolve where the server publishes its port (mirrors src/paths.rs):
+    # $AGENTDISPATCH_PORT_FILE, else $XDG_RUNTIME_DIR/agentdispatch/port, else
+    # $XDG_STATE_HOME/agentdispatch/port; fall back to the legacy location.
+    local port_file="${AGENTDISPATCH_PORT_FILE:-}"
+    if [ -z "$port_file" ]; then
+        if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+            port_file="$XDG_RUNTIME_DIR/agentdispatch/port"
+        else
+            port_file="${XDG_STATE_HOME:-$HOME/.local/state}/agentdispatch/port"
+        fi
+    fi
+    if [ ! -r "$port_file" ] && [ -r "$HOME/.agentdispatch/port" ]; then
+        port_file="$HOME/.agentdispatch/port"
+    fi
     if [ ! -r "$port_file" ]; then
         echo "ad-title: $port_file not found — is the server running?" >&2
         return 1

@@ -99,6 +99,7 @@ pub(crate) fn mirror_to_stderr(line: &str) {
 }
 
 mod db;
+mod paths;
 mod projects;
 mod terminal;
 mod tmux;
@@ -146,12 +147,74 @@ fn init_logging(path: &std::path::Path) {
 }
 
 use actix_web::body::BoxBody;
-use actix_web::dev::{Service as _, ServiceResponse};
+use actix_web::dev::{Service as _, ServiceRequest, ServiceResponse};
 use actix_web::http::header::{self, HeaderValue};
 use actix_web::{App, Error, HttpResponse, HttpServer};
 use clap::Parser;
 use std::future::Future;
 use std::pin::Pin;
+
+/// Load the shared auth token from `$AGENTDISPATCH_TOKEN` or the config dir
+/// (`~/.config/agentdispatch/token`, legacy `~/.agentdispatch/token`). `None`
+/// means auth is disabled — the localhost default. Distribute the config dir via
+/// dotsync so every server agrees; the browser carries the same token via a
+/// `?token=` bookmark (stored in localStorage).
+fn load_auth_token() -> Option<String> {
+    if let Ok(t) = std::env::var("AGENTDISPATCH_TOKEN") {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    let t = paths::read_config("token")?.trim().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// Constant-time compare (length is not secret for a random token).
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Static bootstrap assets load without a token so the browser can start up and
+/// then authenticate its API/WebSocket/SSE calls; everything else is gated.
+fn is_public_path(path: &str) -> bool {
+    matches!(path, "/" | "/app.js" | "/icon.svg")
+}
+
+/// Token supplied via `Authorization: Bearer <t>` (fetch) or `?token=<t>`
+/// (WebSocket/SSE, which can't set request headers from the browser).
+fn request_token(req: &ServiceRequest) -> Option<String> {
+    if let Some(h) = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(t) = h.strip_prefix("Bearer ") {
+            return Some(t.trim().to_string());
+        }
+    }
+    req.query_string()
+        .split('&')
+        .find_map(|p| p.strip_prefix("token=").map(|t| t.to_string()))
+}
+
+/// A loopback bind (no token required) vs an exposed interface (token required).
+/// `0.0.0.0`, `::`, a specific IP, or a hostname all count as exposed.
+fn host_is_local(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false)
+}
 
 #[derive(Parser)]
 #[command(name = "agentdispatch", about = "Agent dispatch server")]
@@ -198,6 +261,34 @@ async fn main() -> std::io::Result<()> {
     });
     init_logging(&log_path);
     tlog!("agentdispatch starting (pid={}, log={})", std::process::id(), log_path.display());
+
+    // Fail fast, before any DB/tmux work: a token is mandatory to bind a
+    // non-localhost interface (anyone who can reach the port gets a shell).
+    // Localhost binds stay open.
+    let auth_token = load_auth_token();
+    if auth_token.is_none() && !host_is_local(&args.host) {
+        eprintln!(
+"\nagentdispatch: refusing to bind a non-localhost interface ({host}) without a token.
+Anyone who can reach it would get a shell.
+
+Generate a token:
+    mkdir -p ~/.config/agentdispatch
+    openssl rand -hex 32 > ~/.config/agentdispatch/token && chmod 600 ~/.config/agentdispatch/token
+
+Distribute ~/.config/agentdispatch via dotsync (the port lives in $XDG_RUNTIME_DIR,
+so there is nothing machine-local to exclude), then open the UI once with it:
+    http(s)://{host}:{port}/?token=<the token>
+
+Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n",
+            host = args.host,
+            port = args.port,
+        );
+        std::process::exit(1);
+    }
+    match &auth_token {
+        Some(_) => tlog!("auth: token required for API / terminal / SSE access"),
+        None => tlog!("auth: no token — localhost bind ({}), open to this machine only", args.host),
+    }
 
     if args.reset {
         tlog!("Resetting: killing tmux server and deleting database");
@@ -247,27 +338,15 @@ async fn main() -> std::io::Result<()> {
 
     println!("http://localhost:{}", args.port);
 
-    // Write port to a well-known location so tools (e.g. ad-title, ad-ws-name)
-    // can find us. Test/embedded instances set AGENTDISPATCH_PORT_FILE to an
-    // isolated path so they never clobber the user's real ~/.agentdispatch/port
-    // (running the e2e suite used to overwrite it with throwaway ports, breaking
-    // ad-title with "Connection refused").
-    match std::env::var("AGENTDISPATCH_PORT_FILE") {
-        Ok(port_file) if !port_file.is_empty() => {
-            let p = std::path::PathBuf::from(port_file);
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(p, args.port.to_string());
+    // Publish our port so local tools (ad-title, ad-ws-name) can find us. It
+    // lives in $XDG_RUNTIME_DIR (tmpfs, per-user, machine-local) so it can't
+    // collide across machines or be picked up by dotsync. Tests set
+    // AGENTDISPATCH_PORT_FILE to an isolated path (see paths::port_file).
+    if let Some(p) = paths::port_file() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
-        _ => {
-            if let Ok(home) = std::env::var("HOME") {
-                let dir = std::path::PathBuf::from(home).join(".agentdispatch");
-                if std::fs::create_dir_all(&dir).is_ok() {
-                    let _ = std::fs::write(dir.join("port"), args.port.to_string());
-                }
-            }
-        }
+        let _ = std::fs::write(p, args.port.to_string());
     }
 
     let tx_data = actix_web::web::Data::new(tx);
@@ -276,22 +355,33 @@ async fn main() -> std::io::Result<()> {
     let db_data = actix_web::web::Data::new(db_arc);
     let tmux_data = actix_web::web::Data::new(use_tmux);
     HttpServer::new(move || {
+        let auth_token = auth_token.clone();
         App::new()
             // Reflect the request Origin so the browser can merge workspaces from
             // several machines into one view (federation). Simple GET/SSE and
             // WebSocket only need this header; there are no credentialed/cookie
             // requests (auth, when enabled, is a token — not cookies).
-            .wrap_fn(|req, srv| {
+            .wrap_fn(move |req, srv| {
                 let origin = req
                     .headers()
                     .get(header::ORIGIN)
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_owned());
+                // Require the shared token (when configured) on everything except
+                // the static bootstrap assets and CORS preflight.
+                let unauthorized = auth_token.as_ref().is_some_and(|tok| {
+                    req.method() != actix_web::http::Method::OPTIONS
+                        && !is_public_path(req.path())
+                        && !request_token(&req).is_some_and(|t| ct_eq(&t, tok))
+                });
                 // Short-circuit CORS preflight so cross-origin PUT/DELETE/POST
                 // (remote workspace mutations from the merged UI) are allowed.
                 let fut: Pin<Box<dyn Future<Output = Result<ServiceResponse<BoxBody>, Error>>>> =
                     if req.method() == actix_web::http::Method::OPTIONS {
                         let sr = req.into_response(HttpResponse::NoContent().finish());
+                        Box::pin(async move { Ok(sr) })
+                    } else if unauthorized {
+                        let sr = req.into_response(HttpResponse::Unauthorized().body("unauthorized"));
                         Box::pin(async move { Ok(sr) })
                     } else {
                         let call = srv.call(req);

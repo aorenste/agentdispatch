@@ -74,6 +74,43 @@ function routeOf(id) { return _idRoute[id] || { base: '', real: id }; }
 function wsApi(id, suffix) { const r = routeOf(id); return r.base + '/api/workspaces/' + r.real + (suffix || ''); }
 function tabApi(id, suffix) { const r = routeOf(id); return r.base + '/api/tabs/' + r.real + (suffix || ''); }
 function shortName(n) { return n ? String(n).split('.')[0] : n; }
+
+// -- Auth token ---------------------------------------------------------------
+// When a server requires a token, the browser carries it via a ?token=... URL on
+// first load (then stored in localStorage) and attaches it to every request:
+// Authorization header for fetch, ?token= for WebSocket/SSE (which can't set
+// request headers). Use a URL-safe token (e.g. `openssl rand -hex 32`).
+let _token = null;
+function withToken(url) {
+  if (!_token) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'token=' + _token;
+}
+if (typeof window !== 'undefined') {
+  (function initToken() {
+    try {
+      const u = new URL(location.href);
+      const t = u.searchParams.get('token');
+      if (t) {
+        localStorage.setItem('agentdispatch_token', t);
+        u.searchParams.delete('token');
+        history.replaceState(null, '', u.pathname + u.search + u.hash);
+      }
+      _token = localStorage.getItem('agentdispatch_token') || null;
+    } catch { _token = null; }
+  })();
+  (function patchFetch() {
+    const orig = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (_token && typeof input === 'string') {
+        init = init || {};
+        const h = new Headers(init.headers || {});
+        if (!h.has('Authorization')) h.set('Authorization', 'Bearer ' + _token);
+        init.headers = h;
+      }
+      return orig(input, init);
+    };
+  })();
+}
 const _tabLastOutput = {}; // tab id -> last output timestamp (ms)
 const _tabDotState = {}; // tab id -> dot state
 const _tabWasSelected = {}; // tab id -> was selected last tick
@@ -196,7 +233,7 @@ function switchTab(name) {
 /* SSE */
 function connectSSE() {
   const status = document.getElementById('conn-status');
-  evtSource = new EventSource('/api/events');
+  evtSource = new EventSource(withToken('/api/events'));
 
   evtSource.addEventListener('init', e => {
     const data = JSON.parse(e.data);
@@ -313,7 +350,7 @@ function connectPeerSSEs() {
   for (const m of _machines) {
     if (m.id === 'local' || m._sse) continue;
     try {
-      const es = new EventSource(m.base + '/api/events');
+      const es = new EventSource(withToken(m.base + '/api/events'));
       es.addEventListener('update', () => fetchWorkspaces());
       es.addEventListener('init', () => { fetchWorkspaces(); reconnectAllTerminals(); });
       es.onerror = () => { m.offline = true; };
@@ -1419,7 +1456,7 @@ function initTerminal(key, paneEl, opts) {
     }
     params.set('cols', term.cols);
     params.set('rows', term.rows);
-    const wsUrl = proto + '//' + target.host + '/api/terminal' + '?' + params.toString();
+    const wsUrl = withToken(proto + '//' + target.host + '/api/terminal' + '?' + params.toString());
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     entry.ws = ws;

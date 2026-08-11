@@ -118,8 +118,9 @@ pub async fn events(
 /// One machine in the federation. Same `peers.json` is deployed to every box;
 /// the browser loads the list, treats the origin it loaded from as "local", and
 /// fans out API/SSE/WebSocket connections to the rest directly (no server-to-
-/// server traffic). Config file: `$AGENTDISPATCH_PEERS_FILE` or
-/// `~/.agentdispatch/peers.json`, a JSON array of `{ "name", "url" }`.
+/// server traffic). Config file: `$AGENTDISPATCH_PEERS_FILE`, else
+/// `~/.config/agentdispatch/peers.json` (legacy `~/.agentdispatch/peers.json`),
+/// a JSON array of `{ "name", "url" }`.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
     pub name: String,
@@ -148,25 +149,13 @@ fn hostname() -> String {
         .unwrap_or_else(|| "local".to_string())
 }
 
-fn peers_file() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("AGENTDISPATCH_PEERS_FILE") {
-        if !p.is_empty() {
-            return Some(std::path::PathBuf::from(p));
-        }
-    }
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".agentdispatch").join("peers.json"))
-}
-
 fn load_peers() -> Vec<PeerInfo> {
-    let Some(path) = peers_file() else {
-        return Vec::new();
+    let text = match std::env::var("AGENTDISPATCH_PEERS_FILE") {
+        Ok(p) if !p.is_empty() => std::fs::read_to_string(p).ok(),
+        _ => crate::paths::read_config("peers.json"),
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<Vec<PeerInfo>>(&text).unwrap_or_default()
+    text.and_then(|t| serde_json::from_str::<Vec<PeerInfo>>(&t).ok())
+        .unwrap_or_default()
 }
 
 /// Federation directory: this machine's identity plus the configured peers.
