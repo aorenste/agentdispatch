@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-actix-web = "4"
+actix-web = { version = "4", features = ["openssl"] }
+openssl = "0.10"
+socket2 = "0.5"
 async-stream = "0.3"
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

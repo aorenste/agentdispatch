@@ -151,7 +151,9 @@ use actix_web::dev::{Service as _, ServiceRequest, ServiceResponse};
 use actix_web::http::header::{self, HeaderValue};
 use actix_web::{App, Error, HttpResponse, HttpServer};
 use clap::Parser;
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
 use std::future::Future;
+use std::net::ToSocketAddrs;
 use std::pin::Pin;
 
 /// Load the shared auth token from `$AGENTDISPATCH_TOKEN` or the config dir
@@ -206,6 +208,29 @@ fn request_token(req: &ServiceRequest) -> Option<String> {
         .find_map(|p| p.strip_prefix("token=").map(|t| t.to_string()))
 }
 
+/// Build the listening socket. Mirrors prview: SO_REUSEADDR so a restart isn't
+/// blocked by TIME_WAIT, and for IPv6 binds we clear IPV6_V6ONLY so `--host ::`
+/// serves IPv4 clients too (one dual-stack listener instead of two).
+///
+/// SO_REUSEADDR does NOT let two live servers share a port, so this still gives
+/// us the mutual exclusion that protects a running server's tmux state.
+fn make_listener(host: &str, port: u16) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Socket, Type};
+    let addr = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::other(format!("cannot resolve {host}:{port}")))?;
+    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
+    let socket = Socket::new(domain, Type::STREAM, None)?;
+    socket.set_reuse_address(true)?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
 /// A loopback bind (no token required) vs an exposed interface (token required).
 /// `0.0.0.0`, `::`, a specific IP, or a hostname all count as exposed.
 fn host_is_local(host: &str) -> bool {
@@ -223,12 +248,25 @@ struct Args {
     #[arg(short, long, default_value_t = 8915)]
     port: u16,
 
-    /// Host/interface to bind. Defaults to localhost. Set to 0.0.0.0 (or a
-    /// specific interface) to expose on the network for multi-machine
-    /// federation — do that only behind a trusted overlay/VPN, as the terminal
-    /// API is currently unauthenticated.
+    /// Host/interface to bind. Defaults to localhost. Use `::` to listen on all
+    /// interfaces (dual-stack IPv4+IPv6) for multi-machine federation. A token
+    /// is required for any non-localhost bind; pair it with --tls.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
+
+    /// Serve HTTPS instead of HTTP. Off localhost this is what keeps terminal
+    /// traffic (and the token in WebSocket/SSE query strings) off the wire in
+    /// cleartext.
+    #[arg(long)]
+    tls: bool,
+
+    /// TLS certificate (PEM). Defaults to /etc/ssl/certs/{fqdn}.crt
+    #[arg(long)]
+    cert: Option<PathBuf>,
+
+    /// TLS private key (PEM). Defaults to /etc/ssl/certs/{fqdn}.key
+    #[arg(long)]
+    key: Option<PathBuf>,
 
     /// Path to SQLite database file
     #[arg(long, default_value = "agentdispatch.db")]
@@ -297,7 +335,40 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
     // (e.g. `cargo run` while the real server is up) would kill every
     // workspace's live control-mode sessions on its way to "address already in
     // use". See e2e/second-instance.test.js.
-    let listener = match std::net::TcpListener::bind((args.host.as_str(), args.port)) {
+    // Load TLS material first — a bad cert/key should fail before we bind or
+    // touch tmux, not halfway through startup.
+    let tls_acceptor = if args.tls {
+        let fqdn = web::hostname();
+        let cert = args
+            .cert
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{fqdn}.crt")));
+        let key = args
+            .key
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{fqdn}.key")));
+        let mut builder = match SslAcceptor::mozilla_intermediate(SslMethod::tls()) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("agentdispatch: cannot init TLS: {e}");
+                std::process::exit(1);
+            }
+        };
+        if let Err(e) = builder.set_private_key_file(&key, SslFiletype::PEM) {
+            eprintln!("agentdispatch: cannot load TLS key {}: {e}", key.display());
+            std::process::exit(1);
+        }
+        if let Err(e) = builder.set_certificate_chain_file(&cert) {
+            eprintln!("agentdispatch: cannot load TLS cert {}: {e}", cert.display());
+            std::process::exit(1);
+        }
+        tlog!("tls: cert={} key={}", cert.display(), key.display());
+        Some(builder)
+    } else {
+        None
+    };
+
+    let listener = match make_listener(args.host.as_str(), args.port) {
         Ok(l) => l,
         Err(e) => {
             let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -360,7 +431,18 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
     let build_hash = web::build_hash();
     tlog!("Build hash: {}", build_hash);
 
-    println!("http://localhost:{}", args.port);
+    // Print the URL to actually open. For an exposed bind the loopback name is
+    // useless, so show the FQDN (devservers publish .fbinfra.net, which the
+    // machine cert covers).
+    {
+        let scheme = if args.tls { "https" } else { "http" };
+        let display_host = if host_is_local(&args.host) {
+            "localhost".to_string()
+        } else {
+            web::hostname().replace(".facebook.com", ".fbinfra.net")
+        };
+        println!("{scheme}://{display_host}:{}", args.port);
+    }
 
     // Publish our port so local tools (ad-title, ad-ws-name) can find us. It
     // lives in $XDG_RUNTIME_DIR (tmpfs, per-user, machine-local) so it can't
@@ -378,7 +460,7 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
     let hash_data = actix_web::web::Data::new(build_hash);
     let db_data = actix_web::web::Data::new(db_arc);
     let tmux_data = actix_web::web::Data::new(use_tmux);
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         let auth_token = auth_token.clone();
         App::new()
             // Reflect the request Origin so the browser can merge workspaces from
@@ -465,10 +547,13 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
             .service(projects::update_tab)
             .service(projects::delete_tab)
             .service(projects::client_log)
-    })
-    .listen(listener)?
-    .run()
-    .await
+    });
+
+    let server = match tls_acceptor {
+        Some(builder) => server.listen_openssl(listener, builder)?,
+        None => server.listen(listener)?,
+    };
+    server.run().await
 }
 
 #[cfg(test)]

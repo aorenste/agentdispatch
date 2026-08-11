@@ -139,8 +139,9 @@ struct PeersPayload {
     peers: Vec<PeerInfo>,
 }
 
-/// This machine's hostname, for labeling the "local" group in the UI.
-fn hostname() -> String {
+/// This machine's hostname, for labeling the "local" group in the UI and for
+/// resolving the default TLS cert/key paths.
+pub fn hostname() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .ok()
         .map(|s| s.trim().to_string())
