@@ -146,100 +146,14 @@ fn init_logging(path: &std::path::Path) {
     let _ = LOG_FILE.set(std::sync::Mutex::new(file));
 }
 
-use actix_web::body::BoxBody;
-use actix_web::dev::{Service as _, ServiceRequest, ServiceResponse};
-use actix_web::http::header::{self, HeaderValue};
-use actix_web::{App, Error, HttpResponse, HttpServer};
+use actix_web::{App, HttpServer};
 use clap::Parser;
-use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
-use std::future::Future;
-use std::net::ToSocketAddrs;
-use std::pin::Pin;
 
-/// Load the shared auth token from `$AGENTDISPATCH_TOKEN` or the config dir
-/// (`~/.config/agentdispatch/token`, legacy `~/.agentdispatch/token`). `None`
-/// means auth is disabled — the localhost default. Distribute the config dir via
-/// dotsync so every server agrees; the browser carries the same token via a
-/// `?token=` bookmark (stored in localStorage).
-fn load_auth_token() -> Option<String> {
-    if let Ok(t) = std::env::var("AGENTDISPATCH_TOKEN") {
-        let t = t.trim().to_string();
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-    let t = paths::read_config("token")?.trim().to_string();
-    (!t.is_empty()).then_some(t)
-}
-
-/// Constant-time compare (length is not secret for a random token).
-fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
-}
-
-/// Static bootstrap assets load without a token so the browser can start up and
-/// then authenticate its API/WebSocket/SSE calls; everything else is gated.
-fn is_public_path(path: &str) -> bool {
-    matches!(path, "/" | "/app.js" | "/icon.svg")
-}
-
-/// Token supplied via `Authorization: Bearer <t>` (fetch) or `?token=<t>`
-/// (WebSocket/SSE, which can't set request headers from the browser).
-fn request_token(req: &ServiceRequest) -> Option<String> {
-    if let Some(h) = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(t) = h.strip_prefix("Bearer ") {
-            return Some(t.trim().to_string());
-        }
-    }
-    req.query_string()
-        .split('&')
-        .find_map(|p| p.strip_prefix("token=").map(|t| t.to_string()))
-}
-
-/// Build the listening socket. Mirrors prview: SO_REUSEADDR so a restart isn't
-/// blocked by TIME_WAIT, and for IPv6 binds we clear IPV6_V6ONLY so `--host ::`
-/// serves IPv4 clients too (one dual-stack listener instead of two).
-///
-/// SO_REUSEADDR does NOT let two live servers share a port, so this still gives
-/// us the mutual exclusion that protects a running server's tmux state.
-fn make_listener(host: &str, port: u16) -> std::io::Result<std::net::TcpListener> {
-    use socket2::{Domain, Socket, Type};
-    let addr = (host, port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| std::io::Error::other(format!("cannot resolve {host}:{port}")))?;
-    let domain = if addr.is_ipv6() { Domain::IPV6 } else { Domain::IPV4 };
-    let socket = Socket::new(domain, Type::STREAM, None)?;
-    socket.set_reuse_address(true)?;
-    if addr.is_ipv6() {
-        socket.set_only_v6(false)?;
-    }
-    socket.bind(&addr.into())?;
-    socket.listen(1024)?;
-    Ok(socket.into())
-}
-
-/// A loopback bind (no token required) vs an exposed interface (token required).
-/// `0.0.0.0`, `::`, a specific IP, or a hostname all count as exposed.
-fn host_is_local(host: &str) -> bool {
-    host == "localhost"
-        || host
-            .parse::<std::net::IpAddr>()
-            .map(|ip| ip.is_loopback())
-            .unwrap_or(false)
-}
+/// The server listens on loopback only. There is no auth, so anything that can
+/// reach the port gets a shell — keep it that way unless authentication lands
+/// first. (Token auth, TLS and interface binding were prototyped and removed;
+/// see the commit that stripped them for the history.)
+const BIND_ADDR: &str = "127.0.0.1";
 
 #[derive(Parser)]
 #[command(name = "agentdispatch", about = "Agent dispatch server")]
@@ -247,26 +161,6 @@ struct Args {
     /// Port to listen on
     #[arg(short, long, default_value_t = 8915)]
     port: u16,
-
-    /// Host/interface to bind. Defaults to localhost. Use `::` to listen on all
-    /// interfaces (dual-stack IPv4+IPv6) for multi-machine federation. A token
-    /// is required for any non-localhost bind; pair it with --tls.
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-
-    /// Serve HTTPS instead of HTTP. Off localhost this is what keeps terminal
-    /// traffic (and the token in WebSocket/SSE query strings) off the wire in
-    /// cleartext.
-    #[arg(long)]
-    tls: bool,
-
-    /// TLS certificate (PEM). Defaults to /etc/ssl/certs/{fqdn}.crt
-    #[arg(long)]
-    cert: Option<PathBuf>,
-
-    /// TLS private key (PEM). Defaults to /etc/ssl/certs/{fqdn}.key
-    #[arg(long)]
-    key: Option<PathBuf>,
 
     /// Path to SQLite database file
     #[arg(long, default_value = "agentdispatch.db")]
@@ -300,75 +194,14 @@ async fn main() -> std::io::Result<()> {
     init_logging(&log_path);
     tlog!("agentdispatch starting (pid={}, log={})", std::process::id(), log_path.display());
 
-    // Fail fast, before any DB/tmux work: a token is mandatory to bind a
-    // non-localhost interface (anyone who can reach the port gets a shell).
-    // Localhost binds stay open.
-    let auth_token = load_auth_token();
-    if auth_token.is_none() && !host_is_local(&args.host) {
-        eprintln!(
-"\nagentdispatch: refusing to bind a non-localhost interface ({host}) without a token.
-Anyone who can reach it would get a shell.
-
-Generate a token:
-    mkdir -p ~/.config/agentdispatch
-    openssl rand -hex 32 > ~/.config/agentdispatch/token && chmod 600 ~/.config/agentdispatch/token
-
-Distribute ~/.config/agentdispatch via dotsync (the port lives in $XDG_RUNTIME_DIR,
-so there is nothing machine-local to exclude), then open the UI once with it:
-    http(s)://{host}:{port}/?token=<the token>
-
-Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n",
-            host = args.host,
-            port = args.port,
-        );
-        std::process::exit(1);
-    }
-    match &auth_token {
-        Some(_) => tlog!("auth: token required for API / terminal / SSE access"),
-        None => tlog!("auth: no token — localhost bind ({}), open to this machine only", args.host),
-    }
-
     // Bind the port FIRST — before --reset, the tmux sweep, or anything else
     // that mutates shared state. The port is our mutual-exclusion lock: if
-    // another server is already running, we must fail here having touched
+    // another server is already running we must fail here having touched
     // nothing. Doing the tmux cleanup first meant a doomed second instance
     // (e.g. `cargo run` while the real server is up) would kill every
     // workspace's live control-mode sessions on its way to "address already in
     // use". See e2e/second-instance.test.js.
-    // Load TLS material first — a bad cert/key should fail before we bind or
-    // touch tmux, not halfway through startup.
-    let tls_acceptor = if args.tls {
-        let fqdn = web::hostname();
-        let cert = args
-            .cert
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{fqdn}.crt")));
-        let key = args
-            .key
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(format!("/etc/ssl/certs/{fqdn}.key")));
-        let mut builder = match SslAcceptor::mozilla_intermediate(SslMethod::tls()) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("agentdispatch: cannot init TLS: {e}");
-                std::process::exit(1);
-            }
-        };
-        if let Err(e) = builder.set_private_key_file(&key, SslFiletype::PEM) {
-            eprintln!("agentdispatch: cannot load TLS key {}: {e}", key.display());
-            std::process::exit(1);
-        }
-        if let Err(e) = builder.set_certificate_chain_file(&cert) {
-            eprintln!("agentdispatch: cannot load TLS cert {}: {e}", cert.display());
-            std::process::exit(1);
-        }
-        tlog!("tls: cert={} key={}", cert.display(), key.display());
-        Some(builder)
-    } else {
-        None
-    };
-
-    let listener = match make_listener(args.host.as_str(), args.port) {
+    let listener = match std::net::TcpListener::bind((BIND_ADDR, args.port)) {
         Ok(l) => l,
         Err(e) => {
             let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
@@ -376,11 +209,8 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
             } else {
                 ""
             };
-            tlog!("Error: cannot bind {}:{}: {e}{hint}", args.host, args.port);
-            eprintln!(
-                "agentdispatch: cannot bind {}:{}: {e}{hint}",
-                args.host, args.port
-            );
+            tlog!("Error: cannot bind {BIND_ADDR}:{}: {e}{hint}", args.port);
+            eprintln!("agentdispatch: cannot bind {BIND_ADDR}:{}: {e}{hint}", args.port);
             std::process::exit(1);
         }
     };
@@ -431,18 +261,7 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
     let build_hash = web::build_hash();
     tlog!("Build hash: {}", build_hash);
 
-    // Print the URL to actually open. For an exposed bind the loopback name is
-    // useless, so show the FQDN (devservers publish .fbinfra.net, which the
-    // machine cert covers).
-    {
-        let scheme = if args.tls { "https" } else { "http" };
-        let display_host = if host_is_local(&args.host) {
-            "localhost".to_string()
-        } else {
-            web::hostname().replace(".facebook.com", ".fbinfra.net")
-        };
-        println!("{scheme}://{display_host}:{}", args.port);
-    }
+    println!("http://localhost:{}", args.port);
 
     // Publish our port so local tools (ad-title, ad-ws-name) can find us. It
     // lives in $XDG_RUNTIME_DIR (tmpfs, per-user, machine-local) so it can't
@@ -461,59 +280,7 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
     let db_data = actix_web::web::Data::new(db_arc);
     let tmux_data = actix_web::web::Data::new(use_tmux);
     let server = HttpServer::new(move || {
-        let auth_token = auth_token.clone();
         App::new()
-            // Reflect the request Origin so the browser can merge workspaces from
-            // several machines into one view (federation). Simple GET/SSE and
-            // WebSocket only need this header; there are no credentialed/cookie
-            // requests (auth, when enabled, is a token — not cookies).
-            .wrap_fn(move |req, srv| {
-                let origin = req
-                    .headers()
-                    .get(header::ORIGIN)
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_owned());
-                // Require the shared token (when configured) on everything except
-                // the static bootstrap assets and CORS preflight.
-                let unauthorized = auth_token.as_ref().is_some_and(|tok| {
-                    req.method() != actix_web::http::Method::OPTIONS
-                        && !is_public_path(req.path())
-                        && !request_token(&req).is_some_and(|t| ct_eq(&t, tok))
-                });
-                // Short-circuit CORS preflight so cross-origin PUT/DELETE/POST
-                // (remote workspace mutations from the merged UI) are allowed.
-                let fut: Pin<Box<dyn Future<Output = Result<ServiceResponse<BoxBody>, Error>>>> =
-                    if req.method() == actix_web::http::Method::OPTIONS {
-                        let sr = req.into_response(HttpResponse::NoContent().finish());
-                        Box::pin(async move { Ok(sr) })
-                    } else if unauthorized {
-                        let sr = req.into_response(HttpResponse::Unauthorized().body("unauthorized"));
-                        Box::pin(async move { Ok(sr) })
-                    } else {
-                        let call = srv.call(req);
-                        Box::pin(async move { Ok(call.await?.map_into_boxed_body()) })
-                    };
-                async move {
-                    let mut res = fut.await?;
-                    let h = res.headers_mut();
-                    if let Some(o) = origin {
-                        if let Ok(v) = HeaderValue::from_str(&o) {
-                            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
-                            h.insert(header::VARY, HeaderValue::from_static("Origin"));
-                        }
-                    }
-                    h.insert(
-                        header::ACCESS_CONTROL_ALLOW_METHODS,
-                        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
-                    );
-                    h.insert(
-                        header::ACCESS_CONTROL_ALLOW_HEADERS,
-                        HeaderValue::from_static("Content-Type, Authorization"),
-                    );
-                    h.insert(header::ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
-                    Ok(res)
-                }
-            })
             .app_data(tx_data.clone())
             .app_data(pane_title_tx_data.clone())
             .app_data(hash_data.clone())
@@ -523,7 +290,6 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
             .service(web::app_js)
             .service(web::index)
             .service(web::events)
-            .service(web::peers)
             .service(terminal::ws_terminal)
             .service(projects::create_workspace)
             .service(projects::list_workspaces)
@@ -549,11 +315,7 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
             .service(projects::client_log)
     });
 
-    let server = match tls_acceptor {
-        Some(builder) => server.listen_openssl(listener, builder)?,
-        None => server.listen(listener)?,
-    };
-    server.run().await
+    server.listen(listener)?.run().await
 }
 
 #[cfg(test)]

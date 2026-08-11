@@ -1,5 +1,5 @@
 use actix_web::{HttpResponse, get, web};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::broadcast;
 
 #[derive(Clone, Serialize)]
@@ -113,59 +113,6 @@ pub async fn events(
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("X-Accel-Buffering", "no"))
         .streaming(stream)
-}
-
-/// One machine in the federation. Same `peers.json` is deployed to every box;
-/// the browser loads the list, treats the origin it loaded from as "local", and
-/// fans out API/SSE/WebSocket connections to the rest directly (no server-to-
-/// server traffic). Config file: `$AGENTDISPATCH_PEERS_FILE`, else
-/// `~/.config/agentdispatch/peers.json` (legacy `~/.agentdispatch/peers.json`),
-/// a JSON array of `{ "name", "url" }`.
-#[derive(Serialize, Deserialize, Clone)]
-pub struct PeerInfo {
-    pub name: String,
-    pub url: String,
-}
-
-#[derive(Serialize)]
-struct SelfInfo {
-    name: String,
-}
-
-#[derive(Serialize)]
-struct PeersPayload {
-    #[serde(rename = "self")]
-    self_: SelfInfo,
-    peers: Vec<PeerInfo>,
-}
-
-/// This machine's hostname, for labeling the "local" group in the UI and for
-/// resolving the default TLS cert/key paths.
-pub fn hostname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "local".to_string())
-}
-
-fn load_peers() -> Vec<PeerInfo> {
-    let text = match std::env::var("AGENTDISPATCH_PEERS_FILE") {
-        Ok(p) if !p.is_empty() => std::fs::read_to_string(p).ok(),
-        _ => crate::paths::read_config("peers.json"),
-    };
-    text.and_then(|t| serde_json::from_str::<Vec<PeerInfo>>(&t).ok())
-        .unwrap_or_default()
-}
-
-/// Federation directory: this machine's identity plus the configured peers.
-#[get("/api/peers")]
-pub async fn peers() -> HttpResponse {
-    HttpResponse::Ok().json(PeersPayload {
-        self_: SelfInfo { name: hostname() },
-        peers: load_peers(),
-    })
 }
 
 #[cfg(test)]

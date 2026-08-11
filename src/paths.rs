@@ -1,14 +1,13 @@
 //! XDG Base Directory resolution for agentdispatch's on-disk files.
 //!
-//! - **config** (`peers.json`, `token`) → `$XDG_CONFIG_HOME/agentdispatch`
-//!   (default `~/.config/agentdispatch`). This is the only thing you dotsync
-//!   across machines.
-//! - **runtime** (`port`) → `$XDG_RUNTIME_DIR/agentdispatch` (tmpfs, per-user,
-//!   machine-local, cleared on reboot). Never synced, can't collide across
-//!   machines — no dotsync exclude needed.
+//! Only runtime state lives here today: the `port` file goes in
+//! `$XDG_RUNTIME_DIR/agentdispatch` (tmpfs, per-user, machine-local, cleared on
+//! reboot). That keeps it out of `$HOME`, so it can neither collide across
+//! machines nor be swept up by dotsync — no exclude rule needed.
 //!
-//! The legacy flat `~/.agentdispatch/<name>` layout is still read as a fallback
-//! so existing setups keep working during the transition.
+//! There is no config dir at present: the files that would have lived in
+//! `$XDG_CONFIG_HOME/agentdispatch` (`token`, `peers.json`) belonged to the
+//! network-exposure work that was removed. Add it back alongside that.
 
 use std::path::PathBuf;
 
@@ -22,27 +21,6 @@ fn home() -> Option<PathBuf> {
 
 fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var).map(PathBuf::from).and_then(non_empty)
-}
-
-/// `$XDG_CONFIG_HOME/agentdispatch` (default `~/.config/agentdispatch`).
-pub fn config_dir() -> Option<PathBuf> {
-    env_dir("XDG_CONFIG_HOME")
-        .or_else(|| home().map(|h| h.join(".config")))
-        .map(|d| d.join("agentdispatch"))
-}
-
-/// Legacy pre-XDG layout (`~/.agentdispatch`), read-only fallback.
-fn legacy_dir() -> Option<PathBuf> {
-    home().map(|h| h.join(".agentdispatch"))
-}
-
-/// Read a config file (`token`, `peers.json`) from the XDG config dir, falling
-/// back to the legacy `~/.agentdispatch/<name>`. Returns its contents if found.
-pub fn read_config(name: &str) -> Option<String> {
-    [config_dir(), legacy_dir()]
-        .into_iter()
-        .flatten()
-        .find_map(|dir| std::fs::read_to_string(dir.join(name)).ok())
 }
 
 /// Where the running server publishes its port for local tools (ad-title,
