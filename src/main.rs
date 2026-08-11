@@ -290,6 +290,30 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
         None => tlog!("auth: no token — localhost bind ({}), open to this machine only", args.host),
     }
 
+    // Bind the port FIRST — before --reset, the tmux sweep, or anything else
+    // that mutates shared state. The port is our mutual-exclusion lock: if
+    // another server is already running, we must fail here having touched
+    // nothing. Doing the tmux cleanup first meant a doomed second instance
+    // (e.g. `cargo run` while the real server is up) would kill every
+    // workspace's live control-mode sessions on its way to "address already in
+    // use". See e2e/second-instance.test.js.
+    let listener = match std::net::TcpListener::bind((args.host.as_str(), args.port)) {
+        Ok(l) => l,
+        Err(e) => {
+            let hint = if e.kind() == std::io::ErrorKind::AddrInUse {
+                " (another agentdispatch is probably already running — nothing was changed)"
+            } else {
+                ""
+            };
+            tlog!("Error: cannot bind {}:{}: {e}{hint}", args.host, args.port);
+            eprintln!(
+                "agentdispatch: cannot bind {}:{}: {e}{hint}",
+                args.host, args.port
+            );
+            std::process::exit(1);
+        }
+    };
+
     if args.reset {
         tlog!("Resetting: killing tmux server and deleting database");
         tmux::kill_server();
@@ -442,7 +466,7 @@ Or set AGENTDISPATCH_TOKEN in the environment. Localhost binds need no token.\n"
             .service(projects::delete_tab)
             .service(projects::client_log)
     })
-    .bind((args.host.as_str(), args.port))?
+    .listen(listener)?
     .run()
     .await
 }
