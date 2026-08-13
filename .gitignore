@@ -8,3 +8,4 @@ playwright-report/
 default.profraw
 agentdispatch.log
 static/target
+__pycache__/

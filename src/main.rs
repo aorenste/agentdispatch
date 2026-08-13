@@ -56,6 +56,34 @@ struct AsyncLineWriter {
     tx: std::sync::mpsc::SyncSender<Vec<u8>>,
 }
 
+/// A small ownership-checked runtime file. On clean shutdown it removes the
+/// file only if no newer process has replaced its contents.
+struct PublishedRuntimeFile {
+    path: std::path::PathBuf,
+    contents: String,
+}
+
+impl PublishedRuntimeFile {
+    fn publish(path: std::path::PathBuf, contents: impl Into<String>) -> std::io::Result<Self> {
+        let contents = contents.into();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, &contents)?;
+        Ok(Self { path, contents })
+    }
+}
+
+impl Drop for PublishedRuntimeFile {
+    fn drop(&mut self) {
+        if std::fs::read_to_string(&self.path)
+            .is_ok_and(|current| current == self.contents)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 impl AsyncLineWriter {
     /// Spawn the writer thread. `cap` bounds how many lines may queue while the
     /// sink is stalled before further lines are dropped.
@@ -146,14 +174,48 @@ fn init_logging(path: &std::path::Path) {
     let _ = LOG_FILE.set(std::sync::Mutex::new(file));
 }
 
-use actix_web::{App, HttpServer};
+use actix_web::body::BoxBody;
+use actix_web::dev::{Service as _, ServiceResponse};
+use actix_web::http::header::{self, HeaderValue};
+use actix_web::{App, Error, HttpResponse, HttpServer};
 use clap::Parser;
+use std::future::Future;
+use std::pin::Pin;
 
 /// The server listens on loopback only. There is no auth, so anything that can
 /// reach the port gets a shell — keep it that way unless authentication lands
 /// first. (Token auth, TLS and interface binding were prototyped and removed;
 /// see the commit that stripped them for the history.)
 const BIND_ADDR: &str = "127.0.0.1";
+
+/// SSH federation exposes each remote server through a loopback port on the
+/// laptop. Accepting only literal loopback authorities prevents DNS rebinding:
+/// an attacker-controlled hostname that resolves to 127.0.0.1 is still denied.
+fn is_loopback_authority(value: &str) -> bool {
+    let Ok(authority) = value.parse::<actix_web::http::uri::Authority>() else {
+        return false;
+    };
+    let host = authority.host();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.trim_matches(['[', ']'])
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
+fn is_loopback_origin(value: &str) -> bool {
+    let Ok(uri) = value.parse::<actix_web::http::Uri>() else {
+        return false;
+    };
+    if !matches!(uri.scheme_str(), Some("http" | "https")) {
+        return false;
+    }
+    uri.authority()
+        .is_some_and(|authority| is_loopback_authority(authority.as_str()))
+        && uri.path() == "/"
+        && uri.query().is_none()
+}
 
 #[derive(Parser)]
 #[command(name = "agentdispatch", about = "Agent dispatch server")]
@@ -163,7 +225,7 @@ struct Args {
     port: u16,
 
     /// Path to SQLite database file
-    #[arg(long, default_value = "agentdispatch.db")]
+    #[arg(long, default_value_os_t = paths::database_file())]
     db: PathBuf,
 
     /// Path to log file (stderr is mirrored here). Defaults to the db path
@@ -191,6 +253,19 @@ async fn main() -> std::io::Result<()> {
         p.set_extension("log");
         p
     });
+    if let Some(parent) = args
+        .db
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = log_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     init_logging(&log_path);
     tlog!("agentdispatch starting (pid={}, log={})", std::process::id(), log_path.display());
 
@@ -263,16 +338,28 @@ async fn main() -> std::io::Result<()> {
 
     println!("http://localhost:{}", args.port);
 
-    // Publish our port so local tools (ad-title, ad-ws-name) can find us. It
-    // lives in $XDG_RUNTIME_DIR (tmpfs, per-user, machine-local) so it can't
-    // collide across machines or be picked up by dotsync. Tests set
-    // AGENTDISPATCH_PORT_FILE to an isolated path (see paths::port_file).
-    if let Some(p) = paths::port_file() {
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    // Publish runtime metadata so local tools can find this server. These live
+    // in $XDG_RUNTIME_DIR (tmpfs, per-user, machine-local), with an XDG state
+    // fallback on systems without a runtime directory. The guards remove only
+    // their own values on clean shutdown, never a newer process's replacement.
+    let _published_port = paths::port_file().and_then(|path| {
+        match PublishedRuntimeFile::publish(path.clone(), args.port.to_string()) {
+            Ok(published) => Some(published),
+            Err(error) => {
+                tlog!("Warning: cannot publish port to {}: {error}", path.display());
+                None
+            }
         }
-        let _ = std::fs::write(p, args.port.to_string());
-    }
+    });
+    let _published_pid = paths::pid_file().and_then(|path| {
+        match PublishedRuntimeFile::publish(path.clone(), std::process::id().to_string()) {
+            Ok(published) => Some(published),
+            Err(error) => {
+                tlog!("Warning: cannot publish PID to {}: {error}", path.display());
+                None
+            }
+        }
+    });
 
     let tx_data = actix_web::web::Data::new(tx);
     let pane_title_tx_data = actix_web::web::Data::new(pane_title_tx);
@@ -281,6 +368,62 @@ async fn main() -> std::io::Result<()> {
     let tmux_data = actix_web::web::Data::new(use_tmux);
     let server = HttpServer::new(move || {
         App::new()
+            // A browser loaded through one laptop SSH forward needs CORS to
+            // reach the other forwarded ports. Reflect only origins that are
+            // themselves literal loopback URLs. The same check covers terminal
+            // WebSocket handshakes, while Host validation blocks DNS rebinding.
+            .wrap_fn(|req, srv| {
+                let host_allowed = req
+                    .headers()
+                    .get(header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(is_loopback_authority);
+                let origin = req
+                    .headers()
+                    .get(header::ORIGIN)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned);
+                let origin_allowed = origin.as_deref().is_none_or(is_loopback_origin);
+                let is_preflight = req.method() == actix_web::http::Method::OPTIONS;
+
+                let fut: Pin<Box<dyn Future<Output = Result<ServiceResponse<BoxBody>, Error>>>> =
+                    if !host_allowed || !origin_allowed {
+                        let response = req.into_response(HttpResponse::Forbidden().finish());
+                        Box::pin(async move { Ok(response) })
+                    } else if is_preflight {
+                        let response = req.into_response(HttpResponse::NoContent().finish());
+                        Box::pin(async move { Ok(response) })
+                    } else {
+                        let call = srv.call(req);
+                        Box::pin(async move { Ok(call.await?.map_into_boxed_body()) })
+                    };
+
+                async move {
+                    let mut response = fut.await?;
+                    if origin_allowed {
+                        if let Some(origin) = origin {
+                            if let Ok(value) = HeaderValue::from_str(&origin) {
+                                let headers = response.headers_mut();
+                                headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+                                headers.insert(header::VARY, HeaderValue::from_static("Origin"));
+                                headers.insert(
+                                    header::ACCESS_CONTROL_ALLOW_METHODS,
+                                    HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+                                );
+                                headers.insert(
+                                    header::ACCESS_CONTROL_ALLOW_HEADERS,
+                                    HeaderValue::from_static("Content-Type"),
+                                );
+                                headers.insert(
+                                    header::ACCESS_CONTROL_MAX_AGE,
+                                    HeaderValue::from_static("600"),
+                                );
+                            }
+                        }
+                    }
+                    Ok(response)
+                }
+            })
             .app_data(tx_data.clone())
             .app_data(pane_title_tx_data.clone())
             .app_data(hash_data.clone())
@@ -325,6 +468,56 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
+
+    fn temporary_runtime_file(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "agentdispatch-{name}-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ))
+    }
+
+    #[test]
+    fn test_default_database_uses_xdg_data_location() {
+        let args = Args::try_parse_from(["agentdispatch"]).unwrap();
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|path| !path.is_empty())
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".local/share"))
+            });
+        let expected = data_home
+            .map(|home| home.join("agentdispatch/agentdispatch.db"))
+            .unwrap_or_else(|| PathBuf::from("agentdispatch.db"));
+
+        assert_eq!(args.db, expected);
+    }
+
+    #[test]
+    fn test_published_runtime_file_is_removed_on_clean_shutdown() {
+        let path = temporary_runtime_file("pid");
+        let published = PublishedRuntimeFile::publish(path.clone(), "1234").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "1234");
+
+        drop(published);
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_old_process_does_not_remove_newer_runtime_file() {
+        let path = temporary_runtime_file("replaced-pid");
+        let published = PublishedRuntimeFile::publish(path.clone(), "1234").unwrap();
+        std::fs::write(&path, "5678").unwrap();
+
+        drop(published);
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "5678");
+        std::fs::remove_file(path).unwrap();
+    }
 
     /// A sink whose `write` blocks until explicitly released — models a terminal
     /// whose pty output buffer is full and is not being drained (exactly the

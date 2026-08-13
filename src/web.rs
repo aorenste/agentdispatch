@@ -41,6 +41,16 @@ pub type BuildHash = web::Data<String>;
 struct InitPayload {
     build_hash: String,
     home: String,
+    machine_name: String,
+}
+
+fn machine_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok().filter(|name| !name.is_empty()))
+        .unwrap_or_else(|| "local".to_owned())
 }
 
 #[get("/icon.svg")]
@@ -72,6 +82,7 @@ pub async fn events(
     let init = InitPayload {
         build_hash: hash.as_ref().clone(),
         home: std::env::var("HOME").unwrap_or_default(),
+        machine_name: machine_name(),
     };
     let init_data = serde_json::to_string(&init).unwrap();
     let mut rx = tx.subscribe();
@@ -212,6 +223,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_python_tool_tests() {
+        let output = std::process::Command::new("python3")
+            .args(["-m", "unittest", "tools/test_ad_ssh.py"])
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("python3 is required to test tools/ad-ssh.py");
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            panic!("Python tool tests failed:\n{stdout}\n{stderr}");
+        }
+    }
+
     macro_rules! e2e_file_test {
         ($name:ident, $file:expr) => {
             #[test]
@@ -242,6 +268,8 @@ mod tests {
     e2e_file_test!(test_e2e_tmux_isolation, "tmux-isolation");
     e2e_file_test!(test_e2e_rename_by_pane, "rename-by-pane");
     e2e_file_test!(test_e2e_sidebar_fold, "sidebar-fold");
+    e2e_file_test!(test_e2e_federation, "federation");
+    e2e_file_test!(test_e2e_security_boundary, "security-boundary");
 
     fn run_playwright(args: &[&str]) {
 

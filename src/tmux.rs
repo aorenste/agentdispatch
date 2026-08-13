@@ -35,6 +35,44 @@ fn socket_dir() -> String {
     format!("/tmp/tmux-{uid}")
 }
 
+fn prepare_socket_dir(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    }
+
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a directory", path.display()),
+        ));
+    }
+    let uid = unsafe { nix::libc::getuid() };
+    if metadata.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, expected {uid}",
+                path.display(),
+                metadata.uid()
+            ),
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
 /// All existing per-workspace socket names (`{prefix}-w*`) found on disk.
 fn list_ws_sockets() -> Vec<String> {
     let prefix = format!("{}-w", socket_name());
@@ -797,6 +835,12 @@ pub fn check_installed() -> bool {
         .output()
         .is_ok_and(|o| o.status.success());
     if ok {
+        let dir = socket_dir();
+        if let Err(error) = prepare_socket_dir(std::path::Path::new(&dir)) {
+            tlog!("Error: cannot prepare tmux socket directory {dir}: {error}");
+            eprintln!("agentdispatch: cannot prepare tmux socket directory {dir}: {error}");
+            return false;
+        }
         clean_stale_socket();
     }
     ok
@@ -821,11 +865,15 @@ pub fn spawn_socket_watcher() {
         return;
     };
 
-    // The parent dir (/tmp/tmux-<uid>) may not exist yet at startup if
-    // no tmux command has run. Create it so inotify has something to
-    // watch; tmux itself uses mode 0700 on this directory.
-    if !parent.exists() {
-        let _ = std::fs::create_dir_all(&parent);
+    // Tmux refuses socket directories that are accessible by other users.
+    // Prepare this before inotify watches it; on a fresh machine the watcher
+    // may be the first process to create /tmp/tmux-<uid>.
+    if let Err(error) = prepare_socket_dir(&parent) {
+        tlog!(
+            "socket watcher: cannot prepare {}: {error} — giving up",
+            parent.display()
+        );
+        return;
     }
 
     std::thread::spawn(move || {
@@ -1127,6 +1175,23 @@ mod tests {
         let ns = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let pid = std::process::id();
         format!("/tmp/agentdispatch-probe-{tag}-{pid}-{ns}")
+    }
+
+    #[test]
+    fn test_prepare_socket_dir_repairs_unsafe_permissions() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let path = std::path::PathBuf::from(scratch_path("socket-dir-mode"));
+        std::fs::create_dir(&path).expect("create socket dir");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("make permissions unsafe");
+
+        prepare_socket_dir(&path).expect("repair socket dir");
+
+        let metadata = std::fs::metadata(&path).expect("stat socket dir");
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { nix::libc::getuid() });
+        std::fs::remove_dir(&path).expect("remove socket dir");
     }
 
     #[test]

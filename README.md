@@ -19,11 +19,73 @@ cargo run
 
 Add a project via the web UI, click Launch to create a workspace.
 
+## Multiple machines over SSH
+
+`tools/ad-ssh.py` manages the SSH sessions from the laptop. It starts with these
+defaults:
+
+- `http://localhost:8915` → `devgpu035.nha1.facebook.com:8915`
+- `http://localhost:8916` → `devvm23503.frc0.facebook.com:8915`
+
+Run it in a laptop terminal:
+
+```sh
+tools/ad-ssh.py
+```
+
+The TUI supports **A**dd, **S**top, **R**estart, **L**ist/refresh, and **Q**uit. While a
+connection is being established, its terminal becomes a full-screen modal and
+all keystrokes go to SSH authentication. **Q** or Ctrl-C gracefully interrupts
+the managed remote AgentDispatch processes before closing their transports.
+Added connections are saved as startup defaults in
+`~/.config/agentdispatch/connections.json`. Connection logs go under
+`~/.local/state/agentdispatch/ssh/`. Startup connections authenticate one at a
+time, so concurrent SSH sessions do not compete for the YubiKey.
+
+Each connection runs the equivalent of:
+
+```sh
+x2ssh -et devgpu035.nha1.facebook.com \
+  -t 8915:8915 \
+  -c 'if [ ! -x "$HOME/bin/agentdispatch" ]; then
+        echo "__AGENTDISPATCH_EXIT_STATUS__=127" >&2
+        echo "AgentDispatch is not installed at $HOME/bin/agentdispatch" >&2
+        exit 127
+      fi
+      data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+      mkdir -p "$data_home/agentdispatch"
+      "$HOME/bin/agentdispatch" \
+        --db "$data_home/agentdispatch/agentdispatch.db"
+      status=$?
+      echo "__AGENTDISPATCH_EXIT_STATUS__=$status" >&2
+      exit "$status"'
+```
+
+`x2ssh -et` reconnects after laptop network drops. Override the command prefix
+with `--ssh-command` or `AGENTDISPATCH_SSH_COMMAND` if needed. Stop any manual
+forwards already using 8915/8916, and stop separately launched remote
+AgentDispatch processes before letting the TUI own them.
+
+Each running AgentDispatch server publishes `port` and `pid` under
+`$XDG_RUNTIME_DIR/agentdispatch/`, falling back to
+`~/.local/state/agentdispatch/` when no runtime directory is available.
+Its SQLite database is persistent data under
+`$XDG_DATA_HOME/agentdispatch/agentdispatch.db`, defaulting to
+`~/.local/share/agentdispatch/agentdispatch.db`.
+
+Open `http://localhost:8915`, click **+ Machine**, and enter a display name plus
+laptop port `8916`. The peer list is stored in that browser origin's
+`localStorage` because the forwarded ports are laptop-specific.
+
+Both the HTTP `Host` and browser `Origin` must be literal loopback addresses.
+The servers remain inaccessible from the network; SSH is the authentication and
+encryption boundary.
+
 ## Options
 
 ```
 --port <PORT>     Port to listen on (default: 8915)
---db <PATH>       SQLite database path (default: agentdispatch.db)
+--db <PATH>       SQLite database path (default: $XDG_DATA_HOME/agentdispatch/agentdispatch.db)
 --no-tmux         Disable tmux (direct shell, no session persistence)
 --reset           Kill tmux server and delete database before starting
 ```

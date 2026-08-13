@@ -67,6 +67,123 @@ let _categories = [];
 let _dialogCallback = null;
 let _dialogFields = [];
 
+// Multi-machine federation is intentionally browser-local: these URLs are the
+// laptop ends of SSH forwards, so syncing them to the devservers would be
+// incorrect. Remote objects receive stable negative client IDs because every
+// machine's SQLite database starts its own positive ID sequence.
+const PEERS_STORAGE_KEY = 'agentdispatch-peers';
+const COLLAPSED_MACHINES_STORAGE_KEY = 'agentdispatch-collapsed-machines';
+let _machines = [{id: 'local', name: 'local', base: '', home: '', status: 'online'}];
+let _collapsedMachineKeys = new Set();
+const _idRoute = {}; // client ID -> {base, real, machine}
+const _clientIdByRemoteObject = {};
+let _nextRemoteClientId = -1;
+let _workspaceFetchGeneration = 0;
+
+function isLoopbackHostname(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(h);
+}
+
+function normalizePeer(raw) {
+  try {
+    const url = new URL(raw.url);
+    if (!['http:', 'https:'].includes(url.protocol) || !isLoopbackHostname(url.hostname)) return null;
+    return {name: String(raw.name || url.host), url: url.origin};
+  } catch { return null; }
+}
+
+function peerFromPort(name, rawPort) {
+  const text = String(rawPort == null ? '' : rawPort).trim();
+  if (!/^\d+$/.test(text)) return null;
+  const port = Number(text);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return normalizePeer({name, url: `http://localhost:${port}`});
+}
+
+function loadMachinesFromStorage() {
+  const local = _machines.find(m => m.id === 'local') || {id: 'local', name: 'local', base: '', home: '', status: 'online'};
+  const machines = [local];
+  const seen = new Set(typeof location !== 'undefined' ? [location.origin] : []);
+  try {
+    const peers = JSON.parse(localStorage.getItem(PEERS_STORAGE_KEY) || '[]');
+    for (const raw of Array.isArray(peers) ? peers : []) {
+      const peer = normalizePeer(raw);
+      if (!peer || seen.has(peer.url)) continue;
+      seen.add(peer.url);
+      machines.push({
+        id: 'peer-' + machines.length,
+        name: peer.name,
+        base: peer.url,
+        home: '',
+        status: 'connecting',
+        _sse: null,
+      });
+    }
+  } catch {}
+  _machines = machines;
+  try {
+    const collapsed = JSON.parse(localStorage.getItem(COLLAPSED_MACHINES_STORAGE_KEY) || '[]');
+    _collapsedMachineKeys = new Set(Array.isArray(collapsed) ? collapsed.map(String) : []);
+  } catch {
+    _collapsedMachineKeys = new Set();
+  }
+}
+
+function machineForId(id) {
+  return _machines.find(m => m.id === id);
+}
+
+function machineCollapseKey(machine) {
+  return machine.base || '__local__';
+}
+
+function toggleMachineCollapsed(machineId) {
+  const machine = machineForId(machineId);
+  if (!machine) return;
+  const key = machineCollapseKey(machine);
+  if (_collapsedMachineKeys.has(key)) _collapsedMachineKeys.delete(key);
+  else _collapsedMachineKeys.add(key);
+  try {
+    localStorage.setItem(
+      COLLAPSED_MACHINES_STORAGE_KEY,
+      JSON.stringify([..._collapsedMachineKeys]),
+    );
+  } catch {}
+  renderWorkspaces();
+}
+
+function clientIdFor(machine, kind, realId) {
+  if (!machine.base) return realId;
+  const key = machine.base + '\n' + kind + '\n' + realId;
+  if (_clientIdByRemoteObject[key] == null) {
+    _clientIdByRemoteObject[key] = _nextRemoteClientId--;
+  }
+  const clientId = _clientIdByRemoteObject[key];
+  _idRoute[clientId] = {base: machine.base, real: realId, machine};
+  return clientId;
+}
+
+function routeOf(id) {
+  return _idRoute[id] || {base: '', real: id, machine: _machines[0]};
+}
+
+function wsApi(id, suffix) {
+  const route = routeOf(id);
+  return route.base + '/api/workspaces/' + route.real + (suffix || '');
+}
+
+function tabApi(id, suffix) {
+  const route = routeOf(id);
+  return route.base + '/api/tabs/' + route.real + (suffix || '');
+}
+
+function categoryApi(id, suffix) {
+  const route = routeOf(id);
+  return route.base + '/api/categories/' + route.real + (suffix || '');
+}
+
 const _wsNotesEntries = {}; // ws id -> { container, textarea, saveTimer, lastSavedValue }
 const NOTES_COLLAPSED_KEY = 'ws-notes-collapsed';
 const NOTES_WIDTH_KEY = 'ws-notes-width';
@@ -190,6 +307,8 @@ function connectSSE() {
     }
     buildHash = data.build_hash;
     if (typeof data.home === 'string') _home = data.home;
+    _machines[0].home = _home;
+    if (data.machine_name) _machines[0].name = String(data.machine_name).split('.')[0];
     document.getElementById('conn-overlay').classList.remove('active');
     status.textContent = 'Connected';
     status.className = 'connected';
@@ -229,13 +348,81 @@ function escAttr(s) {
 }
 
 async function fetchWorkspaces() {
-  try {
-    const res = await fetch('/api/workspaces');
-    const data = await res.json();
-    _workspaces = data.workspaces || [];
-    _categories = data.categories || [];
-    renderWorkspaces();
-  } catch {}
+  const generation = ++_workspaceFetchGeneration;
+  const results = await Promise.all(_machines.map(async machine => {
+    try {
+      const res = await fetch(machine.base + '/api/workspaces');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      machine.status = 'online';
+      return {machine, data};
+    } catch (error) {
+      machine.status = 'offline';
+      return {machine, data: null};
+    }
+  }));
+  if (generation !== _workspaceFetchGeneration) return;
+
+  const merged = [];
+  const mergedCategories = [];
+  for (const {machine, data} of results) {
+    if (!data) continue;
+    const categoryIds = new Map();
+    for (const sourceCat of (data.categories || [])) {
+      const cat = {...sourceCat};
+      cat._machineId = machine.id;
+      cat._machine = machine;
+      cat._realId = sourceCat.id;
+      cat.id = clientIdFor(machine, 'category', sourceCat.id);
+      categoryIds.set(sourceCat.id, cat.id);
+      mergedCategories.push(cat);
+    }
+    for (const sourceWs of (data.workspaces || [])) {
+      const ws = {...sourceWs};
+      ws._machineId = machine.id;
+      ws._machine = machine;
+      ws._realId = sourceWs.id;
+      ws.id = clientIdFor(machine, 'workspace', sourceWs.id);
+      ws.category_id = sourceWs.category_id == null
+        ? null
+        : (categoryIds.get(sourceWs.category_id) ?? null);
+      ws.tabs = (sourceWs.tabs || []).map(sourceTab => ({
+        ...sourceTab,
+        _realId: sourceTab.id,
+        _machineId: machine.id,
+        id: clientIdFor(machine, 'tab', sourceTab.id),
+      }));
+      syncNotesFromServer(ws);
+      merged.push(ws);
+    }
+  }
+  _workspaces = merged;
+  _categories = mergedCategories;
+  renderWorkspaces();
+  connectPeerSSEs();
+}
+
+function connectPeerSSEs() {
+  for (const machine of _machines) {
+    if (!machine.base || machine._sse) continue;
+    const events = new EventSource(machine.base + '/api/events');
+    machine._sse = events;
+    events.addEventListener('init', event => {
+      try {
+        const data = JSON.parse(event.data);
+        machine.home = data.home || '';
+      } catch {}
+      machine.status = 'online';
+      fetchWorkspaces();
+      reconnectAllTerminals();
+    });
+    events.addEventListener('update', () => fetchWorkspaces());
+    events.onopen = () => { machine.status = 'online'; };
+    events.onerror = () => {
+      machine.status = 'offline';
+      renderWorkspaces();
+    };
+  }
 }
 
 
@@ -335,7 +522,7 @@ function notifyIdle(name) {
 }
 
 function saveWorkspaceOrder(categoryId) {
-  const inCat = _workspaces.filter(w => (w.category_id || null) === categoryId);
+  const inCat = _workspaces.filter(w => !routeOf(w.id).base && (w.category_id || null) === categoryId);
   fetch('/api/workspaces/reorder', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -347,15 +534,16 @@ function saveCategoryOrder() {
   fetch('/api/categories/reorder', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ ids: _categories.map(c => c.id) }),
+    body: JSON.stringify({ ids: _categories.filter(c => !routeOf(c.id).base).map(c => routeOf(c.id).real) }),
   });
 }
 
-async function addCategory() {
+async function addCategory(machineId) {
+  const machine = machineForId(machineId || 'local') || _machines[0];
   showForm('New Category', [{id: 'cat-name', placeholder: 'Category name'}], async (values) => {
     const name = values['cat-name'];
     if (!name) return 'Name is required.';
-    await fetch('/api/categories', {
+    await fetch(machine.base + '/api/categories', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name}),
@@ -370,7 +558,7 @@ async function renameCategory(id) {
   showForm('Rename Category', [{id: 'cat-name', placeholder: 'Category name', value: cat.name}], async (values) => {
     const name = values['cat-name'];
     if (!name) return 'Name is required.';
-    await fetch(`/api/categories/${id}`, {
+    await fetch(categoryApi(id), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name}),
@@ -383,7 +571,7 @@ async function deleteCategory(id) {
   const cat = _categories.find(c => c.id === id);
   if (!cat) return;
   showConfirm(`Delete category "${cat.name}"? Workspaces will move to Uncategorized.`, async () => {
-    await fetch(`/api/categories/${id}`, {method: 'DELETE'});
+    await fetch(categoryApi(id), {method: 'DELETE'});
     fetchWorkspaces();
   });
 }
@@ -392,7 +580,7 @@ function toggleCategory(id) {
   const cat = _categories.find(c => c.id === id);
   if (!cat) return;
   cat.collapsed = !cat.collapsed;
-  fetch(`/api/categories/${id}/toggle`, {
+  fetch(categoryApi(id, '/toggle'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({collapsed: cat.collapsed}),
@@ -401,32 +589,80 @@ function toggleCategory(id) {
 }
 
 function moveWorkspaceToCategory(wsId, categoryId) {
+  const wsRoute = routeOf(wsId);
+  const categoryRoute = categoryId == null ? null : routeOf(categoryId);
+  if (categoryRoute && categoryRoute.machine.id !== wsRoute.machine.id) return;
   const ws = _workspaces.find(w => w.id === wsId);
   if (ws) ws.category_id = categoryId;
-  fetch(`/api/workspaces/${wsId}/category`, {
+  fetch(wsApi(wsId, '/category'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({category_id: categoryId}),
+    body: JSON.stringify({category_id: categoryRoute ? categoryRoute.real : null}),
   });
 }
 
-async function newWorkspace(categoryId) {
-  const body = categoryId ? {category_id: categoryId} : {};
-  const res = await fetch('/api/workspaces', {
+async function newWorkspace(categoryId, machineId) {
+  const categoryRoute = categoryId == null ? null : routeOf(categoryId);
+  const machine = categoryRoute
+    ? categoryRoute.machine
+    : (machineForId(machineId || 'local') || _machines[0]);
+  const body = categoryRoute ? {category_id: categoryRoute.real} : {};
+  const res = await fetch(machine.base + '/api/workspaces', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(body),
   });
   const data = await res.json();
   if (data.error) { showDialog(data.error); return; }
-  _selectedWsId = data.id;
+  _selectedWsId = clientIdFor(machine, 'workspace', data.id);
   switchTab('workspaces');
   fetchWorkspaces();
 }
 
+function addMachine() {
+  showForm('Add tunneled machine', [
+    {id: 'machine-name', placeholder: 'Name (for example devvm23503)'},
+    {id: 'machine-port', placeholder: 'Laptop port (for example 8916)'},
+  ], async values => {
+    const peer = peerFromPort(values['machine-name'], values['machine-port']);
+    if (!peer) return 'Use a port number from 1 to 65535.';
+    const peerPort = new URL(peer.url).port || '80';
+    const localPort = location.port || (location.protocol === 'https:' ? '443' : '80');
+    if (peerPort === localPort) return 'That port is this machine.';
+    let peers = [];
+    try { peers = JSON.parse(localStorage.getItem(PEERS_STORAGE_KEY) || '[]'); } catch {}
+    peers = (Array.isArray(peers) ? peers : []).map(normalizePeer).filter(Boolean);
+    if (peers.some(existing => (new URL(existing.url).port || '80') === peerPort)) {
+      return 'That laptop port is already configured.';
+    }
+    peers.push(peer);
+    localStorage.setItem(PEERS_STORAGE_KEY, JSON.stringify(peers));
+    location.reload();
+    return false;
+  });
+}
+
+function removeMachine(machineId) {
+  const machine = machineForId(machineId);
+  if (!machine || !machine.base) return;
+  showConfirm(`Remove machine "${machine.name}" from this browser?`, () => {
+    let peers = [];
+    try { peers = JSON.parse(localStorage.getItem(PEERS_STORAGE_KEY) || '[]'); } catch {}
+    peers = (Array.isArray(peers) ? peers : []).map(normalizePeer).filter(peer => peer && peer.url !== machine.base);
+    localStorage.setItem(PEERS_STORAGE_KEY, JSON.stringify(peers));
+    _collapsedMachineKeys.delete(machineCollapseKey(machine));
+    localStorage.setItem(
+      COLLAPSED_MACHINES_STORAGE_KEY,
+      JSON.stringify([..._collapsedMachineKeys]),
+    );
+    location.reload();
+  });
+}
+
 function renderWsItem(ws) {
+  const isRemote = !!routeOf(ws.id).base;
   return `<div class="ws-sidebar-item ${ws.id === _selectedWsId ? 'active' : ''}"
-       draggable="true" data-ws-id="${ws.id}" data-cat-id="${ws.category_id || ''}"
+       draggable="${!isRemote}" data-ws-id="${ws.id}" data-cat-id="${ws.category_id || ''}"
        onclick="selectWorkspace(${ws.id})">
     <span id="activity-ws-${ws.id}" class="activity-dot"></span>
     <div class="ws-sidebar-info">
@@ -440,7 +676,42 @@ function renderWsItem(ws) {
   </div>`;
 }
 
-function renderCategorySection(cat, workspaces) {
+function renderMachine(machine) {
+  const workspaces = _workspaces.filter(ws => ws._machineId === machine.id);
+  const categories = _categories.filter(cat => cat._machineId === machine.id);
+  const collapsed = _collapsedMachineKeys.has(machineCollapseKey(machine));
+  const arrow = collapsed ? '▶' : '▼';
+  const status = machine.status === 'offline' ? '<span class="ws-machine-status offline">offline</span>' : '';
+  const remove = machine.base
+    ? `<button class="ws-machine-remove" title="Remove machine" onclick="event.stopPropagation(); removeMachine('${machine.id}')">×</button>`
+    : '';
+  const header = `<div class="ws-machine-header" onclick="toggleMachineCollapsed('${escAttr(machine.id)}')"
+      title="${collapsed ? 'Expand' : 'Minimize'} ${esc(machine.name)}">
+    <span class="ws-machine-arrow">${arrow}</span>
+    <span class="ws-machine-name">${esc(machine.name)}</span>${status}
+    <button class="ws-machine-add" title="New workspace on ${esc(machine.name)}" onclick="event.stopPropagation(); newWorkspace(null, '${machine.id}')">+W</button>
+    <button class="ws-machine-add" title="New category on ${esc(machine.name)}" onclick="event.stopPropagation(); addCategory('${machine.id}')">+C</button>
+    ${remove}
+  </div>`;
+  if (collapsed) return header;
+  if (machine.status === 'offline' && workspaces.length === 0) {
+    return header + '<div class="ws-machine-empty">Tunnel unavailable</div>';
+  }
+  const grouped = {};
+  for (const ws of workspaces) {
+    const key = ws.category_id || null;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(ws);
+  }
+  let body = '';
+  for (const cat of categories) {
+    body += renderCategorySection(cat, grouped[cat.id] || [], machine);
+  }
+  body += renderCategorySection(null, grouped[null] || [], machine);
+  return header + body;
+}
+
+function renderCategorySection(cat, workspaces, machine) {
   const isUncat = cat === null;
   const catId = isUncat ? '' : cat.id;
   const name = isUncat ? 'Uncategorized' : cat.name;
@@ -454,8 +725,9 @@ function renderCategorySection(cat, workspaces) {
       <div class="ws-popover-item" onclick="event.stopPropagation(); renameCategory(${catId})">Rename</div>
       <div class="ws-popover-item danger" onclick="event.stopPropagation(); deleteCategory(${catId})">Delete</div>
     </div>`;
-  return `<div class="ws-category" data-cat-id="${catId}">
-    <div class="ws-category-header" draggable="${!isUncat}" data-cat-id="${catId}"
+  const draggable = !isUncat && !machine.base;
+  return `<div class="ws-category" data-cat-id="${catId}" data-machine-id="${esc(machine.id)}">
+    <div class="ws-category-header" draggable="${draggable}" data-cat-id="${catId}"
          onclick="${isUncat ? '' : 'toggleCategory(' + catId + ')'}">
       <span class="ws-category-arrow">${arrow}</span>
       <span class="ws-category-name" ondblclick="event.stopPropagation(); ${isUncat ? '' : 'renameCategory(' + catId + ')'}">${esc(name)}</span>
@@ -486,23 +758,11 @@ function renderWorkspaces() {
       + '</div>';
   } else {
     const toolbar = '<div class="ws-toolbar">'
-      + '<div class="ws-new-btn" onclick="newWorkspace()">+ Workspace</div>'
-      + '<div class="ws-new-btn" onclick="addCategory()">+ Category</div>'
+      + '<div class="ws-new-btn" onclick="addMachine()">+ Machine</div>'
       + '<div class="ws-collapse-btn" onclick="event.stopPropagation(); toggleSidebar()" title="Hide workspaces">◀</div>'
       + '</div>';
-
-    const grouped = {};
-    for (const ws of _workspaces) {
-      const key = ws.category_id || null;
-      if (!grouped[key]) grouped[key] = [];
-      grouped[key].push(ws);
-    }
-
     html = toolbar;
-    for (const cat of _categories) {
-      html += renderCategorySection(cat, grouped[cat.id] || []);
-    }
-    html += renderCategorySection(null, grouped[null] || []);
+    for (const machine of _machines) html += renderMachine(machine);
   }
 
   const tmp = document.createElement('div');
@@ -586,13 +846,15 @@ function parseCatId(str) {
 function handleWsDrop(el, inLowerHalf) {
   const wsId = _dragId;
   const ws = _workspaces.find(w => w.id === wsId);
-  if (!ws) return;
+  if (!ws || routeOf(wsId).base) return;
+  const targetMachine = el.closest('.ws-category')?.dataset.machineId;
+  if (targetMachine && targetMachine !== ws._machineId) return;
 
   if (el.classList.contains('ws-sidebar-item')) {
     const targetId = parseInt(el.dataset.wsId);
     if (targetId === wsId) return;
     const targetW = _workspaces.find(w => w.id === targetId);
-    if (!targetW) return;
+    if (!targetW || routeOf(targetId).base) return;
     const container = el.closest('.ws-category-items');
     const targetCatId = container ? parseCatId(container.dataset.catId) : (targetW.category_id || null);
 
@@ -634,6 +896,9 @@ function handleWsDrop(el, inLowerHalf) {
 
 function handleCatDrop(el, inLowerHalf) {
   const catId = _dragId;
+  const sourceCat = _categories.find(c => c.id === catId);
+  const targetMachine = el.closest('.ws-category')?.dataset.machineId;
+  if (!sourceCat || routeOf(catId).base || targetMachine !== sourceCat._machineId) return;
   const targetHeader = el.closest('.ws-category-header');
   if (!targetHeader) return;
   const targetCatIdStr = targetHeader.dataset.catId;
@@ -722,12 +987,19 @@ async function addShellPane(wsId) {
   const ws = _workspaces.find(w => w.id === wsId);
   const shellCount = ws ? ws.tabs.filter(t => t.tab_type === 'shell').length : 0;
   const name = 'Shell ' + (shellCount + 1);
-  const res = await fetch(`/api/workspaces/${wsId}/tabs`, {
+  const res = await fetch(wsApi(wsId, '/tabs'), {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name, tab_type: 'shell'}),
   });
-  const tab = await res.json();
+  const sourceTab = await res.json();
+  const machine = routeOf(wsId).machine;
+  const tab = {
+    ...sourceTab,
+    _realId: sourceTab.id,
+    _machineId: machine.id,
+    id: clientIdFor(machine, 'tab', sourceTab.id),
+  };
   if (ws) ws.tabs.push(tab);
   _selectedWsSubtab = 'tab-' + tab.id;
   renderSelectedWorkspace();
@@ -788,7 +1060,7 @@ function flushNotesSave(wsId) {
   }
   const value = entry.textarea.value;
   if (value === entry.lastSavedValue) return;
-  fetch(`/api/workspaces/${wsId}/notes`, {
+  fetch(wsApi(wsId, '/notes'), {
     method: 'PUT',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({notes: value}),
@@ -878,7 +1150,7 @@ async function closeTab(tabId) {
   console.log('[closeTab]', tabId, 'called from:', new Error().stack);
   disposeTerminal(tabId);
   _exitedTabs.delete(tabId);
-  await fetch(`/api/tabs/${tabId}`, {method: 'DELETE'});
+  await fetch(tabApi(tabId), {method: 'DELETE'});
   const ws = _workspaces.find(w => w.id === _selectedWsId);
   if (ws) ws.tabs = ws.tabs.filter(t => t.id !== tabId);
   if (_selectedWsSubtab === 'tab-' + tabId) {
@@ -973,7 +1245,7 @@ function handleAgentDispatchOsc(payload, opts) {
     if (!ws || ws.name === value) return;
     ws.name = value;
     renderWorkspaces();
-    fetch(`/api/workspaces/${wsId}`, {
+    fetch(wsApi(wsId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: value}),
@@ -989,7 +1261,7 @@ function handleAgentDispatchOsc(payload, opts) {
     if (!tab || tab.name === value) return;
     tab.name = value;
     renderSelectedWorkspace();
-    fetch(`/api/tabs/${tabId}`, {
+    fetch(tabApi(tabId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: value}),
@@ -1006,7 +1278,7 @@ async function renameWorkspace(wsId) {
   ], async (values) => {
     const name = values['ws-name'];
     if (!name) return;
-    await fetch(`/api/workspaces/${wsId}`, {
+    await fetch(wsApi(wsId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name}),
@@ -1025,7 +1297,7 @@ async function renameTab(tabId) {
   ], async (values) => {
     const name = values['tab-name'];
     if (!name) return;
-    await fetch(`/api/tabs/${tabId}`, {
+    await fetch(tabApi(tabId), {
       method: 'PUT',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name}),
@@ -1181,10 +1453,10 @@ function initTabDragDrop() {
     toIdx = ws.tabs.findIndex(t => t.id === targetTabId);
     if (inRightHalf) toIdx++;
     ws.tabs.splice(toIdx, 0, moved);
-    fetch(`/api/workspaces/${ws.id}/tabs/reorder`, {
+    fetch(wsApi(ws.id, '/tabs/reorder'), {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ ids: ws.tabs.map(t => t.id) }),
+      body: JSON.stringify({ ids: ws.tabs.map(t => routeOf(t.id).real) }),
     });
     renderSelectedWorkspace();
   });
@@ -1273,7 +1545,8 @@ function initTerminal(key, paneEl, opts) {
   term.parser.registerOscHandler(7, (payload) => {
     const abs = parseOsc7(payload);
     if (abs == null) return false;
-    entry.paneCwd = relativizeHome(abs, _home);
+    const machine = opts.workspaceId != null ? routeOf(opts.workspaceId).machine : _machines[0];
+    entry.paneCwd = relativizeHome(abs, machine.home || '');
     if (entry.container.closest('#ws-active-pane')) renderTitleBar(entry);
     return true;
   });
@@ -1300,15 +1573,20 @@ function initTerminal(key, paneEl, opts) {
   _tabTerminals[key] = entry;
 
   function connectWs() {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const workspaceRoute = opts.workspaceId != null ? routeOf(opts.workspaceId) : routeOf(key);
+    const tabClientId = opts.tabId ? parseInt(String(opts.tabId).replace('tab-', '')) : null;
+    const tabRoute = tabClientId != null ? routeOf(tabClientId) : null;
     const params = new URLSearchParams();
     if (opts.cwd) params.set('cwd', opts.cwd);
     if (opts.cmd) params.set('cmd', opts.cmd);
-    if (opts.workspaceId != null) params.set('workspace_id', opts.workspaceId);
-    if (opts.tabId) params.set('tab_id', opts.tabId);
+    if (opts.workspaceId != null) params.set('workspace_id', workspaceRoute.real);
+    if (tabRoute) params.set('tab_id', 'tab-' + tabRoute.real);
     params.set('cols', term.cols);
     params.set('rows', term.rows);
-    const wsUrl = proto + '//' + location.host + '/api/terminal' + '?' + params.toString();
+    const endpoint = new URL('/api/terminal', workspaceRoute.base || location.origin);
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    endpoint.search = params.toString();
+    const wsUrl = endpoint.toString();
     const ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
     entry.ws = ws;
@@ -1347,7 +1625,7 @@ function initTerminal(key, paneEl, opts) {
       if (typeof e.data === 'string' && e.data.startsWith('{"type":"pane_cwd"')) {
         try {
           const msg = JSON.parse(e.data);
-          entry.paneCwd = relativizeHome(msg.cwd || '', _home);
+          entry.paneCwd = relativizeHome(msg.cwd || '', workspaceRoute.machine.home || '');
           if (entry.container.closest('#ws-active-pane')) renderTitleBar(entry);
         } catch {}
         return;
@@ -1586,7 +1864,7 @@ function closeTermContextMenu() {
 
 async function recreateTab(tabId) {
   disposeTerminal(tabId);
-  const res = await fetch(`/api/tabs/${tabId}/recreate`, {method: 'POST'});
+  const res = await fetch(tabApi(tabId, '/recreate'), {method: 'POST'});
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     alert('Recreate failed: ' + (err.error || res.statusText));
@@ -1600,7 +1878,7 @@ async function recreateWorkspace(id) {
   if (ws) {
     for (const tab of ws.tabs) disposeTerminal(tab.id);
   }
-  const res = await fetch(`/api/workspaces/${id}/recreate`, {method: 'POST'});
+  const res = await fetch(wsApi(id, '/recreate'), {method: 'POST'});
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     alert('Recreate failed: ' + (err.error || res.statusText));
@@ -1618,7 +1896,7 @@ async function destroyWorkspace(id) {
   _workspaces = _workspaces.filter(w => w.id !== id);
   if (_selectedWsId === id) _selectedWsId = null;
   renderWorkspaces();
-  await fetch(`/api/workspaces/${id}`, {method: 'DELETE'});
+  await fetch(wsApi(id), {method: 'DELETE'});
   fetchWorkspaces();
 }
 
@@ -1869,6 +2147,7 @@ function closeDialog() {
 
 /* Browser-only initialization */
 if (typeof document !== 'undefined') {
+  loadMachinesFromStorage();
   document.addEventListener('click', closeAllWsMenus);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeAllWsMenus();
@@ -1915,5 +2194,8 @@ if (typeof module !== 'undefined' && module.exports) {
     findIssueRefs,
     relativizeHome,
     parseOsc7,
+    isLoopbackHostname,
+    normalizePeer,
+    peerFromPort,
   };
 }

@@ -2,6 +2,35 @@ const { test, describe, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const app = require('./app.js');
 
+describe('tunneled peer URLs', () => {
+  test('builds a localhost peer from a laptop port', () => {
+    assert.deepEqual(
+      app.peerFromPort('machine-b', '8916'),
+      {name: 'machine-b', url: 'http://localhost:8916'},
+    );
+  });
+
+  test('rejects invalid laptop ports', () => {
+    for (const port of ['', 'abc', '0', '65536', '8916/path']) {
+      assert.equal(app.peerFromPort('machine-b', port), null);
+    }
+  });
+
+  test('accepts and normalizes literal laptop loopback URLs', () => {
+    assert.deepEqual(
+      app.normalizePeer({name: 'machine-b', url: 'http://localhost:18916/path'}),
+      {name: 'machine-b', url: 'http://localhost:18916'},
+    );
+    assert.equal(app.isLoopbackHostname('127.0.0.42'), true);
+    assert.equal(app.isLoopbackHostname('::1'), true);
+  });
+
+  test('rejects non-loopback and non-http peer URLs', () => {
+    assert.equal(app.normalizePeer({name: 'bad', url: 'https://attacker.example'}), null);
+    assert.equal(app.normalizePeer({name: 'bad', url: 'ws://localhost:18916'}), null);
+  });
+});
+
 describe('getTerminalConfig', () => {
   test('scrollback is large enough for meaningful history', () => {
     assert.ok(app.getTerminalConfig().scrollback >= 10000);
@@ -354,5 +383,3 @@ describe('findIssueRefs', () => {
     assert.equal(refs.length, 1);
   });
 });
-
-
