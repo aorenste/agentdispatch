@@ -415,6 +415,7 @@ class ConnectionManager:
             for line in plain.replace("\r\n", "\n").replace("\r", "\n").splitlines()
             if line.strip()
             and "__AGENTDISPATCH_EXIT_STATUS__=" not in line
+            and "skip-dotsync-size-warning" not in line
         ]
         return lines[-1] if lines else ""
 

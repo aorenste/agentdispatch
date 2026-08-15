@@ -305,6 +305,26 @@ class ManagerTests(unittest.TestCase):
             "agentdispatch: cannot bind 127.0.0.1:8915",
         )
 
+    def test_terminal_message_ignores_dotsync_size_warning(self):
+        connection = ad_ssh.Connection("devomni", "devomni.example.com", 8917)
+        manager = ad_ssh.ConnectionManager(["x2ssh", "-et"], Path("/tmp"))
+        manager.processes[connection.host.casefold()] = ad_ssh.ManagedProcess(
+            connection=connection,
+            process=FakeProcess(),
+            log_path=Path("/tmp/devomni.log"),
+            started_at=0,
+            terminal_output=(
+                "AgentDispatch is not installed at /home/a/bin/agentdispatch\r\n"
+                ":: To silence this warning, run "
+                "'touch ~/.config/skip-dotsync-size-warning'.\r\n"
+            ),
+        )
+
+        self.assertEqual(
+            manager.terminal_message(connection),
+            "AgentDispatch is not installed at /home/a/bin/agentdispatch",
+        )
+
     def test_status_rechecks_readiness_without_a_two_second_lag(self):
         connection = ad_ssh.Connection("a", "a.example.com", 18915)
         process = FakeProcess()
